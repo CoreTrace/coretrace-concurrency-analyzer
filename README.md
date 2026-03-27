@@ -6,6 +6,21 @@ Bootstrap CoreTrace tool aligned with `coretrace-stack-analyzer` conventions:
 - Public C++ API + CLI wrapper to compile source files to in-memory LLVM IR (`ll` or `bc`).
 - Consumer example in `extern-project/`.
 
+## Current Scope
+
+This repository currently provides a compilation bootstrap (source -> LLVM IR in memory).
+It does not yet emit concurrency diagnostics. The analyzer logic will be layered on top of the
+`llvm::Module` produced by the API.
+
+## Backend Dependency
+
+The project intentionally depends on `compilerlib` (`coretrace-compiler`) as the compilation
+backend. This coupling is explicit in `InMemoryIRCompiler` and keeps the architecture simple:
+
+- CLI/consumer layer: parse options, render diagnostics/errors.
+- Compilation service: normalize compile args, invoke `compilerlib`, parse LLVM IR/bitcode.
+- Future analyzer layer: consume `llvm::Module` independently from CLI.
+
 ## Build (LLVM/Clang 20)
 
 ```bash
@@ -65,7 +80,17 @@ cmake --build extern-project/build-llvm20 -j4
 
 Use `formatCompileError(result.error)` to render a stable CLI/log-friendly message.
 
+## Test Plan
+
+Targeted CLI/integration tests live under `test/`.
+
+```bash
+python3 test/test_analyzer.py
+```
+
 ## Code style (clang-format)
 
 - Format: `./scripts/format.sh`
 - Check: `./scripts/format-check.sh`
+- Naming/style conventions: see `CONTRIBUTING.md`
+- Fixture corpora under `tests/concurrency/` and `test/fixtures/` are excluded from clang-format checks.

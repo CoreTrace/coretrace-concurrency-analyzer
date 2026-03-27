@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -33,17 +34,15 @@ namespace ctrace::concurrency
 
         void removeOutputPathArgs(std::vector<std::string>& args)
         {
-            std::vector<std::string> filtered;
-            filtered.reserve(args.size());
-
-            for (std::size_t i = 0; i < args.size(); ++i)
+            std::size_t writeIndex = 0;
+            for (std::size_t readIndex = 0; readIndex < args.size(); ++readIndex)
             {
-                const std::string& arg = args[i];
+                std::string& arg = args[readIndex];
 
                 if (arg == "-o")
                 {
-                    if (i + 1 < args.size())
-                        ++i;
+                    if (readIndex + 1 < args.size())
+                        ++readIndex;
                     continue;
                 }
                 if (arg.rfind("-o=", 0) == 0)
@@ -51,10 +50,12 @@ namespace ctrace::concurrency
                 if (arg.size() > 2 && arg.rfind("-o", 0) == 0)
                     continue;
 
-                filtered.push_back(arg);
+                if (writeIndex != readIndex)
+                    args[writeIndex] = std::move(arg);
+                ++writeIndex;
             }
 
-            args.swap(filtered);
+            args.resize(writeIndex);
         }
 
         std::vector<std::string> buildLLCompileArgs(const CompileRequest& request)
@@ -82,12 +83,26 @@ namespace ctrace::concurrency
             return args;
         }
 
-        class ScopedFileCleanup
+        class TemporaryBitcodeFile
         {
           public:
-            explicit ScopedFileCleanup(std::filesystem::path path) : path_(std::move(path)) {}
+            static std::optional<TemporaryBitcodeFile> create(CompileError& error)
+            {
+                llvm::SmallString<256> tempPath;
+                if (std::error_code ec = llvm::sys::fs::createTemporaryFile(
+                        "coretrace-concurrency-ir", "bc", tempPath))
+                {
+                    error.code = make_error_code(CompileErrc::TemporaryBitcodeFileCreationFailed);
+                    error.message = ec.message();
+                    return std::nullopt;
+                }
+                return TemporaryBitcodeFile(std::filesystem::path(std::string(tempPath.str())));
+            }
 
-            ~ScopedFileCleanup()
+            TemporaryBitcodeFile(TemporaryBitcodeFile&&) noexcept = default;
+            TemporaryBitcodeFile& operator=(TemporaryBitcodeFile&&) noexcept = default;
+
+            ~TemporaryBitcodeFile()
             {
                 if (path_.empty())
                     return;
@@ -95,10 +110,17 @@ namespace ctrace::concurrency
                 std::filesystem::remove(path_, ec);
             }
 
-            ScopedFileCleanup(const ScopedFileCleanup&) = delete;
-            ScopedFileCleanup& operator=(const ScopedFileCleanup&) = delete;
+            TemporaryBitcodeFile(const TemporaryBitcodeFile&) = delete;
+            TemporaryBitcodeFile& operator=(const TemporaryBitcodeFile&) = delete;
+
+            const std::filesystem::path& path() const noexcept
+            {
+                return path_;
+            }
 
           private:
+            explicit TemporaryBitcodeFile(std::filesystem::path path) : path_(std::move(path)) {}
+
             std::filesystem::path path_;
         };
 
@@ -106,21 +128,6 @@ namespace ctrace::concurrency
         {
             result.error.code = make_error_code(code);
             result.error.message = std::move(message);
-        }
-
-        bool makeTempBitcodePath(std::filesystem::path& outputPath, CompileError& error)
-        {
-            llvm::SmallString<256> tempPath;
-            if (std::error_code ec =
-                    llvm::sys::fs::createTemporaryFile("coretrace-concurrency-ir", "bc", tempPath))
-            {
-                error.code = make_error_code(CompileErrc::TemporaryBitcodeFileCreationFailed);
-                error.message = ec.message();
-                return false;
-            }
-
-            outputPath = std::filesystem::path(std::string(tempPath.str()));
-            return true;
         }
 
         bool readBinaryFile(const std::filesystem::path& path, std::string& out)
@@ -263,14 +270,12 @@ namespace ctrace::concurrency
             return result;
         }
 
-        std::filesystem::path bitcodeOutputPath;
-        if (!makeTempBitcodePath(bitcodeOutputPath, result.error))
-        {
+        const std::optional<TemporaryBitcodeFile> bitcodeFile =
+            TemporaryBitcodeFile::create(result.error);
+        if (!bitcodeFile)
             return result;
-        }
-        const ScopedFileCleanup bitcodeCleanup(bitcodeOutputPath);
 
-        const std::vector<std::string> args = buildBCCompileArgs(request, bitcodeOutputPath);
+        const std::vector<std::string> args = buildBCCompileArgs(request, bitcodeFile->path());
         compilerlib::CompileResult raw =
             compilerlib::compile(args, compilerlib::OutputMode::ToFile, request.instrument);
         result.diagnostics = raw.diagnostics;
@@ -282,15 +287,15 @@ namespace ctrace::concurrency
             return result;
         }
 
-        if (!readBinaryFile(bitcodeOutputPath, result.llvmBitcode) || result.llvmBitcode.empty())
+        if (!readBinaryFile(bitcodeFile->path(), result.llvmBitcode) || result.llvmBitcode.empty())
         {
-            setCompileError(result, CompileErrc::BitcodeReadFailed, bitcodeOutputPath.string());
+            setCompileError(result, CompileErrc::BitcodeReadFailed, bitcodeFile->path().string());
             return result;
         }
 
-        auto buffer = llvm::MemoryBuffer::getMemBufferCopy(
+        const llvm::MemoryBufferRef bufferRef(
             llvm::StringRef(result.llvmBitcode.data(), result.llvmBitcode.size()), "in_memory_bc");
-        auto parsedBitcode = llvm::parseBitcodeFile(buffer->getMemBufferRef(), context);
+        auto parsedBitcode = llvm::parseBitcodeFile(bufferRef, context);
         if (!parsedBitcode)
         {
             setCompileError(result, CompileErrc::BitcodeParseFailed,

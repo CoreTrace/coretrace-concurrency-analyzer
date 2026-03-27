@@ -24,6 +24,8 @@
   - Risque théorique si exception avant setup complet du cleanup RAII.
 - Recommandation:
   - Maintenir le RAII mais renforcer la création/gestion du fichier temporaire pour couvrir les cas limites.
+- Statut: ✅ Fait
+  - Introduction d'un objet RAII dédié `TemporaryBitcodeFile` avec factory `create(...)` pour encapsuler création atomique + cleanup.
 
 ### 3. Vérification des opérations `seekg`/`tellg`
 - Fichier: `src/coretrace_concurrency_analyzer.cpp`
@@ -41,6 +43,8 @@
   - Vérifier la cohérence complète avec `.clang-format`.
 - Recommandation:
   - Continuer à faire passer `./scripts/format.sh` et `./scripts/format-check.sh`.
+- Statut: ✅ Fait
+  - Scripts de format/check maintenus et périmètre clarifié (exclusion des fixtures intentionnellement non formatés).
 
 ### 2. Version CMake root vs extern-project
 - Fichiers:
@@ -58,6 +62,8 @@
   - Mix attendu entre snake_case (fichiers), PascalCase (classes), camelCase (fonctions).
 - Recommandation:
   - Documenter la convention dans la doc contribution/style.
+- Statut: ✅ Fait
+  - Convention documentée dans `CONTRIBUTING.md` et référencée depuis `README.md`.
 
 ## Security Review
 
@@ -97,6 +103,8 @@
   - Copies `std::string` à chaque itération.
 - Recommandation:
   - Évaluer l'usage de `std::string_view` là où pertinent.
+- Statut: ✅ Fait
+  - Parsing CLI migré vers `std::string_view` (CLI principal + consumer externe).
 
 ### 2. Filtrage des args via vecteur intermédiaire
 - Fichier: `src/coretrace_concurrency_analyzer.cpp`
@@ -104,6 +112,8 @@
   - Allocation supplémentaire dans `removeOutputPathArgs`.
 - Recommandation:
   - Optimiser seulement si ce chemin devient hot path.
+- Statut: ✅ Fait
+  - `removeOutputPathArgs` réécrit en compaction in-place (suppression du vecteur intermédiaire).
 
 ### 3. Chargement complet du bitcode en mémoire
 - Fichier: `src/coretrace_concurrency_analyzer.cpp`
@@ -111,6 +121,8 @@
   - Impact potentiel sur de très gros fichiers.
 - Recommandation:
   - Conserver pour l'instant (cohérent avec un mode in-memory), envisager mmap/stream si besoin futur.
+- Statut: ✅ Fait (scope actuel)
+  - Contrainte in-memory conservée par design; copie intermédiaire supprimée au parse bitcode (`parseBitcodeFile` sur `MemoryBufferRef`).
 
 ## Architecture / Design Patterns
 
@@ -130,6 +142,8 @@
 2. Couplage à `compilerlib`
 - Couplage acceptable pour le scope actuel.
 - Documenter la dépendance et son rôle dans l'API publique.
+- Statut: ✅ Fait
+  - Dépendance et découpage d'architecture documentés dans `README.md` ("Backend Dependency", "Current Scope").
 
 3. `toString(IRFormat)` fallback silencieux
 - Fichier: `src/coretrace_concurrency_analyzer.cpp`
@@ -155,10 +169,14 @@
 - Parsing arguments.
 - Cas d'erreur I/O.
 - Échecs parse IR/bitcode.
+- Statut: ✅ Fait
+  - Ajout d'une suite d'intégration CLI autonome (`test/test_analyzer.py`) couvrant parsing/options, succès LL/BC et erreurs I/O.
 
 2. Étoffer la documentation fonctionnelle
 - Clarifier le rôle actuel: bootstrap compilation IR in-memory.
 - Préciser ce qui relève (ou non) d'une analyse de concurrence à ce stade.
+- Statut: ✅ Fait
+  - Scope fonctionnel clarifié dans `README.md` ("Current Scope").
 
 3. Ajouter `[[nodiscard]]`
 - Candidat: méthode `compile(...)` pour éviter l'oubli du résultat.
@@ -179,5 +197,5 @@
   - ✅ Uniformisation CLI (traité).
   - ✅ Structuration des erreurs (traité).
 - Priorité basse:
-  - Micro-optimisations perf.
-  - Nettoyage stylistique/documentation naming.
+  - ✅ Micro-optimisations perf ciblées (traité).
+  - ✅ Nettoyage stylistique/documentation naming (traité).
