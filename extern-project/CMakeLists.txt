@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.16)
+cmake_minimum_required(VERSION 3.28)
 project(consumer_example CXX)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -6,17 +6,29 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-FetchContent_Declare(
-  your_tool_name
-  GIT_REPOSITORY https://github.com/CoreTrace/your_tool_name.git
-  GIT_TAG main
-)
+# Prefer the local parent checkout when this example is built from the
+# repository tree; fallback to GitHub when used standalone.
+set(CONCURRENCY_ANALYZER_LOCAL_SOURCE "${CMAKE_CURRENT_LIST_DIR}/..")
+if(EXISTS "${CONCURRENCY_ANALYZER_LOCAL_SOURCE}/CMakeLists.txt")
+  message(STATUS "Using local concurrency analyzer source: ${CONCURRENCY_ANALYZER_LOCAL_SOURCE}")
+  FetchContent_Declare(
+    concurrency_analyzer
+    SOURCE_DIR "${CONCURRENCY_ANALYZER_LOCAL_SOURCE}"
+  )
+else()
+  message(STATUS "Using remote concurrency analyzer source from GitHub")
+  FetchContent_Declare(
+    concurrency_analyzer
+    GIT_REPOSITORY https://github.com/CoreTrace/coretrace-concurrency-analyzer.git
+    GIT_TAG main
+  )
+endif()
 
-FetchContent_MakeAvailable(your_tool_name)
+FetchContent_MakeAvailable(concurrency_analyzer)
 
-add_executable(sa_consumer src/main.cpp)
+add_executable(concurrency_consumer src/main.cpp)
 
-target_link_libraries(sa_consumer
+target_link_libraries(concurrency_consumer
     PRIVATE
-        coretrace::your_tool_name_lib
+        coretrace::coretrace_concurrency_analyzer_lib
 )
