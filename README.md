@@ -29,7 +29,17 @@ Options:
 - `--ir-format=ll|bc`
 - `--compile-arg=<arg>` (repeatable)
 - `--instrument`
+- `--verbose`
 - `--` to forward all trailing compiler args
+
+### Trust model for `--compile-arg` / `extraCompileArgs`
+
+`extraCompileArgs` are forwarded as raw compiler arguments to `compilerlib::compile(...)`
+without sanitization. They are not shell-expanded by this tool, but they still influence
+compilation behavior and file access done by the compiler toolchain.
+
+Use this API/CLI only with trusted inputs, or implement an explicit allowlist in front of it
+for untrusted callers.
 
 ## External consumer example
 
@@ -41,9 +51,19 @@ cmake -S extern-project -B extern-project/build-llvm20 \
   -DCLANG_RESOURCE_DIR=/opt/homebrew/opt/llvm@20/lib/clang/20
 
 cmake --build extern-project/build-llvm20 -j4
-./extern-project/build-llvm20/concurrency_consumer /tmp/sample.c ll
-./extern-project/build-llvm20/concurrency_consumer /tmp/sample.c bc
+./extern-project/build-llvm20/concurrency_consumer /tmp/sample.c --ir-format=ll
+./extern-project/build-llvm20/concurrency_consumer /tmp/sample.c --ir-format=bc
 ```
+
+`concurrency_consumer` keeps backward compatibility with the legacy positional format (`ll|bc`) as second argument.
+
+## Error model (library API)
+
+`CompileResult` now exposes a structured `CompileError`:
+- `error.code`: typed `std::error_code` backed by `CompileErrc` (`coretrace_concurrency_error.hpp`)
+- `error.message`: contextual details (file path, parser diagnostics, backend details, ...)
+
+Use `formatCompileError(result.error)` to render a stable CLI/log-friendly message.
 
 ## Code style (clang-format)
 

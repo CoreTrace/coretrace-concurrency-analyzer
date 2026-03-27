@@ -3,17 +3,19 @@
 #include <compilerlib/compiler.h>
 
 #include <llvm/Bitcode/BitcodeReader.h>
+#include <llvm/ADT/SmallString.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/SourceMgr.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
-#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -100,15 +102,25 @@ namespace ctrace::concurrency
             std::filesystem::path path_;
         };
 
-        std::filesystem::path makeTempBitcodePath()
+        void setCompileError(CompileResult& result, CompileErrc code, std::string message = {})
         {
-            std::error_code ec;
-            std::filesystem::path tempDir = std::filesystem::temp_directory_path(ec);
-            if (ec)
-                tempDir = std::filesystem::path(".");
+            result.error.code = make_error_code(code);
+            result.error.message = std::move(message);
+        }
 
-            const auto nonce = std::chrono::high_resolution_clock::now().time_since_epoch().count();
-            return tempDir / ("coretrace-concurrency-ir-" + std::to_string(nonce) + ".bc");
+        bool makeTempBitcodePath(std::filesystem::path& outputPath, CompileError& error)
+        {
+            llvm::SmallString<256> tempPath;
+            if (std::error_code ec =
+                    llvm::sys::fs::createTemporaryFile("coretrace-concurrency-ir", "bc", tempPath))
+            {
+                error.code = make_error_code(CompileErrc::TemporaryBitcodeFileCreationFailed);
+                error.message = ec.message();
+                return false;
+            }
+
+            outputPath = std::filesystem::path(std::string(tempPath.str()));
+            return true;
         }
 
         bool readBinaryFile(const std::filesystem::path& path, std::string& out)
@@ -119,28 +131,84 @@ namespace ctrace::concurrency
                 return false;
 
             in.seekg(0, std::ios::end);
-            const std::streampos endPos = in.tellg();
-            if (endPos < 0)
+            if (!in)
                 return false;
-            out.resize(static_cast<std::size_t>(endPos));
+
+            const std::streampos endPos = in.tellg();
+            if (endPos <= 0)
+                return false;
+
+            const std::size_t byteCount = static_cast<std::size_t>(endPos);
+            if (byteCount > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
+            {
+                return false;
+            }
+
+            out.resize(byteCount);
             in.seekg(0, std::ios::beg);
-            if (!out.empty())
-                in.read(out.data(), static_cast<std::streamsize>(out.size()));
-            return in.good() || in.eof();
+            if (!in)
+            {
+                out.clear();
+                return false;
+            }
+
+            const std::streamsize expected = static_cast<std::streamsize>(out.size());
+            in.read(out.data(), expected);
+            if (in.gcount() != expected || in.bad())
+            {
+                out.clear();
+                return false;
+            }
+
+            return true;
+        }
+
+        bool validateInputFile(const std::string& inputFile, CompileError& error)
+        {
+            std::filesystem::path inputPath(inputFile);
+            std::error_code ec;
+
+            if (!std::filesystem::exists(inputPath, ec))
+            {
+                if (ec)
+                {
+                    error.code = make_error_code(CompileErrc::InputFileAccessFailed);
+                    error.message = "'" + inputFile + "': " + ec.message();
+                }
+                else
+                {
+                    error.code = make_error_code(CompileErrc::InputFileDoesNotExist);
+                    error.message = inputFile;
+                }
+                return false;
+            }
+
+            if (!std::filesystem::is_regular_file(inputPath, ec))
+            {
+                if (ec)
+                {
+                    error.code = make_error_code(CompileErrc::InputFileAccessFailed);
+                    error.message = "'" + inputFile + "': " + ec.message();
+                }
+                else
+                {
+                    error.code = make_error_code(CompileErrc::InputFileNotRegular);
+                    error.message = inputFile;
+                }
+                return false;
+            }
+
+            std::ifstream probe(inputPath, std::ios::in | std::ios::binary);
+            if (!probe.good())
+            {
+                error.code = make_error_code(CompileErrc::InputFileNotReadable);
+                error.message = inputFile;
+                return false;
+            }
+
+            return true;
         }
     } // namespace
-
-    const char* toString(IRFormat format)
-    {
-        switch (format)
-        {
-        case IRFormat::LL:
-            return "ll";
-        case IRFormat::BC:
-            return "bc";
-        }
-        return "bc";
-    }
 
     CompileResult InMemoryIRCompiler::compile(const CompileRequest& request,
                                               llvm::LLVMContext& context) const
@@ -149,9 +217,12 @@ namespace ctrace::concurrency
 
         if (request.inputFile.empty())
         {
-            result.error = "Input file is required";
+            setCompileError(result, CompileErrc::InvalidRequest, "input file is required");
             return result;
         }
+
+        if (!validateInputFile(request.inputFile, result.error))
+            return result;
 
         if (request.format == IRFormat::LL)
         {
@@ -162,13 +233,15 @@ namespace ctrace::concurrency
 
             if (!raw.success)
             {
-                result.error = "Compilation failed";
+                setCompileError(result, CompileErrc::BackendCompilationFailed,
+                                "backend failed in ll mode");
                 return result;
             }
 
             if (raw.llvmIR.empty())
             {
-                result.error = "No LLVM IR produced by compilerlib::compile";
+                setCompileError(result, CompileErrc::MissingIROutput,
+                                "compilerlib returned an empty IR payload in ll mode");
                 return result;
             }
 
@@ -182,7 +255,7 @@ namespace ctrace::concurrency
                 std::string message;
                 llvm::raw_string_ostream os(message);
                 diag.print("in_memory_ll", os);
-                result.error = "Failed to parse in-memory LLVM IR:\n" + os.str();
+                setCompileError(result, CompileErrc::IRParseFailed, os.str());
                 return result;
             }
 
@@ -190,7 +263,11 @@ namespace ctrace::concurrency
             return result;
         }
 
-        const std::filesystem::path bitcodeOutputPath = makeTempBitcodePath();
+        std::filesystem::path bitcodeOutputPath;
+        if (!makeTempBitcodePath(bitcodeOutputPath, result.error))
+        {
+            return result;
+        }
         const ScopedFileCleanup bitcodeCleanup(bitcodeOutputPath);
 
         const std::vector<std::string> args = buildBCCompileArgs(request, bitcodeOutputPath);
@@ -200,13 +277,14 @@ namespace ctrace::concurrency
 
         if (!raw.success)
         {
-            result.error = "Compilation failed";
+            setCompileError(result, CompileErrc::BackendCompilationFailed,
+                            "backend failed in bc mode");
             return result;
         }
 
         if (!readBinaryFile(bitcodeOutputPath, result.llvmBitcode) || result.llvmBitcode.empty())
         {
-            result.error = "Bitcode output file is missing or empty";
+            setCompileError(result, CompileErrc::BitcodeReadFailed, bitcodeOutputPath.string());
             return result;
         }
 
@@ -215,8 +293,8 @@ namespace ctrace::concurrency
         auto parsedBitcode = llvm::parseBitcodeFile(buffer->getMemBufferRef(), context);
         if (!parsedBitcode)
         {
-            result.error = "Failed to parse in-memory LLVM bitcode: " +
-                           llvm::toString(parsedBitcode.takeError());
+            setCompileError(result, CompileErrc::BitcodeParseFailed,
+                            llvm::toString(parsedBitcode.takeError()));
             return result;
         }
 

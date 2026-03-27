@@ -1,9 +1,13 @@
 #pragma once
 
+#include "coretrace_concurrency_error.hpp"
+
 #include <llvm/IR/Module.h>
+#include <llvm/Support/ErrorHandling.h>
 
 #include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace llvm
@@ -22,6 +26,8 @@ namespace ctrace::concurrency
     struct CompileRequest
     {
         std::string inputFile;
+        // Forwarded directly to compilerlib (no shell interpolation).
+        // Treat these arguments as trusted input.
         std::vector<std::string> extraCompileArgs;
         IRFormat format = IRFormat::BC;
         bool instrument = false;
@@ -31,7 +37,7 @@ namespace ctrace::concurrency
     {
         bool success = false;
         std::string diagnostics;
-        std::string error;
+        CompileError error;
         std::string llvmIRText;
         std::string llvmBitcode;
         std::unique_ptr<llvm::Module> module;
@@ -40,8 +46,19 @@ namespace ctrace::concurrency
     class InMemoryIRCompiler
     {
       public:
-        CompileResult compile(const CompileRequest& request, llvm::LLVMContext& context) const;
+        [[nodiscard]] CompileResult compile(const CompileRequest& request,
+                                            llvm::LLVMContext& context) const;
     };
 
-    const char* toString(IRFormat format);
+    constexpr std::string_view toString(IRFormat format)
+    {
+        switch (format)
+        {
+        case IRFormat::LL:
+            return "ll";
+        case IRFormat::BC:
+            return "bc";
+        }
+        llvm_unreachable("Unhandled IRFormat");
+    }
 } // namespace ctrace::concurrency

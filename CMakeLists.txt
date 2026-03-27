@@ -29,6 +29,7 @@ option(BUILD_CLI "Build coretrace_concurrency_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" OFF)
 
 set(CONCURRENCY_ANALYZER_SOURCES
+    src/coretrace_concurrency_error.cpp
     src/coretrace_concurrency_analyzer.cpp
 )
 
