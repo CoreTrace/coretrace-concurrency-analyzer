@@ -28,9 +28,8 @@ namespace
 
     std::size_t countToken(const std::vector<std::string>& args, std::string_view token)
     {
-        return static_cast<std::size_t>(
-            std::count_if(args.begin(), args.end(),
-                          [token](const std::string& arg) { return arg == token; }));
+        return static_cast<std::size_t>(std::count_if(
+            args.begin(), args.end(), [token](const std::string& arg) { return arg == token; }));
     }
 
     bool hasToken(const std::vector<std::string>& args, std::string_view token)
@@ -240,23 +239,23 @@ entry:
         request.extraCompileArgs = {"-Wall", request.inputFile, "-S", "-o", "stale_output.bc"};
 
         const std::vector<std::string> llArgs = CompileCommandBuilder::buildLL(request);
-        const bool llOk = assertTrue(countToken(llArgs, request.inputFile) == 1,
-                                     "LL args should include input file only once") &&
-                          assertTrue(hasToken(llArgs, "-emit-llvm"),
-                                     "LL args should include -emit-llvm") &&
-                          assertTrue(hasToken(llArgs, "-S"), "LL args should include -S") &&
-                          assertTrue(hasToken(llArgs, "-g"), "LL args should include -g");
+        const bool llOk =
+            assertTrue(countToken(llArgs, request.inputFile) == 1,
+                       "LL args should include input file only once") &&
+            assertTrue(hasToken(llArgs, "-emit-llvm"), "LL args should include -emit-llvm") &&
+            assertTrue(hasToken(llArgs, "-S"), "LL args should include -S") &&
+            assertTrue(hasToken(llArgs, "-g"), "LL args should include -g");
 
         const std::filesystem::path outputPath = fixturePath("build/test-output.bc");
         const std::vector<std::string> bcArgs = CompileCommandBuilder::buildBC(request, outputPath);
-        const bool bcOk = assertTrue(countToken(bcArgs, request.inputFile) == 1,
-                                     "BC args should include input file only once") &&
-                          assertTrue(hasToken(bcArgs, "-emit-llvm"),
-                                     "BC args should include -emit-llvm") &&
-                          assertTrue(hasToken(bcArgs, "-c"), "BC args should include -c") &&
-                          assertTrue(!hasToken(bcArgs, "-S"), "BC args should not include -S") &&
-                          assertTrue(hasOutputPair(bcArgs, outputPath.string()),
-                                     "BC args should include -o <outputPath>");
+        const bool bcOk =
+            assertTrue(countToken(bcArgs, request.inputFile) == 1,
+                       "BC args should include input file only once") &&
+            assertTrue(hasToken(bcArgs, "-emit-llvm"), "BC args should include -emit-llvm") &&
+            assertTrue(hasToken(bcArgs, "-c"), "BC args should include -c") &&
+            assertTrue(!hasToken(bcArgs, "-S"), "BC args should not include -S") &&
+            assertTrue(hasOutputPair(bcArgs, outputPath.string()),
+                       "BC args should include -o <outputPath>");
 
         return llOk && bcOk;
     }

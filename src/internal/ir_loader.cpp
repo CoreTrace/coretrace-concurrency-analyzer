@@ -25,8 +25,8 @@ namespace ctrace::concurrency::internal
                                                         CompileError& error) const
     {
         const llvm::StringRef irRef(llvmIR.data(), llvmIR.size());
-        auto buffer = llvm::MemoryBuffer::getMemBuffer(
-            llvm::MemoryBufferRef(irRef, "in_memory_ll"), /*RequiresNullTerminator=*/false);
+        auto buffer = llvm::MemoryBuffer::getMemBuffer(llvm::MemoryBufferRef(irRef, "in_memory_ll"),
+                                                       /*RequiresNullTerminator=*/false);
 
         llvm::SMDiagnostic diag;
         std::unique_ptr<llvm::Module> module =
