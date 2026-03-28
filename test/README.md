@@ -1,12 +1,16 @@
 # Test Suite
 
-This directory contains lightweight integration tests for the CLI bootstrap.
+This directory contains integration tests for the CLI bootstrap using the `ctestfw` framework.
 
 Run:
 
 ```bash
 python3 test/test_analyzer.py
 ```
+
+Prerequisite:
+
+- Python environment with `ctestfw` installed.
 
 The script requires a built `coretrace_concurrency_analyzer` binary in either:
 
