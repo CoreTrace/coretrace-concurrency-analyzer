@@ -30,6 +30,10 @@ option(BUILD_SHARED_LIB "Build shared library variant" OFF)
 
 set(CONCURRENCY_ANALYZER_SOURCES
     src/coretrace_concurrency_error.cpp
+    src/internal/compile_command_builder.cpp
+    src/internal/compilation_backend.cpp
+    src/internal/ir_loader.cpp
+    src/internal/temporary_bitcode_file.cpp
     src/coretrace_concurrency_analyzer.cpp
 )
 
@@ -93,6 +97,32 @@ if(BUILD_CLI)
       PRIVATE
         coretrace_concurrency_analyzer_lib
     )
+endif()
+
+if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+  include(CTest)
+  if(BUILD_TESTING)
+    add_executable(coretrace_concurrency_arch_tests
+      tests/architecture/test_architecture.cpp
+    )
+
+    target_include_directories(coretrace_concurrency_arch_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_compile_definitions(coretrace_concurrency_arch_tests
+      PRIVATE
+        CORETRACE_PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+    )
+
+    target_link_libraries(coretrace_concurrency_arch_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_arch_tests COMMAND coretrace_concurrency_arch_tests)
+  endif()
 endif()
 
 # Only add helper targets when building standalone to avoid collisions.
