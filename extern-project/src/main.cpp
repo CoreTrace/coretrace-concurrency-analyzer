@@ -92,7 +92,14 @@ int main(int argc, char** argv)
             continue;
         }
 
-        request.extraCompileArgs.emplace_back(arg);
+        if (!arg.empty() && arg.front() == '-')
+        {
+            std::cerr << "Unknown option: " << std::string(arg) << "\n";
+            return 1;
+        }
+
+        std::cerr << "Unexpected positional argument: " << std::string(arg) << "\n";
+        return 1;
     }
 
     if (verbose)
