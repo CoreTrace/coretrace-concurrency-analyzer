@@ -15,11 +15,17 @@ It does not yet emit concurrency diagnostics. The analyzer logic will be layered
 ## Backend Dependency
 
 The project intentionally depends on `compilerlib` (`coretrace-compiler`) as the compilation
-backend. This coupling is explicit in `InMemoryIRCompiler` and keeps the architecture simple:
+backend, but this dependency is now isolated behind an internal backend interface:
 
 - CLI/consumer layer: parse options, render diagnostics/errors.
-- Compilation service: normalize compile args, invoke `compilerlib`, parse LLVM IR/bitcode.
-- Future analyzer layer: consume `llvm::Module` independently from CLI.
+- `InMemoryIRCompiler` (orchestrator): validate request, choose format (`ll|bc`), map failures.
+- `CompileCommandBuilder`: normalize/construct compile arguments.
+- `ICompilationBackend` / `CompilerLibBackend`: invoke `compilerlib` (memory LL or file BC).
+- `IIRLoader` / `LLVMIRLoader`: parse LLVM payloads (`parseIR`, `parseBitcodeFile`) into `llvm::Module`.
+- Future analyzer layer: consume `llvm::Module` independently from CLI/backend choices.
+
+`InMemoryIRCompiler` keeps the same public `compile(...)` API and now also supports dependency
+injection (backend/loader constructor) for architecture-level tests.
 
 ## Build (LLVM/Clang 20)
 
@@ -76,6 +82,7 @@ cmake --build extern-project/build-llvm20 -j4
 
 `CompileResult` now exposes a structured `CompileError`:
 - `error.code`: typed `std::error_code` backed by `CompileErrc` (`coretrace_concurrency_error.hpp`)
+- `error.phase`: coarse pipeline stage (`validate_input`, `build_command`, `backend_compile`, `ir_parse`)
 - `error.message`: contextual details (file path, parser diagnostics, backend details, ...)
 
 Use `formatCompileError(result.error)` to render a stable CLI/log-friendly message.
