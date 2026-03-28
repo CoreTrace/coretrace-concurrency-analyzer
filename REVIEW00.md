@@ -170,7 +170,7 @@
 - Cas d'erreur I/O.
 - Échecs parse IR/bitcode.
 - Statut: ✅ Fait
-  - Ajout d'une suite d'intégration CLI autonome (`test/test_analyzer.py`) couvrant parsing/options, succès LL/BC et erreurs I/O.
+  - Ajout d'une suite d'intégration CLI via `ctestfw` (`test/test_analyzer.py`) couvrant parsing/options, succès LL/BC et erreurs I/O.
 
 2. Étoffer la documentation fonctionnelle
 - Clarifier le rôle actuel: bootstrap compilation IR in-memory.
