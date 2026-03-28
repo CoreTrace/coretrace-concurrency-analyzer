@@ -7,6 +7,15 @@
 
 namespace ctrace::concurrency
 {
+    enum class CompilePhase
+    {
+        None = 0,
+        ValidateInput,
+        BuildCommand,
+        BackendCompile,
+        IRParse,
+    };
+
     enum class CompileErrc
     {
         Success = 0,
@@ -26,6 +35,7 @@ namespace ctrace::concurrency
     struct CompileError
     {
         std::error_code code{};
+        CompilePhase phase = CompilePhase::None;
         std::string message;
 
         [[nodiscard]] bool hasError() const noexcept
@@ -36,6 +46,7 @@ namespace ctrace::concurrency
 
     [[nodiscard]] const std::error_category& compileErrorCategory() noexcept;
     [[nodiscard]] std::error_code make_error_code(CompileErrc error) noexcept;
+    [[nodiscard]] std::string_view toString(CompilePhase phase) noexcept;
     [[nodiscard]] std::string_view toString(CompileErrc error) noexcept;
     [[nodiscard]] std::string formatCompileError(const CompileError& error);
 } // namespace ctrace::concurrency
