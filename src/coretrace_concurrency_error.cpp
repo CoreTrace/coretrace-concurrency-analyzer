@@ -57,6 +57,24 @@ namespace ctrace::concurrency
         return {static_cast<int>(error), compileErrorCategory()};
     }
 
+    std::string_view toString(CompilePhase phase) noexcept
+    {
+        switch (phase)
+        {
+        case CompilePhase::None:
+            return "none";
+        case CompilePhase::ValidateInput:
+            return "validate_input";
+        case CompilePhase::BuildCommand:
+            return "build_command";
+        case CompilePhase::BackendCompile:
+            return "backend_compile";
+        case CompilePhase::IRParse:
+            return "ir_parse";
+        }
+        return "unknown_phase";
+    }
+
     std::string_view toString(CompileErrc error) noexcept
     {
         switch (error)
@@ -100,7 +118,10 @@ namespace ctrace::concurrency
         else
             codeName = error.code.category().name();
 
-        std::string formatted = codeName + ": " + error.code.message();
+        std::string formatted;
+        if (error.phase != CompilePhase::None)
+            formatted = std::string(toString(error.phase)) + ": ";
+        formatted += codeName + ": " + error.code.message();
         if (!error.message.empty())
             formatted += " (" + error.message + ")";
         return formatted;
