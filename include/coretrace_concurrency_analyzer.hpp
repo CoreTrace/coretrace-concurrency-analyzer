@@ -17,6 +17,12 @@ namespace llvm
 
 namespace ctrace::concurrency
 {
+    namespace internal
+    {
+        class ICompilationBackend;
+        class IIRLoader;
+    } // namespace internal
+
     enum class IRFormat
     {
         LL,
@@ -46,8 +52,16 @@ namespace ctrace::concurrency
     class InMemoryIRCompiler
     {
       public:
+        InMemoryIRCompiler();
+        InMemoryIRCompiler(std::shared_ptr<internal::ICompilationBackend> backend,
+                           std::shared_ptr<internal::IIRLoader> irLoader);
+
         [[nodiscard]] CompileResult compile(const CompileRequest& request,
                                             llvm::LLVMContext& context) const;
+
+      private:
+        std::shared_ptr<internal::ICompilationBackend> backend_;
+        std::shared_ptr<internal::IIRLoader> irLoader_;
     };
 
     constexpr std::string_view toString(IRFormat format)
