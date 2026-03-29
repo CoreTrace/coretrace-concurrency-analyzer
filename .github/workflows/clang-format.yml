@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 name: clang-format
 
 on:
@@ -19,4 +20,4 @@ jobs:
           sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-17 100
 
       - name: Run format-check
-        run: ./scripts/format-check.sh
+        run: bash ./scripts/format-check.sh
