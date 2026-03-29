@@ -4,6 +4,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+CLANG_FORMAT_BIN="${CLANG_FORMAT:-clang-format}"
+
+if ! command -v "${CLANG_FORMAT_BIN}" >/dev/null 2>&1; then
+    echo "ERROR: clang-format binary not found: ${CLANG_FORMAT_BIN}" >&2
+    exit 1
+fi
 
 files=()
 while IFS= read -r -d '' file; do
@@ -26,5 +32,5 @@ if [ "${#files[@]}" -eq 0 ]; then
     exit 0
 fi
 
-echo "Formatting ${#files[@]} files with clang-format (style from ${REPO_ROOT}/.clang-format)..."
-clang-format -i "${files[@]}"
+echo "Formatting ${#files[@]} files with ${CLANG_FORMAT_BIN} (style from ${REPO_ROOT}/.clang-format)..."
+"${CLANG_FORMAT_BIN}" -i "${files[@]}"
