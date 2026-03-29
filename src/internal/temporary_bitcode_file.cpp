@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "temporary_bitcode_file.hpp"
 
 #include <llvm/ADT/SmallString.h>

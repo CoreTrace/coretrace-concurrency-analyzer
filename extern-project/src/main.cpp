@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analyzer.hpp"
 
 #include <llvm/IR/LLVMContext.h>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 #include "compile_command_builder.hpp"
 
 #include <algorithm>

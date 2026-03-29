@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -10,14 +11,14 @@ while IFS= read -r -d '' file; do
 done < <(find "${REPO_ROOT}" \
     \( -path "${REPO_ROOT}/build" \
        -o -path "${REPO_ROOT}/build-llvm20" \
+       -o -path "${REPO_ROOT}/build-coverage" \
        -o -path "${REPO_ROOT}/extern-project" \
        -o -path "${REPO_ROOT}/external" \
        -o -path "${REPO_ROOT}/third_party" \
        -o -path "${REPO_ROOT}/vendor" \
        -o -path "${REPO_ROOT}/.git" \
-       -o -path "${REPO_ROOT}/tests/concurrency" \
-       -o -path "${REPO_ROOT}/test/fixtures" \
-       -o -path "${REPO_ROOT}/test/.work" \) -prune -o \
+       -o -path "${REPO_ROOT}/tests/fixtures" \
+       -o -path "${REPO_ROOT}/tests/integration/cli/.work" \) -prune -o \
     -type f \( -name '*.c' -o -name '*.cc' -o -name '*.cpp' -o -name '*.cxx' -o -name '*.h' -o -name '*.hh' -o -name '*.hpp' -o -name '*.hxx' \) -print0)
 
 if [ "${#files[@]}" -eq 0 ]; then

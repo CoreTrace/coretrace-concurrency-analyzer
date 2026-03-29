@@ -89,10 +89,16 @@ Use `formatCompileError(result.error)` to render a stable CLI/log-friendly messa
 
 ## Test Plan
 
-Targeted CLI/integration tests live under `test/`.
+Run the C++ test suite (unit + CLI integration) with CTest:
 
 ```bash
-python3 test/test_analyzer.py
+ctest --test-dir build --output-on-failure
+```
+
+Optional Python integration tests (requires `ctestfw`):
+
+```bash
+python3 tests/integration/cli/test_analyzer.py
 ```
 
 ## Code style (clang-format)
@@ -100,4 +106,9 @@ python3 test/test_analyzer.py
 - Format: `./scripts/format.sh`
 - Check: `./scripts/format-check.sh`
 - Naming/style conventions: see `CONTRIBUTING.md`
-- Fixture corpora under `tests/concurrency/` and `test/fixtures/` are excluded from clang-format checks.
+- Fixture corpora under `tests/fixtures/` are excluded from clang-format checks.
+
+## License
+
+This project is licensed under the Apache License 2.0.
+See [LICENSE](LICENSE) and [NOTICE](NOTICE).

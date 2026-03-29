@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.21)
 project(coretrace_concurrency_analyzer)
 
@@ -102,8 +103,13 @@ endif()
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
   include(CTest)
   if(BUILD_TESTING)
+    set(CORETRACE_TEST_COMMON_DEFINITIONS
+      CORETRACE_PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+      CORETRACE_PROJECT_BINARY_DIR="${CMAKE_CURRENT_BINARY_DIR}"
+    )
+
     add_executable(coretrace_concurrency_arch_tests
-      tests/architecture/test_architecture.cpp
+      tests/unit/test_architecture.cpp
     )
 
     target_include_directories(coretrace_concurrency_arch_tests
@@ -113,7 +119,7 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     target_compile_definitions(coretrace_concurrency_arch_tests
       PRIVATE
-        CORETRACE_PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
     )
 
     target_link_libraries(coretrace_concurrency_arch_tests
@@ -122,6 +128,56 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     )
 
     add_test(NAME coretrace_concurrency_arch_tests COMMAND coretrace_concurrency_arch_tests)
+
+    add_executable(coretrace_concurrency_error_tests
+      tests/unit/test_error_model.cpp
+    )
+
+    target_compile_definitions(coretrace_concurrency_error_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    target_link_libraries(coretrace_concurrency_error_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_error_tests COMMAND coretrace_concurrency_error_tests)
+
+    add_executable(coretrace_concurrency_cli_cpp_tests
+      tests/integration/cli/test_cli_cpp.cpp
+    )
+
+    target_compile_definitions(coretrace_concurrency_cli_cpp_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    add_dependencies(coretrace_concurrency_cli_cpp_tests coretrace_concurrency_analyzer)
+    add_test(NAME coretrace_concurrency_cli_cpp_tests COMMAND coretrace_concurrency_cli_cpp_tests)
+
+    find_package(Python3 QUIET COMPONENTS Interpreter)
+    if(Python3_Interpreter_FOUND)
+      execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c "import ctestfw"
+        RESULT_VARIABLE CORETRACE_CTESTFW_IMPORT_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+      )
+
+      if(CORETRACE_CTESTFW_IMPORT_RESULT EQUAL 0)
+        add_test(
+          NAME coretrace_concurrency_cli_integration_tests
+          COMMAND "${Python3_EXECUTABLE}"
+                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/cli/test_analyzer.py"
+        )
+      else()
+        message(STATUS "Skipping cli integration tests: ctestfw module not available")
+      endif()
+    else()
+      message(STATUS "Skipping cli integration tests: Python3 interpreter not found")
+    endif()
   endif()
 endif()
 

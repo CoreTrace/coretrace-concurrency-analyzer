@@ -26,3 +26,10 @@
 
 - Keep naming consistent in new code and refactors.
 - When integrating external dependencies, preserve upstream naming if required by their APIs.
+
+## Licensing
+
+- The repository is distributed under Apache License 2.0 (`LICENSE` + `NOTICE`).
+- For new source files, prefer adding an SPDX identifier at the top:
+  - C/C++: `// SPDX-License-Identifier: Apache-2.0`
+  - Shell/Python/CMake: `# SPDX-License-Identifier: Apache-2.0`
