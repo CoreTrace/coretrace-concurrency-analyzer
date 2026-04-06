@@ -164,6 +164,22 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     add_test(NAME coretrace_concurrency_error_tests COMMAND coretrace_concurrency_error_tests)
 
+    add_executable(coretrace_concurrency_analysis_tests
+      tests/unit/test_concurrency_analysis.cpp
+    )
+
+    target_compile_definitions(coretrace_concurrency_analysis_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    target_link_libraries(coretrace_concurrency_analysis_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_analysis_tests COMMAND coretrace_concurrency_analysis_tests)
+
     add_executable(coretrace_concurrency_cli_cpp_tests
       tests/integration/cli/test_cli_cpp.cpp
     )

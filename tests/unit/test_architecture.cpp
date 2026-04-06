@@ -786,6 +786,7 @@ entry:
                        "BC args should include input file only once") &&
             assertTrue(hasToken(bcArgs, "-emit-llvm"), "BC args should include -emit-llvm") &&
             assertTrue(hasToken(bcArgs, "-c"), "BC args should include -c") &&
+            assertTrue(hasToken(bcArgs, "-g"), "BC args should include -g") &&
             assertTrue(!hasToken(bcArgs, "-S"), "BC args should not include -S") &&
             assertTrue(hasOutputPair(bcArgs, outputPath.string()),
                        "BC args should include -o <outputPath>");

@@ -120,6 +120,14 @@ namespace
                               "\noutput:\n" + text);
     }
 
+    bool assertNotContains(const std::string& text, std::string_view unexpected,
+                           std::string_view label)
+    {
+        return assertTrue(text.find(unexpected) == std::string::npos,
+                          std::string(label) + " unexpectedly contains token: " +
+                              std::string(unexpected) + "\noutput:\n" + text);
+    }
+
     bool testHelpAndInputParsingErrors()
     {
         bool ok = true;
@@ -128,6 +136,8 @@ namespace
             const RunResult result = runAnalyzer({"--help"});
             ok = assertTrue(result.exitCode == 0, "--help should exit with code 0") && ok;
             ok = assertContains(result.output, "Usage:", "--help output") && ok;
+            ok = assertContains(result.output, "--analyze", "--help output") && ok;
+            ok = assertContains(result.output, "--format=human|json|sarif", "--help output") && ok;
             ok = assertContains(result.output, "--verbose", "--help output") && ok;
         }
 
@@ -155,6 +165,24 @@ namespace
 
         {
             const RunResult result =
+                runAnalyzer({fixturePath("hello.c").string(), "--analyze", "--format=xml"});
+            ok = assertTrue(result.exitCode == 1, "invalid --format should fail") && ok;
+            ok = assertContains(result.output, "Unsupported --format value",
+                                "invalid --format output") &&
+                 ok;
+        }
+
+        {
+            const RunResult result =
+                runAnalyzer({fixturePath("hello.c").string(), "--format=json"});
+            ok = assertTrue(result.exitCode == 1, "--format without --analyze should fail") && ok;
+            ok = assertContains(result.output, "--format requires --analyze",
+                                "format without analyze output") &&
+                 ok;
+        }
+
+        {
+            const RunResult result =
                 runAnalyzer({fixturePath("hello.c").string(), fixturePath("hello.cpp").string()});
             ok = assertTrue(result.exitCode == 1, "extra positional arg should fail") && ok;
             ok = assertContains(result.output, "Unexpected positional argument",
@@ -177,6 +205,7 @@ namespace
                  ok;
             ok = assertContains(result.output, "request.input-file:", "verbose output") && ok;
             ok = assertContains(result.output, "request.ir-format: ll", "verbose output") && ok;
+            ok = assertContains(result.output, "request.analyze: false", "verbose output") && ok;
             ok =
                 assertContains(result.output, "request.extra-arg: -DFOO=1", "verbose output") && ok;
             ok = assertContains(result.output, "request.extra-arg: -Wall", "verbose output") && ok;
@@ -194,6 +223,163 @@ namespace
             ok = assertContains(result.output, "IR compilation succeeded", "BC compile output") &&
                  ok;
             ok = assertContains(result.output, "format: bc", "BC compile output") && ok;
+        }
+
+        return ok;
+    }
+
+    bool testAnalyzeMode()
+    {
+        bool ok = true;
+
+        {
+            const RunResult result = runAnalyzer({fixturePath("hello.c").string(), "--analyze"});
+            ok = assertTrue(result.exitCode == 0, "--analyze on hello.c should succeed") && ok;
+            ok = assertContains(result.output, "Mode: IR", "hello analyze output") && ok;
+            ok = assertContains(result.output, "Diagnostics summary: info=0, warning=0, error=0",
+                                "hello analyze output") &&
+                 ok;
+            ok = assertNotContains(result.output, "IR compilation succeeded",
+                                   "hello analyze output should be pure human report") &&
+                 ok;
+        }
+
+        {
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/data-race/data_race_basic.c").string(), "--analyze"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--analyze on data_race_basic should not fail the CLI") &&
+                 ok;
+            ok = assertContains(result.output, "Function:", "race analyze output") && ok;
+            ok = assertContains(result.output, "ruleId: DataRaceGlobal", "race analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "symbol: shared_counter", "race analyze output") &&
+                 ok;
+            ok =
+                assertContains(result.output, "at line 10, column 23", "race analyze output") && ok;
+            ok = assertContains(result.output, "Diagnostics summary: info=0, warning=0, error=",
+                                "race analyze output") &&
+                 ok;
+        }
+
+        {
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/data-race/data_race_mutex_protected.c").string(),
+                 "--analyze"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--analyze on mutex-protected fixture should succeed") &&
+                 ok;
+            ok = assertContains(result.output, "Diagnostics summary: info=0, warning=0, error=0",
+                                "mutex-protected analyze output") &&
+                 ok;
+        }
+
+        {
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/data-race/data_race_split_symbols.c").string(),
+                 "--analyze"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--analyze on split-symbol fixture should succeed") &&
+                 ok;
+            ok = assertContains(result.output, "symbol: racy_counter",
+                                "split-symbol analyze output") &&
+                 ok;
+            ok = assertNotContains(result.output, "symbol: safe_counter",
+                                   "split-symbol analyze output") &&
+                 ok;
+        }
+
+        {
+            const RunResult result =
+                runAnalyzer({fixturePath("concurrency/data-race/data_race_basic.c").string(),
+                             "--analyze", "--format=json"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--format=json on data_race_basic should succeed") &&
+                 ok;
+            ok = assertContains(result.output, "\"meta\"", "json analyze output") && ok;
+            ok = assertContains(result.output, "\"functions\"", "json analyze output") && ok;
+            ok = assertContains(result.output, "\"diagnostics\"", "json analyze output") && ok;
+            ok = assertContains(result.output, "\"ruleId\": \"DataRaceGlobal\"",
+                                "json analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"symbol\": \"shared_counter\"",
+                                "json analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"startLine\": 10", "json analyze output") && ok;
+            ok = assertContains(result.output, "\"startColumn\": 23", "json analyze output") && ok;
+        }
+
+        {
+            const RunResult result =
+                runAnalyzer({fixturePath("concurrency/data-race/data_race_basic.c").string(),
+                             "--analyze", "--format=sarif"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--format=sarif on data_race_basic should succeed") &&
+                 ok;
+            ok = assertContains(result.output, "\"version\": \"2.1.0\"", "sarif analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"runs\"", "sarif analyze output") && ok;
+            ok = assertContains(result.output, "\"ruleId\": \"DataRaceGlobal\"",
+                                "sarif analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"partialFingerprints\"", "sarif analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"startLine\": 10", "sarif analyze output") && ok;
+            ok = assertContains(result.output, "\"startColumn\": 23", "sarif analyze output") && ok;
+        }
+
+        {
+            const RunResult result =
+                runAnalyzer({fixturePath("invalid.c").string(), "--analyze", "--format=human"});
+            ok = assertTrue(result.exitCode == 1,
+                            "--format=human on invalid.c should fail with structured output") &&
+                 ok;
+            ok = assertContains(result.output, "Location:", "human compile-error output") && ok;
+            ok = assertContains(result.output, "tests/fixtures/invalid.c:2:1",
+                                "human compile-error output") &&
+                 ok;
+            ok = assertContains(result.output, "ruleId: CompilerDiagnostic",
+                                "human compile-error output") &&
+                 ok;
+        }
+
+        {
+            const RunResult result =
+                runAnalyzer({fixturePath("invalid.c").string(), "--analyze", "--format=json"});
+            ok = assertTrue(result.exitCode == 1,
+                            "--format=json on invalid.c should fail with structured output") &&
+                 ok;
+            ok = assertContains(result.output, "\"ruleId\": \"CompilerDiagnostic\"",
+                                "json compile-error output") &&
+                 ok;
+            ok = assertContains(result.output, "\"file\": \"", "json compile-error output") && ok;
+            ok = assertContains(result.output, "tests/fixtures/invalid.c",
+                                "json compile-error output") &&
+                 ok;
+            ok = assertContains(result.output, "\"startLine\": 2", "json compile-error output") &&
+                 ok;
+            ok = assertContains(result.output, "\"startColumn\": 1", "json compile-error output") &&
+                 ok;
+        }
+
+        {
+            const RunResult result =
+                runAnalyzer({fixturePath("invalid.c").string(), "--analyze", "--format=sarif"});
+            ok = assertTrue(result.exitCode == 1,
+                            "--format=sarif on invalid.c should fail with structured output") &&
+                 ok;
+            ok = assertContains(result.output, "\"ruleId\": \"CompilerDiagnostic\"",
+                                "sarif compile-error output") &&
+                 ok;
+            ok = assertContains(result.output, "\"uri\": ", "sarif compile-error output") && ok;
+            ok = assertContains(result.output, "tests/fixtures/invalid.c",
+                                "sarif compile-error output") &&
+                 ok;
+            ok = assertContains(result.output, "\"startLine\": 2", "sarif compile-error output") &&
+                 ok;
+            ok =
+                assertContains(result.output, "\"startColumn\": 1", "sarif compile-error output") &&
+                ok;
         }
 
         return ok;
@@ -325,6 +511,7 @@ int main()
          ok;
     ok = testHelpAndInputParsingErrors() && ok;
     ok = testSuccessfulCompilesAndVerboseMode() && ok;
+    ok = testAnalyzeMode() && ok;
     ok = testInputValidationFailuresAndBackendDiagnostics() && ok;
     ok = testPermissionRelatedInputFailures() && ok;
 
