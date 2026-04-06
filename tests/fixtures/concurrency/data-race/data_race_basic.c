@@ -14,13 +14,27 @@ void* increment(void* arg) {
 
 int main() {
     pthread_t t1, t2;
-    
+
     pthread_create(&t1, NULL, increment, NULL);
     pthread_create(&t2, NULL, increment, NULL);
-    
+
     pthread_join(t1, NULL);
     pthread_join(t2, NULL);
-    
+
     printf("Counter: %d (attendu: 20000)\n", shared_counter);
     return 0;
 }
+
+// EXPECT-HUMAN-DIAGNOSTICS-BEGIN
+// Function: increment
+// 	severity: ERROR
+// 	ruleId: DataRaceGlobal
+// 	cwe: CWE-362
+// 	symbol: shared_counter
+// 	at line 10, column 23
+// 	[!!!Error] unsynchronized concurrent access to global 'shared_counter'
+// 	     ↳ first access: read at ${REPO_ROOT}/tests/fixtures/concurrency/data-race/data_race_basic.c:10:23 in increment (thread entries: increment)
+// 	     ↳ conflicting access: write at ${REPO_ROOT}/tests/fixtures/concurrency/data-race/data_race_basic.c:10:23 in increment (thread entries: increment)
+// 	     ↳ possible conflict kinds: read/write, write/write
+// 	     ↳ no common recognized lock protects the conflicting accesses
+// EXPECT-HUMAN-DIAGNOSTICS-END

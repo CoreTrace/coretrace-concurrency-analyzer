@@ -30,7 +30,18 @@ option(BUILD_CLI "Build coretrace_concurrency_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" OFF)
 
 set(CONCURRENCY_ANALYZER_SOURCES
+    src/coretrace_concurrency_analysis.cpp
     src/coretrace_concurrency_error.cpp
+    src/internal/analysis/concurrency_symbol_classifier.cpp
+    src/internal/analysis/data_race_checker.cpp
+    src/internal/diagnostics/compiler_diagnostic_parser.cpp
+    src/internal/diagnostics/diagnostic_catalog.cpp
+    src/internal/analysis/ir_utils.cpp
+    src/internal/analysis/lock_scope_tracker.cpp
+    src/internal/reporting/report_renderer.cpp
+    src/internal/analysis/shared_access_collector.cpp
+    src/internal/analysis/thread_spawn_detector.cpp
+    src/internal/analysis/tu_facts_builder.cpp
     src/internal/compile_command_builder.cpp
     src/internal/compilation_backend.cpp
     src/internal/ir_loader.cpp
@@ -54,6 +65,8 @@ target_include_directories(coretrace_concurrency_analyzer_lib
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_include_directories(coretrace_concurrency_analyzer_lib SYSTEM
@@ -76,6 +89,7 @@ if(LLVM_LINK_LLVM_DYLIB AND TARGET LLVM)
     target_link_libraries(coretrace_concurrency_analyzer_lib PUBLIC LLVM)
 else()
     llvm_map_components_to_libnames(coretrace_concurrency_llvm_libs
+      analysis
       core
       irreader
       support
@@ -92,6 +106,11 @@ add_library(coretrace::coretrace_concurrency_analyzer_lib ALIAS coretrace_concur
 if(BUILD_CLI)
     add_executable(coretrace_concurrency_analyzer
       main.cpp
+    )
+
+    target_include_directories(coretrace_concurrency_analyzer
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
 
     target_link_libraries(coretrace_concurrency_analyzer
@@ -145,6 +164,22 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     add_test(NAME coretrace_concurrency_error_tests COMMAND coretrace_concurrency_error_tests)
 
+    add_executable(coretrace_concurrency_analysis_tests
+      tests/unit/test_concurrency_analysis.cpp
+    )
+
+    target_compile_definitions(coretrace_concurrency_analysis_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    target_link_libraries(coretrace_concurrency_analysis_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_analysis_tests COMMAND coretrace_concurrency_analysis_tests)
+
     add_executable(coretrace_concurrency_cli_cpp_tests
       tests/integration/cli/test_cli_cpp.cpp
     )
@@ -174,6 +209,24 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
         )
       else()
         message(STATUS "Skipping cli integration tests: ctestfw module not available")
+      endif()
+
+      execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c "import pytest"
+        RESULT_VARIABLE CORETRACE_PYTEST_IMPORT_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+      )
+
+      if(CORETRACE_PYTEST_IMPORT_RESULT EQUAL 0)
+        add_test(
+          NAME coretrace_concurrency_human_output_golden_tests
+          COMMAND "${Python3_EXECUTABLE}" -m pytest
+                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/cli/test_human_output_golden.py"
+                  -q
+        )
+      else()
+        message(STATUS "Skipping human output golden tests: pytest module not available")
       endif()
     else()
       message(STATUS "Skipping cli integration tests: Python3 interpreter not found")
