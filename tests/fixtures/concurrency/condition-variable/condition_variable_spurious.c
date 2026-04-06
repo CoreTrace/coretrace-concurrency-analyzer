@@ -2,6 +2,7 @@
 // Test 12: Condition variable - attente sans boucle (spurious wakeup)
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -20,28 +21,29 @@ void* producer(void* arg) {
 
 void* consumer(void* arg) {
     pthread_mutex_lock(&mutex);
-    
+
     // MAUVAIS: pas de boucle while pour gérer les spurious wakeups
     if (!data_ready) {  // devrait être: while (!data_ready)
         pthread_cond_wait(&cond, &mutex);
     }
-    
+
     // Peut se réveiller même si data_ready est encore false!
     int value = shared_data;
     printf("Consumer got: %d\n", value);
-    
+
     pthread_mutex_unlock(&mutex);
     return NULL;
 }
 
-int main() {
+int main(void)
+{
     pthread_t t1, t2;
-    
+
     pthread_create(&t1, NULL, consumer, NULL);
     pthread_create(&t2, NULL, producer, NULL);
-    
+
     pthread_join(t1, NULL);
     pthread_join(t2, NULL);
-    
+
     return 0;
 }

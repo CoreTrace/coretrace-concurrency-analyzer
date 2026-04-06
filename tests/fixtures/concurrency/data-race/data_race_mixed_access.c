@@ -2,6 +2,7 @@
 // Test 2: Data race - accès mixte lecture/écriture
 #include <pthread.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 int shared_data = 0;
 bool ready = false;  // Flag non protégé
@@ -23,12 +24,12 @@ void* reader(void* arg) {
 
 int main() {
     pthread_t t1, t2;
-    
+
     pthread_create(&t1, NULL, writer, NULL);
     pthread_create(&t2, NULL, reader, NULL);
-    
+
     pthread_join(t1, NULL);
     pthread_join(t2, NULL);
-    
+
     return 0;
 }
