@@ -65,6 +65,7 @@ namespace ctrace::concurrency::internal
         removeOutputPathArgs(args);
         appendIfMissing(args, "-emit-llvm");
         appendIfMissing(args, "-c");
+        appendIfMissing(args, "-g");
         args.push_back("-o");
         args.push_back(outputPath.string());
         if (!hasExactToken(args, request.inputFile))

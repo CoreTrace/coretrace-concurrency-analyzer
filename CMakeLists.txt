@@ -30,7 +30,18 @@ option(BUILD_CLI "Build coretrace_concurrency_analyzer CLI tool" ON)
 option(BUILD_SHARED_LIB "Build shared library variant" OFF)
 
 set(CONCURRENCY_ANALYZER_SOURCES
+    src/coretrace_concurrency_analysis.cpp
     src/coretrace_concurrency_error.cpp
+    src/internal/analysis/concurrency_symbol_classifier.cpp
+    src/internal/analysis/data_race_checker.cpp
+    src/internal/diagnostics/compiler_diagnostic_parser.cpp
+    src/internal/diagnostics/diagnostic_catalog.cpp
+    src/internal/analysis/ir_utils.cpp
+    src/internal/analysis/lock_scope_tracker.cpp
+    src/internal/reporting/report_renderer.cpp
+    src/internal/analysis/shared_access_collector.cpp
+    src/internal/analysis/thread_spawn_detector.cpp
+    src/internal/analysis/tu_facts_builder.cpp
     src/internal/compile_command_builder.cpp
     src/internal/compilation_backend.cpp
     src/internal/ir_loader.cpp
@@ -54,6 +65,8 @@ target_include_directories(coretrace_concurrency_analyzer_lib
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
 target_include_directories(coretrace_concurrency_analyzer_lib SYSTEM
@@ -76,6 +89,7 @@ if(LLVM_LINK_LLVM_DYLIB AND TARGET LLVM)
     target_link_libraries(coretrace_concurrency_analyzer_lib PUBLIC LLVM)
 else()
     llvm_map_components_to_libnames(coretrace_concurrency_llvm_libs
+      analysis
       core
       irreader
       support
@@ -92,6 +106,11 @@ add_library(coretrace::coretrace_concurrency_analyzer_lib ALIAS coretrace_concur
 if(BUILD_CLI)
     add_executable(coretrace_concurrency_analyzer
       main.cpp
+    )
+
+    target_include_directories(coretrace_concurrency_analyzer
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
 
     target_link_libraries(coretrace_concurrency_analyzer
