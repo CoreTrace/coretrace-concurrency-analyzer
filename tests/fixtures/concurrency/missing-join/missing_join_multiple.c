@@ -37,3 +37,20 @@ int main() {
     
     return 0;
 }
+
+// Known M1 precision limit: the analyzer is array-element-insensitive and
+// therefore reports concurrent writes on the global array as a single race on
+// `results`, even though each worker targets a distinct index.
+// EXPECT-HUMAN-DIAGNOSTICS-BEGIN
+// Function: compute
+// 	severity: ERROR
+// 	ruleId: DataRaceGlobal
+// 	cwe: CWE-362
+// 	symbol: results
+// 	at line 12, column 17
+// 	[!!!Error] unsynchronized concurrent access to global 'results'
+// 	     ↳ access: write at ${REPO_ROOT}/tests/fixtures/concurrency/missing-join/missing_join_multiple.c:12:17 in compute (thread entries: compute)
+// 	     ↳ conflicts with another concurrent invocation reachable from thread entry 'compute'
+// 	     ↳ possible conflict kinds: write/write
+// 	     ↳ no common recognized lock protects the conflicting accesses
+// EXPECT-HUMAN-DIAGNOSTICS-END

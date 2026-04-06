@@ -95,10 +95,13 @@ Run the C++ test suite (unit + CLI integration) with CTest:
 ctest --test-dir build --output-on-failure
 ```
 
-Optional Python integration tests (requires `ctestfw`):
+Optional Python integration tests:
 
 ```bash
 python3 tests/integration/cli/test_analyzer.py
+python3 -m pytest tests/integration/cli/test_human_output_golden.py
+CORETRACE_ANALYZER_BIN=./build/coretrace_concurrency_analyzer \
+python3 -m pytest tests/integration/cli/test_human_output_golden.py
 ```
 
 ## Code style (clang-format)

@@ -210,6 +210,24 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
       else()
         message(STATUS "Skipping cli integration tests: ctestfw module not available")
       endif()
+
+      execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c "import pytest"
+        RESULT_VARIABLE CORETRACE_PYTEST_IMPORT_RESULT
+        OUTPUT_QUIET
+        ERROR_QUIET
+      )
+
+      if(CORETRACE_PYTEST_IMPORT_RESULT EQUAL 0)
+        add_test(
+          NAME coretrace_concurrency_human_output_golden_tests
+          COMMAND "${Python3_EXECUTABLE}" -m pytest
+                  "${CMAKE_CURRENT_SOURCE_DIR}/tests/integration/cli/test_human_output_golden.py"
+                  -q
+        )
+      else()
+        message(STATUS "Skipping human output golden tests: pytest module not available")
+      endif()
     else()
       message(STATUS "Skipping cli integration tests: Python3 interpreter not found")
     endif()
