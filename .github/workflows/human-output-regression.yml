@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: Apache-2.0
+name: human-output-regression
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  pytest-human-output:
+    name: pytest human output (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: .github/workflows/human-output-regression.yml
+
+      - name: Install pytest
+        run: python3 -m pip install --upgrade pip pytest
+
+      - name: Install LLVM 20 and build tools on Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          sudo apt-get update
+          sudo apt-get install -y clang-20 llvm-20-dev libclang-20-dev cmake ninja-build
+
+      - name: Install LLVM 20 and build tools on macOS
+        if: runner.os == 'macOS'
+        run: brew install llvm@20 cmake ninja
+
+      - name: Configure toolchain environment
+        shell: bash
+        run: |
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            llvm_prefix="/usr/lib/llvm-20"
+            clang_executable="/usr/bin/clang-20"
+          else
+            llvm_prefix="$(brew --prefix llvm@20)"
+            clang_executable="${llvm_prefix}/bin/clang"
+          fi
+
+          echo "${llvm_prefix}/bin" >> "${GITHUB_PATH}"
+          echo "LLVM_DIR=${llvm_prefix}/lib/cmake/llvm" >> "${GITHUB_ENV}"
+          echo "Clang_DIR=${llvm_prefix}/lib/cmake/clang" >> "${GITHUB_ENV}"
+          echo "CLANG_EXECUTABLE=${clang_executable}" >> "${GITHUB_ENV}"
+          echo "CLANG_RESOURCE_DIR=$("${clang_executable}" -print-resource-dir)" >> "${GITHUB_ENV}"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DLLVM_DIR="${LLVM_DIR}" \
+            -DClang_DIR="${Clang_DIR}" \
+            -DCLANG_EXECUTABLE="${CLANG_EXECUTABLE}" \
+            -DCLANG_RESOURCE_DIR="${CLANG_RESOURCE_DIR}"
+
+      - name: Build analyzer binary
+        run: cmake --build build --target coretrace_concurrency_analyzer --parallel
+
+      - name: Run human-output golden tests
+        env:
+          CORETRACE_ANALYZER_BIN: ./build/coretrace_concurrency_analyzer
+        run: python3 -m pytest tests/integration/cli/test_human_output_golden.py -q
