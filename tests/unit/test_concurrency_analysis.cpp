@@ -197,35 +197,28 @@ namespace
         if (!report.has_value())
             return false;
 
-        const bool allSharedResource =
-            std::all_of(report->diagnostics.begin(), report->diagnostics.end(),
-                        [](const auto& diagnostic)
-                        {
-                            const std::optional<std::string> symbol = symbolOf(diagnostic);
-                            return symbol.has_value() && *symbol == "shared_resource";
-                        });
+        bool allSharedResource = true;
+        bool allPrimaryLocationsInFixture = true;
+        bool hasLoweredRelatedLocation = false;
 
-        const bool allPrimaryLocationsInFixture =
-            std::all_of(report->diagnostics.begin(), report->diagnostics.end(),
-                        [](const auto& diagnostic)
-                        {
-                            return locationReferencesFixture(diagnostic.location,
-                                                             "cpp_move_semantics_race.cpp");
-                        });
+        for (const auto& diagnostic : report->diagnostics)
+        {
+            const std::optional<std::string> symbol = symbolOf(diagnostic);
+            if (!symbol.has_value() || *symbol != "shared_resource")
+                allSharedResource = false;
 
-        const bool hasLoweredRelatedLocation = std::any_of(
-            report->diagnostics.begin(), report->diagnostics.end(),
-            [](const auto& diagnostic)
+            if (!locationReferencesFixture(diagnostic.location, "cpp_move_semantics_race.cpp"))
+                allPrimaryLocationsInFixture = false;
+
+            for (const auto& related : diagnostic.relatedLocations)
             {
-                return std::any_of(diagnostic.relatedLocations.begin(),
-                                   diagnostic.relatedLocations.end(),
-                                   [](const auto& related)
-                                   {
-                                       return related.label.starts_with("Lowered ") &&
-                                              !locationReferencesFixture(
-                                                  related.location, "cpp_move_semantics_race.cpp");
-                                   });
-            });
+                if (related.label.starts_with("Lowered ") &&
+                    !locationReferencesFixture(related.location, "cpp_move_semantics_race.cpp"))
+                {
+                    hasLoweredRelatedLocation = true;
+                }
+            }
+        }
 
         return assertTrue(!report->diagnostics.empty(),
                           "cpp_move_semantics_race should report races") &&
