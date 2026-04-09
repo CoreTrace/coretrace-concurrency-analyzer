@@ -207,7 +207,8 @@ namespace
 
         const bool allPrimaryLocationsInFixture =
             std::all_of(report->diagnostics.begin(), report->diagnostics.end(),
-                        [](const auto& diagnostic) {
+                        [](const auto& diagnostic)
+                        {
                             return locationReferencesFixture(diagnostic.location,
                                                              "cpp_move_semantics_race.cpp");
                         });
