@@ -110,7 +110,7 @@ namespace ctrace::concurrency::internal::reporting
         }
 
         std::string formatDetailedLocation(const SourceLocation& location,
-                                          const RenderContext& context)
+                                           const RenderContext& context)
         {
             std::string rendered = formatLocationHeader(location, context);
             if (!location.function.empty())

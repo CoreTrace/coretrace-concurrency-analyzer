@@ -86,8 +86,8 @@ namespace ctrace::concurrency::internal::analysis
         {
             std::ostringstream stream;
             stream << fact.symbol << "|" << toString(fact.kind) << "|" << fact.loweredLocation.file
-                   << "|" << fact.loweredLocation.line << "|" << fact.loweredLocation.column
-                   << "|" << fact.loweredLocation.function;
+                   << "|" << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
+                   << fact.loweredLocation.function;
 
             for (const std::string& lock : fact.heldLocks)
                 stream << "|lock:" << lock;
@@ -260,7 +260,8 @@ namespace ctrace::concurrency::internal::analysis
             if (pendingAccess.root.kind == RootBindingKind::Global)
             {
                 pendingAccess.fact.symbol = pendingAccess.root.symbol;
-                addConcreteAccess(concreteAccesses, concreteAccessKeys, std::move(pendingAccess.fact));
+                addConcreteAccess(concreteAccesses, concreteAccessKeys,
+                                  std::move(pendingAccess.fact));
                 continue;
             }
 
@@ -320,16 +321,15 @@ namespace ctrace::concurrency::internal::analysis
                     };
                     propagatedAccess.fact.functionId = callBinding.callerFunctionId;
                     if (shouldRemapAccessToCallsite(propagatedAccess.fact,
-                                                   callBinding.callsiteLocation))
+                                                    callBinding.callsiteLocation))
                     {
                         propagatedAccess.fact.userLocation = callBinding.callsiteLocation;
                     }
 
-                    changed =
-                        addParameterizedAccess(summariesByFunction, summaryKeysByFunction,
-                                               callBinding.callerFunctionId,
-                                               std::move(propagatedAccess)) ||
-                        changed;
+                    changed = addParameterizedAccess(summariesByFunction, summaryKeysByFunction,
+                                                     callBinding.callerFunctionId,
+                                                     std::move(propagatedAccess)) ||
+                              changed;
                 }
             }
         }

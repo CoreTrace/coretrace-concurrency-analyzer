@@ -38,6 +38,7 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] const llvm::Function* resolveFunctionValue(const llvm::Value& value);
     [[nodiscard]] std::string functionId(const llvm::Function& function);
     [[nodiscard]] std::string functionDisplayName(const llvm::Function& function);
-    [[nodiscard]] ResolvedSourceLocations resolveSourceLocations(const llvm::Instruction& instruction);
+    [[nodiscard]] ResolvedSourceLocations
+    resolveSourceLocations(const llvm::Instruction& instruction);
     [[nodiscard]] SourceLocation makeSourceLocation(const llvm::Instruction& instruction);
 } // namespace ctrace::concurrency::internal::analysis

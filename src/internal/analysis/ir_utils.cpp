@@ -49,7 +49,7 @@ namespace ctrace::concurrency::internal::analysis
                                                   llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
 
         SourceLocation sourceLocationFromDebugLocation(const llvm::DILocation& debugLocation,
-                                                      std::string_view fallbackFunction)
+                                                       std::string_view fallbackFunction)
         {
             SourceLocation location;
             location.function = std::string(fallbackFunction);
@@ -86,8 +86,8 @@ namespace ctrace::concurrency::internal::analysis
                 if (!seen.insert(current).second)
                     return nullptr;
 
-                if (llvm::isa<llvm::GlobalVariable>(current) || llvm::isa<llvm::Argument>(current) ||
-                    llvm::isa<llvm::Function>(current))
+                if (llvm::isa<llvm::GlobalVariable>(current) ||
+                    llvm::isa<llvm::Argument>(current) || llvm::isa<llvm::Function>(current))
                     return current;
 
                 if (const auto* gepInstruction = llvm::dyn_cast<llvm::GetElementPtrInst>(current))
@@ -249,11 +249,13 @@ namespace ctrace::concurrency::internal::analysis
         if (!debugLocation)
             return locations;
 
-        locations.loweredLocation = sourceLocationFromDebugLocation(*debugLocation, fallbackFunction);
+        locations.loweredLocation =
+            sourceLocationFromDebugLocation(*debugLocation, fallbackFunction);
         locations.userLocation = locations.loweredLocation;
 
         const llvm::DILocation* outermostInlineLocation = debugLocation.get();
-        while (outermostInlineLocation != nullptr && outermostInlineLocation->getInlinedAt() != nullptr)
+        while (outermostInlineLocation != nullptr &&
+               outermostInlineLocation->getInlinedAt() != nullptr)
             outermostInlineLocation = outermostInlineLocation->getInlinedAt();
 
         if (outermostInlineLocation != nullptr)

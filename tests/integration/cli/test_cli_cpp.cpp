@@ -263,9 +263,9 @@ namespace
         }
 
         {
-            const RunResult result = runAnalyzer(
-                {fixturePath("concurrency/data-race/cpp_data_race_class.cpp").string(),
-                 "--analyze"});
+            const RunResult result =
+                runAnalyzer({fixturePath("concurrency/data-race/cpp_data_race_class.cpp").string(),
+                             "--analyze"});
             ok = assertTrue(result.exitCode == 0,
                             "--analyze on cpp_data_race_class should not fail the CLI") &&
                  ok;
@@ -352,10 +352,9 @@ namespace
         }
 
         {
-            const RunResult result =
-                runAnalyzer({fixturePath("concurrency/data-race/cpp_move_semantics_race.cpp")
-                                 .string(),
-                             "--analyze", "--format=json"});
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/data-race/cpp_move_semantics_race.cpp").string(),
+                 "--analyze", "--format=json"});
             ok = assertTrue(result.exitCode == 0,
                             "--format=json on cpp_move_semantics_race should succeed") &&
                  ok;

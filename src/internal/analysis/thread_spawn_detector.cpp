@@ -281,8 +281,7 @@ namespace ctrace::concurrency::internal::analysis
                         addParameterizedSpawn(summariesByFunction, summaryKeysByFunction,
                                               callBinding.callerFunctionId,
                                               ParameterizedSpawn{
-                                                  .argumentIndex =
-                                                      *bindingIt->second.argumentIndex,
+                                                  .argumentIndex = *bindingIt->second.argumentIndex,
                                                   .location = callBinding.location,
                                                   .insideLoop = insideLoop,
                                               }) ||
