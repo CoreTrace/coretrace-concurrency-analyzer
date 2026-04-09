@@ -109,6 +109,15 @@ namespace ctrace::concurrency::internal::reporting
             return "<unknown-location>";
         }
 
+        std::string formatDetailedLocation(const SourceLocation& location,
+                                          const RenderContext& context)
+        {
+            std::string rendered = formatLocationHeader(location, context);
+            if (!location.function.empty())
+                rendered += " in " + location.function;
+            return rendered;
+        }
+
         std::string renderDiagnosticBody(const Diagnostic& diagnostic)
         {
             std::string rendered;
@@ -291,6 +300,12 @@ namespace ctrace::concurrency::internal::reporting
                     stream << "\t" << body.substr(0, body_size - 1) << "\n";
                 else
                     stream << "\t" << body << "\n";
+
+                for (const RelatedLocation& related : diagnostic.relatedLocations)
+                {
+                    stream << "\trelated: " << related.label << " -> "
+                           << formatDetailedLocation(related.location, context) << "\n";
+                }
             }
 
             stream << "\nDiagnostics summary: info=" << report.diagnosticsSummary.info
