@@ -7,12 +7,12 @@
 class Counter {
 private:
     int value = 0;  // Non protégé
-    
+
 public:
     void increment() {
         value++;  // DATA RACE: non thread-safe
     }
-    
+
     int get() const {
         return value;  // DATA RACE: lecture concurrente
     }
@@ -28,17 +28,17 @@ void worker(int iterations) {
 
 int main() {
     std::vector<std::thread> threads;
-    
+
     for (int i = 0; i < 4; i++) {
         threads.emplace_back(worker, 10000);
     }
-    
+
     for (auto& t : threads) {
         t.join();
     }
-    
-    std::cout << "Final value: " << global_counter.get() 
+
+    std::cout << "Final value: " << global_counter.get()
               << " (expected: 40000)" << std::endl;
-    
+
     return 0;
 }
