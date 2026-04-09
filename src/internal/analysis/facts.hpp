@@ -6,6 +6,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace llvm
@@ -34,12 +35,43 @@ namespace ctrace::concurrency::internal::analysis
         bool insideLoop = false;
     };
 
+    enum class RootBindingKind
+    {
+        Global,
+        Argument,
+    };
+
+    struct RootBinding
+    {
+        RootBindingKind kind = RootBindingKind::Global;
+        std::string symbol;
+        unsigned argumentIndex = 0;
+
+        [[nodiscard]] static RootBinding global(std::string globalSymbol)
+        {
+            return RootBinding{
+                .kind = RootBindingKind::Global,
+                .symbol = std::move(globalSymbol),
+            };
+        }
+
+        [[nodiscard]] static RootBinding argument(unsigned index)
+        {
+            return RootBinding{
+                .kind = RootBindingKind::Argument,
+                .argumentIndex = index,
+            };
+        }
+    };
+
     struct AccessFact
     {
         std::string symbol;
         std::string functionId;
         AccessKind kind = AccessKind::Read;
-        SourceLocation location;
+        SourceLocation loweredLocation;
+        SourceLocation userLocation;
+        bool allowCallsiteProjection = false;
         std::set<std::string> heldLocks;
     };
 
@@ -47,6 +79,7 @@ namespace ctrace::concurrency::internal::analysis
     {
         const llvm::Function* function = nullptr;
         const llvm::Instruction* instruction = nullptr;
+        RootBinding root;
         AccessFact fact;
     };
 
