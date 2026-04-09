@@ -53,4 +53,5 @@ int main() {
 // 	     ↳ conflicts with another concurrent invocation reachable from thread entry 'compute'
 // 	     ↳ possible conflict kinds: write/write
 // 	     ↳ no common recognized lock protects the conflicting accesses
+// 	related: Concurrent invocation -> ${REPO_ROOT}/tests/fixtures/concurrency/missing-join/missing_join_multiple.c:12:17 in compute
 // EXPECT-HUMAN-DIAGNOSTICS-END
