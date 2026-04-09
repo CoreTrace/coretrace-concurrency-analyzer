@@ -10,14 +10,6 @@
 
 namespace ctrace::concurrency::internal::analysis
 {
-    namespace
-    {
-        bool shouldTrackGlobal(const llvm::GlobalVariable& global)
-        {
-            return global.hasExternalLinkage() && !global.isConstant() && !global.isThreadLocal();
-        }
-    } // namespace
-
     std::vector<PendingAccess> SharedAccessCollector::collect(const llvm::Module& module) const
     {
         std::vector<PendingAccess> accesses;
@@ -52,17 +44,19 @@ namespace ctrace::concurrency::internal::analysis
                     if (pointerOperand == nullptr)
                         continue;
 
-                    const llvm::GlobalVariable* global = resolveBaseGlobal(*pointerOperand);
-                    if (global == nullptr || !shouldTrackGlobal(*global))
+                    const std::optional<RootBinding> root = resolveTrackedRoot(*pointerOperand);
+                    if (!root.has_value())
                         continue;
 
                     PendingAccess access;
                     access.function = &function;
                     access.instruction = &instruction;
-                    access.fact.symbol = global->getName().str();
+                    access.root = *root;
                     access.fact.functionId = functionId(function);
                     access.fact.kind = kind;
-                    access.fact.location = makeSourceLocation(instruction);
+                    const ResolvedSourceLocations locations = resolveSourceLocations(instruction);
+                    access.fact.loweredLocation = locations.loweredLocation;
+                    access.fact.userLocation = locations.userLocation;
                     accesses.push_back(std::move(access));
                 }
             }
