@@ -158,6 +158,11 @@ namespace ctrace::concurrency::internal::analysis
                    std::tie(rhs.file, rhs.line, rhs.column, rhs.function);
         }
 
+        bool hasDistinctLoweredLocation(const AccessFact& access)
+        {
+            return !sameSourceLocation(access.userLocation, access.loweredLocation);
+        }
+
         bool shareSelfConcurrentEntry(const EntrySet& lhsEntries, const EntrySet& rhsEntries,
                                       const TUFacts& facts)
         {
@@ -193,7 +198,7 @@ namespace ctrace::concurrency::internal::analysis
             std::set<std::string> conflictKinds;
             conflictKinds.insert(conflictKindLabel(lhs.kind, rhs.kind));
 
-            if (sameSourceLocation(lhs.location, rhs.location) &&
+            if (sameSourceLocation(lhs.loweredLocation, rhs.loweredLocation) &&
                 shareSelfConcurrentEntry(lhsEntries, rhsEntries, facts) &&
                 (lhs.kind == AccessKind::Write || rhs.kind == AccessKind::Write))
             {
@@ -207,7 +212,7 @@ namespace ctrace::concurrency::internal::analysis
                                    const std::vector<std::string>& entries)
         {
             std::ostringstream stream;
-            stream << toString(access.kind) << " at " << formatLocation(access.location);
+            stream << toString(access.kind) << " at " << formatLocation(access.userLocation);
 
             if (!entries.empty())
                 stream << " (thread entries: " << joinValues(entries) << ")";
@@ -227,9 +232,9 @@ namespace ctrace::concurrency::internal::analysis
             const std::vector<std::string> conflictKinds =
                 collectConflictKinds(lhs, rhs, lhsEntries, rhsEntries, facts);
 
-            DiagnosticBuilder(report, RuleId::DataRaceGlobal)
-                .primaryLocation(lhs.location)
-                .relatedLocation("Conflicting access", rhs.location)
+            DiagnosticBuilder builder(report, RuleId::DataRaceGlobal);
+            builder.primaryLocation(lhs.userLocation)
+                .relatedLocation("Conflicting access", rhs.userLocation)
                 .message("unsynchronized concurrent access to global '" + lhs.symbol + "'")
                 .note("first access: " + describeAccess(lhs, orderedLhsEntries))
                 .note("conflicting access: " + describeAccess(rhs, orderedRhsEntries))
@@ -243,8 +248,14 @@ namespace ctrace::concurrency::internal::analysis
                 .property("firstThreadEntries", orderedLhsEntries)
                 .property("secondThreadEntries", orderedRhsEntries)
                 .property("conflictKinds", conflictKinds)
-                .property("variableAliasing", std::vector<std::string>{})
-                .emit();
+                .property("variableAliasing", std::vector<std::string>{});
+
+            if (hasDistinctLoweredLocation(lhs))
+                builder.relatedLocation("Lowered first access", lhs.loweredLocation);
+            if (hasDistinctLoweredLocation(rhs))
+                builder.relatedLocation("Lowered conflicting access", rhs.loweredLocation);
+
+            builder.emit();
         }
 
         void emitSelfConcurrentDiagnostic(DiagnosticReport& report, const AccessFact& access,
@@ -255,9 +266,9 @@ namespace ctrace::concurrency::internal::analysis
                 orderedEntries.empty() ? access.functionId : joinValues(orderedEntries);
             const std::vector<std::string> conflictKinds = {"write/write"};
 
-            DiagnosticBuilder(report, RuleId::DataRaceGlobal)
-                .primaryLocation(access.location)
-                .relatedLocation("Concurrent invocation", access.location)
+            DiagnosticBuilder builder(report, RuleId::DataRaceGlobal);
+            builder.primaryLocation(access.userLocation)
+                .relatedLocation("Concurrent invocation", access.userLocation)
                 .message("unsynchronized concurrent access to global '" + access.symbol + "'")
                 .note("access: " + describeAccess(access, orderedEntries))
                 .note("conflicts with another concurrent invocation reachable from thread entry "
@@ -273,8 +284,12 @@ namespace ctrace::concurrency::internal::analysis
                 .property("firstThreadEntries", orderedEntries)
                 .property("secondThreadEntries", orderedEntries)
                 .property("conflictKinds", conflictKinds)
-                .property("variableAliasing", std::vector<std::string>{})
-                .emit();
+                .property("variableAliasing", std::vector<std::string>{});
+
+            if (hasDistinctLoweredLocation(access))
+                builder.relatedLocation("Lowered access", access.loweredLocation);
+
+            builder.emit();
         }
 
         DiagnosticSummary computeSummary(const std::vector<Diagnostic>& diagnostics)
@@ -316,13 +331,13 @@ namespace ctrace::concurrency::internal::analysis
             for (const AccessFact& access : facts.accesses)
             {
                 FunctionSummary& summary = ensureSummary(access.functionId);
-                if (summary.name.empty() && !access.location.function.empty())
-                    summary.name = access.location.function;
-                else if (!access.location.function.empty())
-                    summary.name = access.location.function;
+                if (summary.name.empty() && !access.userLocation.function.empty())
+                    summary.name = access.userLocation.function;
+                else if (!access.userLocation.function.empty())
+                    summary.name = access.userLocation.function;
 
-                if (summary.file.empty() && !access.location.file.empty())
-                    summary.file = access.location.file;
+                if (summary.file.empty() && !access.userLocation.file.empty())
+                    summary.file = access.userLocation.file;
 
                 ++summary.sharedAccessCount;
                 if (!access.heldLocks.empty())
