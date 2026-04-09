@@ -21,6 +21,8 @@ tests/fixtures/concurrency/
 - **data_race_mixed_access.c**: Lectures et écritures mélangées sans synchronisation
 - **race_condition_check_then_use.c**: Pattern TOCTOU (check-then-use)
 - **cpp_data_race_class.cpp**: Data race dans une classe C++ non thread-safe
+- **cpp_shared_object_by_ref.cpp**: Propagation d'un objet global partagé via une référence
+- **cpp_thread_local_class.cpp**: Classe locale à chaque thread, ne doit pas être reportée
 - **cpp_race_std_async.cpp**: Data race avec std::async et shared state
 - **cpp_atomic_vs_non_atomic.cpp**: Mélange dangereux d'opérations atomiques et non-atomiques
 - **cpp_move_semantics_race.cpp**: Data race avec move semantics et unique_ptr

@@ -263,6 +263,24 @@ namespace
         }
 
         {
+            const RunResult result =
+                runAnalyzer({fixturePath("concurrency/data-race/cpp_data_race_class.cpp").string(),
+                             "--analyze"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--analyze on cpp_data_race_class should not fail the CLI") &&
+                 ok;
+            ok = assertContains(result.output, "ruleId: DataRaceGlobal",
+                                "cpp_data_race_class analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "symbol: global_counter",
+                                "cpp_data_race_class analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "Function: increment",
+                                "cpp_data_race_class analyze output") &&
+                 ok;
+        }
+
+        {
             const RunResult result = runAnalyzer(
                 {fixturePath("concurrency/data-race/data_race_mutex_protected.c").string(),
                  "--analyze"});
@@ -290,6 +308,30 @@ namespace
         }
 
         {
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/data-race/cpp_move_semantics_race.cpp").string(),
+                 "--analyze"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--analyze on cpp_move_semantics_race should succeed") &&
+                 ok;
+            ok = assertContains(result.output, "symbol: shared_resource",
+                                "cpp_move_semantics_race analyze output") &&
+                 ok;
+            ok = assertNotContains(result.output, "symbol: _ZNSt3__14coutE",
+                                   "cpp_move_semantics_race analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "Function: producer",
+                                "cpp_move_semantics_race analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "related: Lowered first access ->",
+                                "cpp_move_semantics_race analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "cpp_move_semantics_race.cpp:18:21 in producer",
+                                "cpp_move_semantics_race analyze output") &&
+                 ok;
+        }
+
+        {
             const RunResult result =
                 runAnalyzer({fixturePath("concurrency/data-race/data_race_basic.c").string(),
                              "--analyze", "--format=json"});
@@ -307,6 +349,30 @@ namespace
                  ok;
             ok = assertContains(result.output, "\"startLine\": 10", "json analyze output") && ok;
             ok = assertContains(result.output, "\"startColumn\": 23", "json analyze output") && ok;
+        }
+
+        {
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/data-race/cpp_move_semantics_race.cpp").string(),
+                 "--analyze", "--format=json"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--format=json on cpp_move_semantics_race should succeed") &&
+                 ok;
+            ok = assertContains(result.output, "\"symbol\": \"shared_resource\"",
+                                "cpp_move_semantics_race json output") &&
+                 ok;
+            ok = assertNotContains(result.output, "_ZNSt3__14coutE",
+                                   "cpp_move_semantics_race json output") &&
+                 ok;
+            ok = assertContains(result.output, "\"relatedLocations\": [",
+                                "cpp_move_semantics_race json output") &&
+                 ok;
+            ok = assertContains(result.output, "\"label\": \"Lowered first access\"",
+                                "cpp_move_semantics_race json output") &&
+                 ok;
+            ok = assertContains(result.output, "cpp_move_semantics_race.cpp",
+                                "cpp_move_semantics_race json output") &&
+                 ok;
         }
 
         {

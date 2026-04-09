@@ -37,4 +37,5 @@ int main() {
 // 	     ↳ conflicting access: write at ${REPO_ROOT}/tests/fixtures/concurrency/data-race/data_race_basic.c:10:23 in increment (thread entries: increment)
 // 	     ↳ possible conflict kinds: read/write, write/write
 // 	     ↳ no common recognized lock protects the conflicting accesses
+// 	related: Conflicting access -> ${REPO_ROOT}/tests/fixtures/concurrency/data-race/data_race_basic.c:10:23 in increment
 // EXPECT-HUMAN-DIAGNOSTICS-END

@@ -68,6 +68,12 @@ namespace
         return std::nullopt;
     }
 
+    bool locationReferencesFixture(const ctrace::concurrency::SourceLocation& location,
+                                   std::string_view fixtureName)
+    {
+        return location.file.find(fixtureName) != std::string::npos;
+    }
+
     bool hasDiagnosticForSymbol(const DiagnosticReport& report, std::string_view symbol)
     {
         return std::any_of(report.diagnostics.begin(), report.diagnostics.end(),
@@ -113,6 +119,36 @@ namespace
                           "cpp_atomic_vs_non_atomic should report state");
     }
 
+    bool testClassDataRaceReportsGlobalCounter()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_data_race_class.cpp");
+        if (!report.has_value())
+            return false;
+
+        return assertTrue(!report->diagnostics.empty(),
+                          "cpp_data_race_class should report a race") &&
+               assertTrue(hasDiagnosticForSymbol(*report, "global_counter"),
+                          "cpp_data_race_class should report global_counter") &&
+               assertTrue(report->diagnostics.front().location.function == "increment",
+                          "cpp_data_race_class should point to increment") &&
+               assertTrue(report->diagnostics.front().location.line == 13,
+                          "cpp_data_race_class should report line 13");
+    }
+
+    bool testSharedObjectByRefReportsGlobalCounter()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_shared_object_by_ref.cpp");
+        if (!report.has_value())
+            return false;
+
+        return assertTrue(!report->diagnostics.empty(),
+                          "cpp_shared_object_by_ref should report a race") &&
+               assertTrue(hasDiagnosticForSymbol(*report, "global_counter"),
+                          "cpp_shared_object_by_ref should report global_counter");
+    }
+
     bool testMutexProtectedFixtureHasNoDiagnostics()
     {
         const std::optional<DiagnosticReport> report =
@@ -140,6 +176,61 @@ namespace
                assertTrue(!hasDiagnosticForSymbol(*report, "safe_counter"),
                           "split-symbol fixture should not report safe_counter");
     }
+
+    bool testThreadLocalClassHasNoDiagnostics()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_thread_local_class.cpp");
+        if (!report.has_value())
+            return false;
+
+        return assertTrue(report->diagnostics.empty(),
+                          "thread-local class fixture should not report a race") &&
+               assertTrue(report->diagnosticsSummary.error == 0,
+                          "thread-local class fixture should not count error diagnostics");
+    }
+
+    bool testMoveSemanticsRaceUsesUserLocations()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_move_semantics_race.cpp");
+        if (!report.has_value())
+            return false;
+
+        bool allSharedResource = true;
+        bool allPrimaryLocationsInFixture = true;
+        bool hasLoweredRelatedLocation = false;
+
+        for (const auto& diagnostic : report->diagnostics)
+        {
+            const std::optional<std::string> symbol = symbolOf(diagnostic);
+            if (!symbol.has_value() || *symbol != "shared_resource")
+                allSharedResource = false;
+
+            if (!locationReferencesFixture(diagnostic.location, "cpp_move_semantics_race.cpp"))
+                allPrimaryLocationsInFixture = false;
+
+            for (const auto& related : diagnostic.relatedLocations)
+            {
+                if (related.label.starts_with("Lowered ") &&
+                    !locationReferencesFixture(related.location, "cpp_move_semantics_race.cpp"))
+                {
+                    hasLoweredRelatedLocation = true;
+                }
+            }
+        }
+
+        return assertTrue(!report->diagnostics.empty(),
+                          "cpp_move_semantics_race should report races") &&
+               assertTrue(allSharedResource,
+                          "cpp_move_semantics_race should only report shared_resource") &&
+               assertTrue(!hasDiagnosticForSymbol(*report, "_ZNSt3__14coutE"),
+                          "cpp_move_semantics_race should not report std::cout") &&
+               assertTrue(allPrimaryLocationsInFixture,
+                          "cpp_move_semantics_race should use fixture locations as primaries") &&
+               assertTrue(hasLoweredRelatedLocation,
+                          "cpp_move_semantics_race should preserve lowered related locations");
+    }
 } // namespace
 
 int main()
@@ -148,8 +239,12 @@ int main()
 
     ok = testDataRaceBasicIsReported() && ok;
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
+    ok = testClassDataRaceReportsGlobalCounter() && ok;
+    ok = testSharedObjectByRefReportsGlobalCounter() && ok;
     ok = testMutexProtectedFixtureHasNoDiagnostics() && ok;
     ok = testTwoGlobalFixtureOnlyReportsRacySymbol() && ok;
+    ok = testThreadLocalClassHasNoDiagnostics() && ok;
+    ok = testMoveSemanticsRaceUsesUserLocations() && ok;
 
     if (!ok)
         return 1;

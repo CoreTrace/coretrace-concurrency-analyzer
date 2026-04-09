@@ -81,8 +81,13 @@ entry:
 
     bool hasOutputFlagVariant(const std::vector<std::string>& args)
     {
-        return std::find_if(args.begin(), args.end(), [](const std::string& arg)
-                            { return isOutputFlagVariant(arg); }) != args.end();
+        for (const std::string& arg : args)
+        {
+            if (isOutputFlagVariant(arg))
+                return true;
+        }
+
+        return false;
     }
 
     std::optional<std::filesystem::path> findOutputPath(const std::vector<std::string>& args)
@@ -811,9 +816,7 @@ entry:
 
         const std::filesystem::path outputPath = fixturePath("build/output-attached.bc");
         const std::vector<std::string> bcArgs = CompileCommandBuilder::buildBC(request, outputPath);
-        const bool hasAttachedOutputFlag = std::any_of(
-            bcArgs.begin(), bcArgs.end(), [](const std::string& arg)
-            { return arg.rfind("-o=", 0) == 0 || (arg.size() > 2 && arg.rfind("-o", 0) == 0); });
+        const bool hasAttachedOutputFlag = hasOutputFlagVariant(bcArgs);
         const bool bcOk =
             assertTrue(countToken(bcArgs, "-o") == 1, "BC args should contain exactly one -o") &&
             assertTrue(hasOutputPair(bcArgs, outputPath.string()),

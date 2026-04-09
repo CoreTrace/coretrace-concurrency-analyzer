@@ -22,14 +22,14 @@ int main() {
     std::thread t1(worker);
     std::thread t2(worker);
     std::thread t3(worker);
-    
+
     t1.join();
     t2.join();
     t3.join();
-    
+
     std::cout << "Atomic counter: " << state.counter << std::endl;
-    std::cout << "Non-atomic total: " << state.total 
+    std::cout << "Non-atomic total: " << state.total
               << " (expected: 3000)" << std::endl;
-    
+
     return 0;
 }
