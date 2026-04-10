@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Test 12: Condition variable - attente sans boucle (spurious wakeup)
 #include <pthread.h>
+#include <stdio.h>
 #include <stdbool.h>
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
