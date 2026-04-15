@@ -62,7 +62,7 @@ Chaque point commence par une action, pour rester directement executable.
 - Tests: `cmake --build build -j4`; validation manuelle avec `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/missing-join/missing_join_basic.c --analyze --rules=missing-join --format=human`, `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/missing-join/missing_join_multiple.c --analyze --rules=missing-join --format=human`, `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/missing-join/missing_join_detach_mix.c --analyze --rules=missing-join --format=human` et `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/deadlock_basic.c --analyze --rules=all --format=human` pour verifier qu'un `pthread_join` reconnu n'emette plus de faux positif; `ctest --test-dir build --output-on-failure` avec passages de `coretrace_concurrency_analysis_tests` et `coretrace_concurrency_cli_cpp_tests`; echec observe, non lie a cette tache, sur `coretrace_concurrency_arch_tests` avec `BC args should strip stale attached -o variants before appending final pair`
 
 #### Etendre `MissingJoinDetector` au cycle de vie `std::thread` sans faux positifs sur move semantics
-- Status: `TODO`
+- Status: `DONE`
 - Pourquoi: les facts existent deja, mais le groupement des objets `std::thread` deplaces ou stockes en conteneur doit rester precis avant activation large.
 - Cibles probables:
   `src/internal/analysis/missing_join_detector.hpp`
@@ -70,7 +70,7 @@ Chaque point commence par une action, pour rester directement executable.
   `src/internal/analysis/ir_utils.hpp`
   `src/internal/analysis/ir_utils.cpp`
   `src/internal/analysis/concurrency_symbol_classifier.cpp`
-- Tests: `-`
+- Tests: `cmake --build build -j4`; validation manuelle avec `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/data-race/cpp_thread_local_class.cpp --analyze --rules=missing-join --format=human`, `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/missing-join/cpp_missing_join.cpp --analyze --rules=missing-join --format=human` et `./build/coretrace_concurrency_analyzer /tmp/coretrace_std_missing_join.cpp --analyze --rules=missing-join --format=human`; `ctest --test-dir build --output-on-failure` avec passages de `coretrace_concurrency_error_tests`, `coretrace_concurrency_analysis_tests` et `coretrace_concurrency_cli_cpp_tests`; echec observe, non lie a cette tache, sur `coretrace_concurrency_arch_tests` avec `BC args should strip stale attached -o variants before appending final pair`
 
 #### Implementer `LockOrderAnalyzer` pour detecter les inversions simples d'ordre de locks
 - Status: `DONE`
@@ -78,7 +78,7 @@ Chaque point commence par une action, pour rester directement executable.
 - Cibles probables:
   `src/internal/analysis/lock_order_analyzer.hpp`
   `src/internal/analysis/lock_order_analyzer.cpp`
-- Tests: `cmake --build build -j4`; validation manuelle avec `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/deadlock_basic.c --analyze --rules=deadlock-lock-order --format=human`, `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/deadlock_basic.c --analyze --rules=all --format=human`, `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/lock_order_violation.c --analyze --rules=deadlock-lock-order --format=human` et `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/recursive_deadlock.c --analyze --rules=deadlock-lock-order --format=human`; le perimetre actuellement livre couvre les inversions simples intraprocedurales et ne couvre pas encore les cycles 3+ ni la reacquisition via appel interprocedural; `ctest --test-dir build --output-on-failure` avec passages de `coretrace_concurrency_analysis_tests` et `coretrace_concurrency_cli_cpp_tests`; echec observe, non lie a cette tache, sur `coretrace_concurrency_arch_tests` avec `BC args should strip stale attached -o variants before appending final pair`
+- Tests: `cmake --build build -j4`; validation manuelle avec `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/deadlock_basic.c --analyze --rules=deadlock-lock-order --format=human`, `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/deadlock_basic.c --analyze --rules=all --format=human`, `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/lock_order_violation.c --analyze --rules=deadlock-lock-order --format=human` et `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/recursive_deadlock.c --analyze --rules=deadlock-lock-order --format=human`; le perimetre actuellement livre couvre les inversions simples et la reacquisition interprocedurale simple via appel direct, mais ne couvre pas encore les cycles 3+; `ctest --test-dir build --output-on-failure` avec passages de `coretrace_concurrency_analysis_tests` et `coretrace_concurrency_cli_cpp_tests`; echec observe, non lie a cette tache, sur `coretrace_concurrency_arch_tests` avec `BC args should strip stale attached -o variants before appending final pair`
 
 ### M2.4 - Integrer Les Nouveaux Checkers Dans Le Pipeline
 
@@ -110,22 +110,22 @@ Chaque point commence par une action, pour rester directement executable.
 ### M2.5 - Valider La Feature
 
 #### Ajouter les tests `missing-join` sur fixtures existantes apres autorisation explicite
-- Status: `TODO`
+- Status: `DONE`
 - Pourquoi: les fixtures existent deja, mais la modification des fichiers de tests du depot requiert une autorisation explicite.
 - Cibles probables:
   `tests/unit/test_concurrency_analysis.cpp`
   `tests/integration/cli/test_cli_cpp.cpp`
   `tests/integration/cli/test_human_output_golden.py`
-- Tests: `autorisation utilisateur requise`
+- Tests: ajout de cas `MissingJoin` dans `tests/unit/test_concurrency_analysis.cpp` pour `missing_join_basic.c`, `missing_join_detach_mix.c`, `cpp_std_thread_missing_join.cpp` et `cpp_missing_join.cpp`; ajout de cas CLI dans `tests/integration/cli/test_cli_cpp.cpp` pour le defaut `--analyze`, le filtrage `--rules=missing-join`, le filtrage multi-regles et la validation `--rules` sans `--analyze`; ajout de la fixture `tests/fixtures/concurrency/missing-join/cpp_std_thread_missing_join.cpp`; execution de `cmake --build build -j4`, `./build/coretrace_concurrency_analysis_tests`, `./build/coretrace_concurrency_cli_cpp_tests` et `ctest --test-dir build --output-on-failure` avec passages de `coretrace_concurrency_error_tests`, `coretrace_concurrency_analysis_tests` et `coretrace_concurrency_cli_cpp_tests`; echec observe, non lie a cette tache, sur `coretrace_concurrency_arch_tests` avec `BC args should strip stale attached -o variants before appending final pair`
 
 #### Ajouter les tests `deadlock` sur fixtures existantes apres autorisation explicite
-- Status: `TODO`
+- Status: `DONE`
 - Pourquoi: il faut verrouiller le comportement attendu avant de poursuivre vers `M3`.
 - Cibles probables:
   `tests/unit/test_concurrency_analysis.cpp`
   `tests/integration/cli/test_cli_cpp.cpp`
   `tests/integration/cli/test_human_output_golden.py`
-- Tests: `autorisation utilisateur requise`
+- Tests: ajout de cas `DeadlockLockOrder` dans `tests/unit/test_concurrency_analysis.cpp` pour `deadlock_basic.c` et `recursive_deadlock.c`; ajout de cas CLI dans `tests/integration/cli/test_cli_cpp.cpp` pour le defaut `--analyze` sur `deadlock_basic.c` et le filtre `--rules=deadlock-lock-order` sur `recursive_deadlock.c`; execution de `cmake --build build -j4`, `./build/coretrace_concurrency_analysis_tests`, `./build/coretrace_concurrency_cli_cpp_tests` et `ctest --test-dir build --output-on-failure` avec passages de `coretrace_concurrency_error_tests`, `coretrace_concurrency_analysis_tests` et `coretrace_concurrency_cli_cpp_tests`; echec observe, non lie a cette tache, sur `coretrace_concurrency_arch_tests` avec `BC args should strip stale attached -o variants before appending final pair`
 
 ## M3 - Alias Analysis Et Propagation Inter-Procedurale
 
@@ -190,21 +190,21 @@ Chaque point commence par une action, pour rester directement executable.
 ### M3.4 - Propager L'Etat Des Locks A Travers Les Appels
 
 #### Introduire `LockStatePropagator` pour fusionner locks du caller et locks du callee
-- Status: `TODO`
+- Status: `DONE`
 - Pourquoi: aujourd'hui la protection par lock est intraprocedurale; `M3` doit reconnaitre qu'un acces dans `f()` peut etre protege parce que `g()` appelle `f()` sous lock.
 - Cibles probables:
   `src/internal/analysis/lock_state_propagator.hpp`
   `src/internal/analysis/lock_state_propagator.cpp`
   `src/internal/analysis/facts.hpp`
   `src/internal/analysis/tu_facts_builder.cpp`
-- Tests: `-`
+- Tests: `cmake --build build -j4`; validation manuelle initiale avec `./build/coretrace_concurrency_analyzer /tmp/coretrace_callsite_lock_protected.c --analyze --format=human` pour verifier qu'un acces global dans un helper appele sous mutex ne remonte plus comme race; validation manuelle avec `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/recursive_deadlock.c --analyze --rules=deadlock-lock-order --format=human` pour verifier la propagation des locks d'entree de fonction; ajout de la fixture `tests/fixtures/concurrency/data-race/data_race_callsite_lock_protected.c`; ajout de cas automatises dans `tests/unit/test_concurrency_analysis.cpp` et `tests/integration/cli/test_cli_cpp.cpp`; `ctest --test-dir build --output-on-failure` avec passages de `coretrace_concurrency_analysis_tests` et `coretrace_concurrency_cli_cpp_tests`; echec observe, non lie a cette tache, sur `coretrace_concurrency_arch_tests` avec `BC args should strip stale attached -o variants before appending final pair`
 
 #### Mettre a jour les projections d'acces au callsite pour conserver les locks propagés
-- Status: `TODO`
+- Status: `DONE`
 - Pourquoi: la projection d'acces existe deja; il faut maintenant lui faire transporter l'etat de protection interprocedural.
 - Cibles probables:
   `src/internal/analysis/tu_facts_builder.cpp`
-- Tests: `-`
+- Tests: `cmake --build build -j4`; validation manuelle avec `./build/coretrace_concurrency_analyzer /tmp/coretrace_callsite_lock_protected.c --analyze --format=human` et `./build/coretrace_concurrency_analyzer tests/fixtures/concurrency/data-race/data_race_basic.c --analyze --format=human`; `ctest --test-dir build --output-on-failure` avec passages de `coretrace_concurrency_analysis_tests` et `coretrace_concurrency_cli_cpp_tests`; echec observe, non lie a cette tache, sur `coretrace_concurrency_arch_tests` avec `BC args should strip stale attached -o variants before appending final pair`
 
 ### M3.5 - Stabiliser Le Rapport Et La Precision
 
