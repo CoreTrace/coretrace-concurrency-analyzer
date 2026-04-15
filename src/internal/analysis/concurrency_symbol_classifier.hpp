@@ -16,9 +16,13 @@ namespace ctrace::concurrency::internal::analysis
     {
         Unknown,
         PThreadCreate,
+        PThreadJoin,
+        PThreadDetach,
         PThreadMutexLock,
         PThreadMutexUnlock,
         StdThreadCtor,
+        StdThreadJoin,
+        StdThreadDetach,
         StdMutexLock,
         StdMutexUnlock,
     };
