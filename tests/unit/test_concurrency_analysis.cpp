@@ -5,6 +5,7 @@
 #include <llvm/IR/LLVMContext.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
 #include <optional>
@@ -16,6 +17,8 @@ namespace
 {
     using ctrace::concurrency::CompileRequest;
     using ctrace::concurrency::CompileResult;
+    using ctrace::concurrency::AnalysisOptions;
+    using ctrace::concurrency::Diagnostic;
     using ctrace::concurrency::DiagnosticReport;
     using ctrace::concurrency::InMemoryIRCompiler;
     using ctrace::concurrency::IRFormat;
@@ -36,7 +39,8 @@ namespace
         return false;
     }
 
-    std::optional<DiagnosticReport> analyzeFixture(std::string_view relativePath)
+    std::optional<DiagnosticReport> analyzeFixture(std::string_view relativePath,
+                                                   AnalysisOptions options = {})
     {
         llvm::LLVMContext context;
         InMemoryIRCompiler compiler;
@@ -52,11 +56,11 @@ namespace
             return std::nullopt;
         }
 
-        SingleTUConcurrencyAnalyzer analyzer;
+        SingleTUConcurrencyAnalyzer analyzer(std::move(options));
         return analyzer.analyze(*compileResult.module);
     }
 
-    std::optional<std::string> symbolOf(const ctrace::concurrency::Diagnostic& diagnostic)
+    std::optional<std::string> symbolOf(const Diagnostic& diagnostic)
     {
         const auto it = diagnostic.properties.find("symbol");
         if (it == diagnostic.properties.end())
@@ -74,6 +78,32 @@ namespace
         return location.file.find(fixtureName) != std::string::npos;
     }
 
+    std::optional<std::string> stringPropertyOf(const Diagnostic& diagnostic,
+                                                std::string_view propertyName)
+    {
+        const auto it = diagnostic.properties.find(std::string(propertyName));
+        if (it == diagnostic.properties.end())
+            return std::nullopt;
+
+        if (const auto* value = std::get_if<std::string>(&it->second))
+            return *value;
+
+        return std::nullopt;
+    }
+
+    std::optional<std::int64_t> intPropertyOf(const Diagnostic& diagnostic,
+                                              std::string_view propertyName)
+    {
+        const auto it = diagnostic.properties.find(std::string(propertyName));
+        if (it == diagnostic.properties.end())
+            return std::nullopt;
+
+        if (const auto* value = std::get_if<std::int64_t>(&it->second))
+            return *value;
+
+        return std::nullopt;
+    }
+
     bool hasDiagnosticForSymbol(const DiagnosticReport& report, std::string_view symbol)
     {
         return std::any_of(report.diagnostics.begin(), report.diagnostics.end(),
@@ -84,10 +114,32 @@ namespace
                            });
     }
 
+    const Diagnostic* findFirstDiagnosticForRule(const DiagnosticReport& report, RuleId ruleId)
+    {
+        const auto it =
+            std::find_if(report.diagnostics.begin(), report.diagnostics.end(),
+                         [ruleId](const Diagnostic& diagnostic)
+                         {
+                             return diagnostic.ruleId == ruleId;
+                         });
+        return it == report.diagnostics.end() ? nullptr : &*it;
+    }
+
+    std::size_t countDiagnosticsForRule(const DiagnosticReport& report, RuleId ruleId)
+    {
+        return static_cast<std::size_t>(
+            std::count_if(report.diagnostics.begin(), report.diagnostics.end(),
+                          [ruleId](const Diagnostic& diagnostic)
+                          {
+                              return diagnostic.ruleId == ruleId;
+                          }));
+    }
+
     bool testDataRaceBasicIsReported()
     {
         const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/data-race/data_race_basic.c");
+            analyzeFixture("tests/fixtures/concurrency/data-race/data_race_basic.c",
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
         if (!report.has_value())
             return false;
 
@@ -109,7 +161,8 @@ namespace
     bool testAtomicVsNonAtomicReportsSharedState()
     {
         const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_atomic_vs_non_atomic.cpp");
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_atomic_vs_non_atomic.cpp",
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
         if (!report.has_value())
             return false;
 
@@ -122,7 +175,8 @@ namespace
     bool testClassDataRaceReportsGlobalCounter()
     {
         const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_data_race_class.cpp");
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_data_race_class.cpp",
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
         if (!report.has_value())
             return false;
 
@@ -139,7 +193,8 @@ namespace
     bool testSharedObjectByRefReportsGlobalCounter()
     {
         const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_shared_object_by_ref.cpp");
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_shared_object_by_ref.cpp",
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
         if (!report.has_value())
             return false;
 
@@ -152,7 +207,8 @@ namespace
     bool testMutexProtectedFixtureHasNoDiagnostics()
     {
         const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/data-race/data_race_mutex_protected.c");
+            analyzeFixture("tests/fixtures/concurrency/data-race/data_race_mutex_protected.c",
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
         if (!report.has_value())
             return false;
 
@@ -165,7 +221,8 @@ namespace
     bool testTwoGlobalFixtureOnlyReportsRacySymbol()
     {
         const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/data-race/data_race_split_symbols.c");
+            analyzeFixture("tests/fixtures/concurrency/data-race/data_race_split_symbols.c",
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
         if (!report.has_value())
             return false;
 
@@ -180,20 +237,24 @@ namespace
     bool testThreadLocalClassHasNoDiagnostics()
     {
         const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_thread_local_class.cpp");
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_thread_local_class.cpp",
+                           AnalysisOptions{.enabledRules = {RuleId::MissingJoin}});
         if (!report.has_value())
             return false;
 
         return assertTrue(report->diagnostics.empty(),
-                          "thread-local class fixture should not report a race") &&
+                          "thread-local class fixture should not report missing join") &&
                assertTrue(report->diagnosticsSummary.error == 0,
-                          "thread-local class fixture should not count error diagnostics");
+                          "thread-local class fixture should not count error diagnostics") &&
+               assertTrue(report->diagnosticsSummary.warning == 0,
+                          "thread-local class fixture should not count warning diagnostics");
     }
 
     bool testMoveSemanticsRaceUsesUserLocations()
     {
         const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_move_semantics_race.cpp");
+            analyzeFixture("tests/fixtures/concurrency/data-race/cpp_move_semantics_race.cpp",
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
         if (!report.has_value())
             return false;
 
@@ -231,6 +292,138 @@ namespace
                assertTrue(hasLoweredRelatedLocation,
                           "cpp_move_semantics_race should preserve lowered related locations");
     }
+
+    bool testCallsiteLockProtectedHelperHasNoRace()
+    {
+        const std::optional<DiagnosticReport> report = analyzeFixture(
+            "tests/fixtures/concurrency/data-race/data_race_callsite_lock_protected.c",
+            AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
+        if (!report.has_value())
+            return false;
+
+        return assertTrue(report->diagnostics.empty(),
+                          "callsite-protected helper fixture should not report a race") &&
+               assertTrue(report->diagnosticsSummary.error == 0,
+                          "callsite-protected helper fixture should not count error diagnostics");
+    }
+
+    bool testMissingJoinBasicReportsOutstandingPThread()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/missing-join/missing_join_basic.c",
+                           AnalysisOptions{.enabledRules = {RuleId::MissingJoin}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic = findFirstDiagnosticForRule(*report, RuleId::MissingJoin);
+        return assertTrue(diagnostic != nullptr,
+                          "missing_join_basic should report a missing pthread join") &&
+               assertTrue(countDiagnosticsForRule(*report, RuleId::MissingJoin) == 1,
+                          "missing_join_basic should emit a single missing-join diagnostic") &&
+               assertTrue(diagnostic->location.function == "main",
+                          "missing_join_basic should point to main") &&
+               assertTrue(stringPropertyOf(*diagnostic, "handleKind") == "pthread",
+                          "missing_join_basic should classify the handle as pthread") &&
+               assertTrue(intPropertyOf(*diagnostic, "outstandingCount") == 1,
+                          "missing_join_basic should report one outstanding thread");
+    }
+
+    bool testMissingJoinDetachMixReportsOnlyOutstandingThread()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/missing-join/missing_join_detach_mix.c",
+                           AnalysisOptions{.enabledRules = {RuleId::MissingJoin}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic = findFirstDiagnosticForRule(*report, RuleId::MissingJoin);
+        return assertTrue(diagnostic != nullptr,
+                          "missing_join_detach_mix should report one outstanding thread") &&
+               assertTrue(countDiagnosticsForRule(*report, RuleId::MissingJoin) == 1,
+                          "missing_join_detach_mix should emit one missing-join diagnostic") &&
+               assertTrue(intPropertyOf(*diagnostic, "createCount") == 1,
+                          "missing_join_detach_mix should report one unresolved thread creation") &&
+               assertTrue(intPropertyOf(*diagnostic, "detachCount") == 0,
+                          "missing_join_detach_mix diagnostic should track only the unresolved handle") &&
+               assertTrue(intPropertyOf(*diagnostic, "outstandingCount") == 1,
+                          "missing_join_detach_mix should report one outstanding handle");
+    }
+
+    bool testStdThreadMissingJoinReportsJoinableHandle()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/missing-join/cpp_std_thread_missing_join.cpp",
+                           AnalysisOptions{.enabledRules = {RuleId::MissingJoin}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic = findFirstDiagnosticForRule(*report, RuleId::MissingJoin);
+        return assertTrue(diagnostic != nullptr,
+                          "cpp_std_thread_missing_join should report a std::thread leak") &&
+               assertTrue(countDiagnosticsForRule(*report, RuleId::MissingJoin) == 1,
+                          "cpp_std_thread_missing_join should emit one missing-join diagnostic") &&
+               assertTrue(stringPropertyOf(*diagnostic, "handleKind") == "std::thread",
+                          "cpp_std_thread_missing_join should classify the handle as std::thread") &&
+               assertTrue(intPropertyOf(*diagnostic, "outstandingCount") == 1,
+                          "cpp_std_thread_missing_join should report one outstanding handle");
+    }
+
+    bool testDetachedStdThreadFixtureHasNoMissingJoin()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/missing-join/cpp_missing_join.cpp",
+                           AnalysisOptions{.enabledRules = {RuleId::MissingJoin}});
+        if (!report.has_value())
+            return false;
+
+        return assertTrue(report->diagnostics.empty(),
+                          "cpp_missing_join should not report missing join after detach") &&
+               assertTrue(report->diagnosticsSummary.warning == 0,
+                          "cpp_missing_join should not count warning diagnostics");
+    }
+
+    bool testDeadlockBasicReportsLockOrderCycle()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/deadlock/deadlock_basic.c",
+                           AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic =
+            findFirstDiagnosticForRule(*report, RuleId::DeadlockLockOrder);
+        const std::optional<std::string> firstLock =
+            diagnostic == nullptr ? std::nullopt : stringPropertyOf(*diagnostic, "firstLock");
+        const std::optional<std::string> secondLock =
+            diagnostic == nullptr ? std::nullopt : stringPropertyOf(*diagnostic, "secondLock");
+
+        return assertTrue(diagnostic != nullptr,
+                          "deadlock_basic should report a lock-order inversion") &&
+               assertTrue(firstLock.has_value() && secondLock.has_value() &&
+                              *firstLock != *secondLock,
+                          "deadlock_basic should report two distinct locks") &&
+               assertTrue(!diagnostic->relatedLocations.empty(),
+                          "deadlock_basic should provide a conflicting lock-order location");
+    }
+
+    bool testRecursiveDeadlockReportsReacquiredLock()
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/deadlock/recursive_deadlock.c",
+                           AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic =
+            findFirstDiagnosticForRule(*report, RuleId::DeadlockLockOrder);
+        return assertTrue(diagnostic != nullptr,
+                          "recursive_deadlock should report a self-deadlock") &&
+               assertTrue(diagnostic->location.function == "helper_function",
+                          "recursive_deadlock should point to helper_function") &&
+               assertTrue(stringPropertyOf(*diagnostic, "firstLock") ==
+                              stringPropertyOf(*diagnostic, "secondLock"),
+                          "recursive_deadlock should report reacquiring the same lock");
+    }
 } // namespace
 
 int main()
@@ -245,6 +438,13 @@ int main()
     ok = testTwoGlobalFixtureOnlyReportsRacySymbol() && ok;
     ok = testThreadLocalClassHasNoDiagnostics() && ok;
     ok = testMoveSemanticsRaceUsesUserLocations() && ok;
+    ok = testCallsiteLockProtectedHelperHasNoRace() && ok;
+    ok = testMissingJoinBasicReportsOutstandingPThread() && ok;
+    ok = testMissingJoinDetachMixReportsOnlyOutstandingThread() && ok;
+    ok = testStdThreadMissingJoinReportsJoinableHandle() && ok;
+    ok = testDetachedStdThreadFixtureHasNoMissingJoin() && ok;
+    ok = testDeadlockBasicReportsLockOrderCycle() && ok;
+    ok = testRecursiveDeadlockReportsReacquiredLock() && ok;
 
     if (!ok)
         return 1;
