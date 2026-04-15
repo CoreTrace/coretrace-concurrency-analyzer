@@ -21,8 +21,22 @@ namespace ctrace::concurrency::internal::analysis
 
         bool isStdThreadCtor(llvm::StringRef name)
         {
-            return name.contains("thread") &&
-                   (name.contains("threadC1") || name.contains("threadC2"));
+            if (!name.contains("thread"))
+                return false;
+
+            const bool isCtor = name.contains("threadC1") || name.contains("threadC2");
+            if (!isCtor)
+                return false;
+
+            // Exclude default/copy/move constructors; only thread-starting constructors
+            // should materialize lifecycle create facts.
+            if (name.contains("threadC1Ev") || name.contains("threadC2Ev") ||
+                name.contains("ERKS0_") || name.contains("EOS0_"))
+            {
+                return false;
+            }
+
+            return true;
         }
 
         bool matchesPlainSymbol(llvm::StringRef actual, llvm::StringRef expected)
