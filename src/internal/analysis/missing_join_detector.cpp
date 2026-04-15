@@ -81,9 +81,7 @@ namespace ctrace::concurrency::internal::analysis
         DiagnosticReport report;
         for (const auto& [groupId, summary] : summariesByGroup)
         {
-            (void)groupId;
-
-            if (summary.handleKind != ThreadHandleKind::PThread)
+            if (groupId.starts_with("arg:"))
                 continue;
 
             const std::size_t resolvedCount = summary.joinCount + summary.detachCount;
