@@ -96,7 +96,9 @@ namespace ctrace::concurrency::internal::analysis
     {
     }
 
-    std::vector<LockOrderFact> LockOrderCollector::collect(const llvm::Function& function) const
+    std::vector<LockOrderFact>
+    LockOrderCollector::collect(const llvm::Function& function,
+                                const std::set<std::string>& initialHeldLocks) const
     {
         std::vector<LockOrderFact> facts;
         std::unordered_set<std::string> factKeys;
@@ -120,7 +122,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         const llvm::BasicBlock* entryBlock = &function.getEntryBlock();
-        inStates[entryBlock] = LockSet{};
+        inStates[entryBlock] = initialHeldLocks;
 
         bool changed = true;
         while (changed)
