@@ -37,6 +37,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/interprocedural_bindings.cpp
     src/internal/analysis/lock_order_analyzer.cpp
     src/internal/analysis/lock_order_collector.cpp
+    src/internal/analysis/lock_state_propagator.cpp
     src/internal/analysis/missing_join_detector.cpp
     src/internal/analysis/report_builder.cpp
     src/internal/diagnostics/compiler_diagnostic_parser.cpp
