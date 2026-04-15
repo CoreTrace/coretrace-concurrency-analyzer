@@ -2,10 +2,14 @@
 #include "tu_facts_builder.hpp"
 
 #include "concurrency_symbol_classifier.hpp"
+#include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
+#include "lock_order_collector.hpp"
 #include "lock_scope_tracker.hpp"
 #include "shared_access_collector.hpp"
+#include "thread_lifecycle_collector.hpp"
 #include "thread_spawn_detector.hpp"
+#include "thread_context_propagator.hpp"
 
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Function.h>
@@ -163,46 +167,31 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         std::vector<DirectCallBinding>
-        collectDirectCallBindings(const llvm::Module& module,
-                                  const ConcurrencySymbolClassifier& classifier)
+        buildDirectCallBindings(const std::vector<DirectCallSite>& sites)
         {
             std::vector<DirectCallBinding> bindings;
 
-            for (const llvm::Function& function : module)
+            for (const DirectCallSite& site : sites)
             {
-                if (function.isDeclaration())
+                if (site.call == nullptr)
                     continue;
 
-                for (const llvm::BasicBlock& block : function)
+                DirectCallBinding binding;
+                binding.callerFunctionId = site.callerFunctionId;
+                binding.calleeFunctionId = site.calleeFunctionId;
+                binding.callsiteLocation = site.userLocation;
+
+                for (unsigned argumentIndex = 0; argumentIndex < site.call->arg_size();
+                     ++argumentIndex)
                 {
-                    for (const llvm::Instruction& instruction : block)
-                    {
-                        const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                        if (call == nullptr)
-                            continue;
-
-                        const llvm::Function* callee = classifier.directCallee(*call);
-                        if (callee == nullptr || callee->isDeclaration())
-                            continue;
-
-                        DirectCallBinding binding;
-                        binding.callerFunctionId = functionId(function);
-                        binding.calleeFunctionId = functionId(*callee);
-                        binding.callsiteLocation = resolveSourceLocations(instruction).userLocation;
-
-                        for (unsigned argumentIndex = 0; argumentIndex < call->arg_size();
-                             ++argumentIndex)
-                        {
-                            const std::optional<RootBinding> root =
-                                resolveTrackedRoot(*call->getArgOperand(argumentIndex));
-                            if (root.has_value())
-                                binding.argumentBindings.emplace(argumentIndex, *root);
-                        }
-
-                        if (!binding.argumentBindings.empty())
-                            bindings.push_back(std::move(binding));
-                    }
+                    const std::optional<RootBinding> root =
+                        resolveTrackedRoot(*site.call->getArgOperand(argumentIndex));
+                    if (root.has_value())
+                        binding.argumentBindings.emplace(argumentIndex, *root);
                 }
+
+                if (!binding.argumentBindings.empty())
+                    bindings.push_back(std::move(binding));
             }
 
             return bindings;
@@ -215,6 +204,7 @@ namespace ctrace::concurrency::internal::analysis
 
         ThreadSpawnDetector spawnDetector(classifier);
         ThreadSpawnCollection spawnFacts = spawnDetector.collect(module);
+        ThreadLifecycleCollector threadLifecycleCollector(classifier);
 
         SharedAccessCollector accessCollector;
         std::vector<PendingAccess> pendingAccesses = accessCollector.collect(module);
@@ -242,9 +232,25 @@ namespace ctrace::concurrency::internal::analysis
             heldLocksByAccess.insert(functionLocks.begin(), functionLocks.end());
         }
 
+        ThreadContextPropagator threadContextPropagator(classifier);
+
         TUFacts facts;
         facts.spawns = std::move(spawnFacts.spawns);
         facts.entryConcurrency = std::move(spawnFacts.entryConcurrency);
+        facts.threadLifecycles = threadLifecycleCollector.collect(module);
+        facts.reachableThreadEntriesByFunction =
+            threadContextPropagator.collect(module, facts.entryConcurrency);
+
+        LockOrderCollector lockOrderCollector(classifier);
+        for (const llvm::Function& function : module)
+        {
+            if (function.isDeclaration())
+                continue;
+
+            std::vector<LockOrderFact> functionLockOrders = lockOrderCollector.collect(function);
+            facts.lockOrders.insert(facts.lockOrders.end(), functionLockOrders.begin(),
+                                    functionLockOrders.end());
+        }
 
         std::vector<AccessFact> concreteAccesses;
         std::unordered_set<std::string> concreteAccessKeys;
@@ -275,7 +281,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         const std::vector<DirectCallBinding> directCallBindings =
-            collectDirectCallBindings(module, classifier);
+            buildDirectCallBindings(collectDirectCallSites(module, classifier));
 
         bool changed = true;
         while (changed)
