@@ -33,7 +33,7 @@ namespace
                "module\n"
             << "  --rules=data-race|missing-join|deadlock-lock-order|all\n"
             << "                           Comma-separated rule selection for --analyze "
-               "(default: data-race)\n"
+               "(default: all available rules)\n"
             << "  --format=human|json|sarif\n"
             << "                           Diagnostic output format for --analyze (default: "
                "human)\n"
