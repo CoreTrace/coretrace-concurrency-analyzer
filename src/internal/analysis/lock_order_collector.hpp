@@ -19,7 +19,9 @@ namespace ctrace::concurrency::internal::analysis
       public:
         explicit LockOrderCollector(const ConcurrencySymbolClassifier& classifier);
 
-        [[nodiscard]] std::vector<LockOrderFact> collect(const llvm::Function& function) const;
+        [[nodiscard]] std::vector<LockOrderFact>
+        collect(const llvm::Function& function,
+                const std::set<std::string>& initialHeldLocks = {}) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
