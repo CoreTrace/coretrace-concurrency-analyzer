@@ -50,6 +50,8 @@ namespace ctrace::concurrency::internal::analysis
 
         const llvm::Value* followLocalPointerCopy(const llvm::LoadInst& load,
                                                   llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
+        const llvm::Value* followStoredPointerValue(const llvm::LoadInst& load,
+                                                    llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
 
         std::string printValueOperand(const llvm::Value& value)
         {
@@ -180,6 +182,47 @@ namespace ctrace::concurrency::internal::analysis
 
             return resolveCopiedValue(*storedValue, seen);
         }
+
+        const llvm::Value* followStoredPointerValue(const llvm::LoadInst& load,
+                                                    llvm::SmallPtrSetImpl<const llvm::Value*>& seen)
+        {
+            const llvm::Value* slot = load.getPointerOperand()->stripPointerCastsAndAliases();
+            const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(slot);
+            if (alloca == nullptr || !seen.insert(alloca).second)
+                return nullptr;
+
+            const llvm::Value* storedValue = nullptr;
+            for (const llvm::User* user : alloca->users())
+            {
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+                {
+                    if (store->getPointerOperand()->stripPointerCastsAndAliases() != alloca)
+                        return nullptr;
+
+                    const llvm::Value* candidate =
+                        store->getValueOperand()->stripPointerCastsAndAliases();
+                    if (storedValue == nullptr)
+                        storedValue = candidate;
+                    else if (storedValue != candidate)
+                        return nullptr;
+                    continue;
+                }
+
+                if (const auto* localLoad = llvm::dyn_cast<llvm::LoadInst>(user))
+                {
+                    if (localLoad->getPointerOperand()->stripPointerCastsAndAliases() != alloca)
+                        return nullptr;
+                    continue;
+                }
+
+                if (canIgnoreLocalSlotUser(*user))
+                    continue;
+
+                return nullptr;
+            }
+
+            return storedValue;
+        }
     } // namespace
 
     bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global)
@@ -251,6 +294,17 @@ namespace ctrace::concurrency::internal::analysis
 
             if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(current))
             {
+                // Probe stored-pointer forwarding on a local copy of the visited set so a failed
+                // probe does not poison the main traversal. This keeps the fallback path able to
+                // resolve the load's storage slot itself, which is required for handles whose
+                // value is produced by calls like pthread_create and later consumed by join/detach.
+                llvm::SmallPtrSet<const llvm::Value*, 8> probeSeen = seen;
+                if (const llvm::Value* copiedValue = followStoredPointerValue(*load, probeSeen))
+                {
+                    current = copiedValue;
+                    continue;
+                }
+
                 current = load->getPointerOperand();
                 continue;
             }
