@@ -187,8 +187,7 @@ namespace
             enabledRules.push_back(ruleId);
     }
 
-    bool parseAnalysisRules(std::string_view value,
-                            ctrace::concurrency::AnalysisOptions& options)
+    bool parseAnalysisRules(std::string_view value, ctrace::concurrency::AnalysisOptions& options)
     {
         if (value == "all")
         {

@@ -39,8 +39,9 @@ namespace ctrace::concurrency::internal::analysis
     {
     }
 
-    LockPropagationResult LockStatePropagator::collect(
-        const llvm::Module& module, const std::vector<DirectCallSite>& callSites) const
+    LockPropagationResult
+    LockStatePropagator::collect(const llvm::Module& module,
+                                 const std::vector<DirectCallSite>& callSites) const
     {
         std::unordered_map<const llvm::Function*, std::unordered_set<const llvm::Instruction*>>
             trackedCallsByFunction;
@@ -125,8 +126,7 @@ namespace ctrace::concurrency::internal::analysis
                     }
                     else
                     {
-                        mergedEntryLocks =
-                            intersectHeldLocks(mergedEntryLocks, effectiveCallLocks);
+                        mergedEntryLocks = intersectHeldLocks(mergedEntryLocks, effectiveCallLocks);
                     }
                 }
 

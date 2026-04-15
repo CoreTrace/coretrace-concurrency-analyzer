@@ -78,10 +78,10 @@ namespace ctrace::concurrency::internal::analysis
         std::string lifecycleFactKey(const ThreadLifecycleFact& fact)
         {
             std::ostringstream stream;
-            stream << static_cast<int>(fact.handleKind) << "|"
-                   << static_cast<int>(fact.action) << "|" << fact.handleGroupId << "|"
-                   << fact.functionId << "|" << fact.location.file << "|" << fact.location.line
-                   << "|" << fact.location.column << "|" << fact.location.function;
+            stream << static_cast<int>(fact.handleKind) << "|" << static_cast<int>(fact.action)
+                   << "|" << fact.handleGroupId << "|" << fact.functionId << "|"
+                   << fact.location.file << "|" << fact.location.line << "|" << fact.location.column
+                   << "|" << fact.location.function;
             return stream.str();
         }
 
@@ -220,9 +220,8 @@ namespace ctrace::concurrency::internal::analysis
                 return std::nullopt;
 
             LifecycleArgumentBinding binding;
-            binding.argumentIndex =
-                static_cast<unsigned>(std::stoul(fact.handleGroupId.substr(indexBegin,
-                                                                           indexEnd - indexBegin)));
+            binding.argumentIndex = static_cast<unsigned>(
+                std::stoul(fact.handleGroupId.substr(indexBegin, indexEnd - indexBegin)));
             binding.suffix = fact.handleGroupId.substr(indexEnd);
             return binding;
         }
@@ -249,8 +248,7 @@ namespace ctrace::concurrency::internal::analysis
 
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
-            const std::unordered_map<const llvm::CallBase*, std::set<std::string>>&
-                heldLocksByCall)
+            const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall)
         {
             std::vector<DirectCallBinding> bindings;
 
@@ -360,8 +358,8 @@ namespace ctrace::concurrency::internal::analysis
                     if (!binding.has_value() || binding->argumentIndex >= callSite.call->arg_size())
                         continue;
 
-                    const auto callerGroup =
-                        canonicalStorageGroupId(*callSite.call->getArgOperand(binding->argumentIndex));
+                    const auto callerGroup = canonicalStorageGroupId(
+                        *callSite.call->getArgOperand(binding->argumentIndex));
                     if (!callerGroup.has_value())
                         continue;
 

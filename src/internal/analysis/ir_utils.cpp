@@ -50,8 +50,9 @@ namespace ctrace::concurrency::internal::analysis
 
         const llvm::Value* followLocalPointerCopy(const llvm::LoadInst& load,
                                                   llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
-        const llvm::Value* followStoredPointerValue(const llvm::LoadInst& load,
-                                                    llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
+        const llvm::Value*
+        followStoredPointerValue(const llvm::LoadInst& load,
+                                 llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
 
         std::string printValueOperand(const llvm::Value& value)
         {

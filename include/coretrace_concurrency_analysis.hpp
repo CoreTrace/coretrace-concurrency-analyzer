@@ -142,8 +142,7 @@ namespace ctrace::concurrency
 
         [[nodiscard]] static AnalysisOptions allAvailable()
         {
-            return AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal,
-                                                    RuleId::MissingJoin,
+            return AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
                                                     RuleId::DeadlockLockOrder}};
         }
     };

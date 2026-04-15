@@ -27,8 +27,8 @@ namespace ctrace::concurrency::internal::analysis
       public:
         explicit LockStatePropagator(const ConcurrencySymbolClassifier& classifier);
 
-        [[nodiscard]] LockPropagationResult collect(const llvm::Module& module,
-                                                    const std::vector<DirectCallSite>& callSites) const;
+        [[nodiscard]] LockPropagationResult
+        collect(const llvm::Module& module, const std::vector<DirectCallSite>& callSites) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;

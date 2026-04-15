@@ -479,12 +479,12 @@ namespace
         bool ok = true;
 
         {
-            const RunResult result = runAnalyzer(
-                {fixturePath("concurrency/missing-join/missing_join_basic.c").string(),
-                 "--analyze"});
-            ok = assertTrue(result.exitCode == 0,
-                            "default --analyze should include missing-join") &&
-                 ok;
+            const RunResult result =
+                runAnalyzer({fixturePath("concurrency/missing-join/missing_join_basic.c").string(),
+                             "--analyze"});
+            ok =
+                assertTrue(result.exitCode == 0, "default --analyze should include missing-join") &&
+                ok;
             ok = assertContains(result.output, "ruleId: MissingJoin",
                                 "default missing-join output") &&
                  ok;
@@ -498,11 +498,9 @@ namespace
                 runAnalyzer({fixturePath("concurrency/data-race/data_race_basic.c").string(),
                              "--analyze", "--rules=data-race"});
             ok = assertTrue(result.exitCode == 0, "--rules=data-race should succeed") && ok;
-            ok = assertContains(result.output, "ruleId: DataRaceGlobal",
-                                "data-race-only output") &&
+            ok = assertContains(result.output, "ruleId: DataRaceGlobal", "data-race-only output") &&
                  ok;
-            ok = assertNotContains(result.output, "ruleId: MissingJoin",
-                                   "data-race-only output") &&
+            ok = assertNotContains(result.output, "ruleId: MissingJoin", "data-race-only output") &&
                  ok;
         }
 
@@ -519,9 +517,9 @@ namespace
         }
 
         {
-            const RunResult result =
-                runAnalyzer({fixturePath("concurrency/missing-join/missing_join_multiple.c").string(),
-                             "--analyze", "--rules=data-race,missing-join"});
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/missing-join/missing_join_multiple.c").string(),
+                 "--analyze", "--rules=data-race,missing-join"});
             ok = assertTrue(result.exitCode == 0, "multi-rule selection should succeed") && ok;
             ok = assertContains(result.output, "ruleId: DataRaceGlobal",
                                 "multi-rule selection output") &&
@@ -532,9 +530,8 @@ namespace
         }
 
         {
-            const RunResult result =
-                runAnalyzer({fixturePath("concurrency/deadlock/deadlock_basic.c").string(),
-                             "--analyze"});
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/deadlock/deadlock_basic.c").string(), "--analyze"});
             ok = assertTrue(result.exitCode == 0,
                             "default --analyze should include deadlock detection") &&
                  ok;
@@ -556,16 +553,17 @@ namespace
                                 "potential deadlock caused by reacquiring a non-recursive lock",
                                 "recursive deadlock output") &&
                  ok;
-            ok = assertContains(result.output, "helper_function", "recursive deadlock output") &&
-                 ok;
+            ok =
+                assertContains(result.output, "helper_function", "recursive deadlock output") && ok;
         }
 
         {
             const RunResult result = runAnalyzer(
                 {fixturePath("concurrency/missing-join/cpp_std_thread_missing_join.cpp").string(),
                  "--analyze", "--rules=missing-join"});
-            ok = assertTrue(result.exitCode == 0, "std::thread missing-join analysis should pass") &&
-                 ok;
+            ok =
+                assertTrue(result.exitCode == 0, "std::thread missing-join analysis should pass") &&
+                ok;
             ok = assertContains(result.output, "ruleId: MissingJoin",
                                 "std::thread missing-join output") &&
                  ok;

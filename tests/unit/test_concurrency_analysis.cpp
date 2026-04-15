@@ -15,9 +15,9 @@
 
 namespace
 {
+    using ctrace::concurrency::AnalysisOptions;
     using ctrace::concurrency::CompileRequest;
     using ctrace::concurrency::CompileResult;
-    using ctrace::concurrency::AnalysisOptions;
     using ctrace::concurrency::Diagnostic;
     using ctrace::concurrency::DiagnosticReport;
     using ctrace::concurrency::InMemoryIRCompiler;
@@ -116,23 +116,17 @@ namespace
 
     const Diagnostic* findFirstDiagnosticForRule(const DiagnosticReport& report, RuleId ruleId)
     {
-        const auto it =
-            std::find_if(report.diagnostics.begin(), report.diagnostics.end(),
-                         [ruleId](const Diagnostic& diagnostic)
-                         {
-                             return diagnostic.ruleId == ruleId;
-                         });
+        const auto it = std::find_if(report.diagnostics.begin(), report.diagnostics.end(),
+                                     [ruleId](const Diagnostic& diagnostic)
+                                     { return diagnostic.ruleId == ruleId; });
         return it == report.diagnostics.end() ? nullptr : &*it;
     }
 
     std::size_t countDiagnosticsForRule(const DiagnosticReport& report, RuleId ruleId)
     {
-        return static_cast<std::size_t>(
-            std::count_if(report.diagnostics.begin(), report.diagnostics.end(),
-                          [ruleId](const Diagnostic& diagnostic)
-                          {
-                              return diagnostic.ruleId == ruleId;
-                          }));
+        return static_cast<std::size_t>(std::count_if(
+            report.diagnostics.begin(), report.diagnostics.end(),
+            [ruleId](const Diagnostic& diagnostic) { return diagnostic.ruleId == ruleId; }));
     }
 
     bool testDataRaceBasicIsReported()
@@ -343,17 +337,18 @@ namespace
                           "missing_join_detach_mix should emit one missing-join diagnostic") &&
                assertTrue(intPropertyOf(*diagnostic, "createCount") == 1,
                           "missing_join_detach_mix should report one unresolved thread creation") &&
-               assertTrue(intPropertyOf(*diagnostic, "detachCount") == 0,
-                          "missing_join_detach_mix diagnostic should track only the unresolved handle") &&
+               assertTrue(
+                   intPropertyOf(*diagnostic, "detachCount") == 0,
+                   "missing_join_detach_mix diagnostic should track only the unresolved handle") &&
                assertTrue(intPropertyOf(*diagnostic, "outstandingCount") == 1,
                           "missing_join_detach_mix should report one outstanding handle");
     }
 
     bool testStdThreadMissingJoinReportsJoinableHandle()
     {
-        const std::optional<DiagnosticReport> report =
-            analyzeFixture("tests/fixtures/concurrency/missing-join/cpp_std_thread_missing_join.cpp",
-                           AnalysisOptions{.enabledRules = {RuleId::MissingJoin}});
+        const std::optional<DiagnosticReport> report = analyzeFixture(
+            "tests/fixtures/concurrency/missing-join/cpp_std_thread_missing_join.cpp",
+            AnalysisOptions{.enabledRules = {RuleId::MissingJoin}});
         if (!report.has_value())
             return false;
 
@@ -362,8 +357,9 @@ namespace
                           "cpp_std_thread_missing_join should report a std::thread leak") &&
                assertTrue(countDiagnosticsForRule(*report, RuleId::MissingJoin) == 1,
                           "cpp_std_thread_missing_join should emit one missing-join diagnostic") &&
-               assertTrue(stringPropertyOf(*diagnostic, "handleKind") == "std::thread",
-                          "cpp_std_thread_missing_join should classify the handle as std::thread") &&
+               assertTrue(
+                   stringPropertyOf(*diagnostic, "handleKind") == "std::thread",
+                   "cpp_std_thread_missing_join should classify the handle as std::thread") &&
                assertTrue(intPropertyOf(*diagnostic, "outstandingCount") == 1,
                           "cpp_std_thread_missing_join should report one outstanding handle");
     }

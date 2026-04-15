@@ -11,8 +11,8 @@
 
 namespace ctrace::concurrency
 {
-    SingleTUConcurrencyAnalyzer::SingleTUConcurrencyAnalyzer(AnalysisOptions options) :
-        options_(std::move(options))
+    SingleTUConcurrencyAnalyzer::SingleTUConcurrencyAnalyzer(AnalysisOptions options)
+        : options_(std::move(options))
     {
     }
 
