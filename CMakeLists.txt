@@ -34,12 +34,19 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/coretrace_concurrency_error.cpp
     src/internal/analysis/concurrency_symbol_classifier.cpp
     src/internal/analysis/data_race_checker.cpp
+    src/internal/analysis/interprocedural_bindings.cpp
+    src/internal/analysis/lock_order_analyzer.cpp
+    src/internal/analysis/lock_order_collector.cpp
+    src/internal/analysis/missing_join_detector.cpp
+    src/internal/analysis/report_builder.cpp
     src/internal/diagnostics/compiler_diagnostic_parser.cpp
     src/internal/diagnostics/diagnostic_catalog.cpp
     src/internal/analysis/ir_utils.cpp
     src/internal/analysis/lock_scope_tracker.cpp
     src/internal/reporting/report_renderer.cpp
     src/internal/analysis/shared_access_collector.cpp
+    src/internal/analysis/thread_context_propagator.cpp
+    src/internal/analysis/thread_lifecycle_collector.cpp
     src/internal/analysis/thread_spawn_detector.cpp
     src/internal/analysis/tu_facts_builder.cpp
     src/internal/compile_command_builder.cpp
