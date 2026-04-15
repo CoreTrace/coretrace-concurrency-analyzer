@@ -127,7 +127,8 @@ namespace ctrace::concurrency
 
     struct AnalysisOptions
     {
-        std::vector<RuleId> enabledRules{RuleId::DataRaceGlobal};
+        std::vector<RuleId> enabledRules{RuleId::DataRaceGlobal, RuleId::MissingJoin,
+                                         RuleId::DeadlockLockOrder};
 
         [[nodiscard]] bool isEnabled(RuleId ruleId) const
         {
