@@ -4,11 +4,13 @@
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
 
+#include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
+#include <filesystem>
 #include <unordered_set>
 
 namespace ctrace::concurrency::internal::analysis
@@ -74,6 +76,47 @@ namespace ctrace::concurrency::internal::analysis
                    fact.functionId + "|" + fact.location.file + "|" +
                    std::to_string(fact.location.line) + "|" + std::to_string(fact.location.column);
         }
+
+        std::optional<std::filesystem::path> primarySourceRoot(const llvm::Module& module)
+        {
+            for (llvm::DICompileUnit* compileUnit : module.debug_compile_units())
+            {
+                if (compileUnit == nullptr || compileUnit->getFile() == nullptr)
+                    continue;
+
+                std::filesystem::path filePath(compileUnit->getFile()->getFilename().str());
+                const std::string directory = compileUnit->getFile()->getDirectory().str();
+                if (!directory.empty() && filePath.is_relative())
+                    filePath = std::filesystem::path(directory) / filePath;
+                filePath = filePath.lexically_normal();
+                if (!filePath.empty())
+                    return filePath.parent_path();
+            }
+
+            return std::nullopt;
+        }
+
+        bool isLikelyUserLocation(const SourceLocation& location,
+                                  const std::optional<std::filesystem::path>& sourceRoot)
+        {
+            if (location.file.empty() || !sourceRoot.has_value())
+                return false;
+
+            const std::filesystem::path filePath =
+                std::filesystem::path(location.file).lexically_normal();
+            const std::filesystem::path relativePath = filePath.lexically_relative(*sourceRoot);
+            return !relativePath.empty() && *relativePath.begin() != "..";
+        }
+
+        bool isRuntimeOwnedLifecycle(const ThreadLifecycleFact& fact,
+                                     const SourceLocation& userLocation,
+                                     const std::optional<std::filesystem::path>& sourceRoot)
+        {
+            if (!fact.handleGroupId.starts_with("arg:"))
+                return false;
+
+            return !isLikelyUserLocation(userLocation, sourceRoot);
+        }
     } // namespace
 
     ThreadLifecycleCollector::ThreadLifecycleCollector(
@@ -87,6 +130,7 @@ namespace ctrace::concurrency::internal::analysis
     {
         std::vector<ThreadLifecycleFact> facts;
         std::unordered_set<std::string> factKeys;
+        const std::optional<std::filesystem::path> sourceRoot = primarySourceRoot(module);
 
         for (const llvm::Function& function : module)
         {
@@ -111,13 +155,19 @@ namespace ctrace::concurrency::internal::analysis
                     if (!handleGroupId.has_value())
                         continue;
 
+                    const ResolvedSourceLocations locations = resolveSourceLocations(instruction);
                     ThreadLifecycleFact fact{
                         .handleKind = descriptor->handleKind,
                         .action = descriptor->action,
                         .handleGroupId = *handleGroupId,
                         .functionId = functionId(function),
-                        .location = resolveSourceLocations(instruction).userLocation,
+                        .location = locations.userLocation,
                     };
+
+                    if (isRuntimeOwnedLifecycle(fact, locations.userLocation, sourceRoot))
+                    {
+                        continue;
+                    }
 
                     const std::string key = lifecycleKey(fact);
                     if (!factKeys.insert(key).second)
