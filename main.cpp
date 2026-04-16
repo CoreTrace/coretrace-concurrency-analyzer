@@ -11,8 +11,11 @@
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
+#include <algorithm>
 #include <string>
 #include <string_view>
+#include <utility>
+#include <vector>
 
 namespace
 {
@@ -26,7 +29,11 @@ namespace
             << "  --ir-format=ll|bc        Compilation output mode (default: bc)\n"
             << "  --compile-arg=<arg>      Forward a compile argument (repeatable)\n"
             << "  --instrument             Enable compilerlib instrumentation mode\n"
-            << "  --analyze                Run single-TU data race analysis on the IR module\n"
+            << "  --analyze                Run selected single-TU concurrency checks on the IR "
+               "module\n"
+            << "  --rules=data-race|missing-join|deadlock-lock-order|all\n"
+            << "                           Comma-separated rule selection for --analyze "
+               "(default: all available rules)\n"
             << "  --format=human|json|sarif\n"
             << "                           Diagnostic output format for --analyze (default: "
                "human)\n"
@@ -37,11 +44,13 @@ namespace
             << "  coretrace_concurrency_analyzer test.c --ir-format=ll\n"
             << "  coretrace_concurrency_analyzer test.c --ir-format=bc --compile-arg=-Iinclude\n"
             << "  coretrace_concurrency_analyzer test.c --analyze --format=human\n"
+            << "  coretrace_concurrency_analyzer test.c --analyze --rules=all --format=human\n"
             << "  coretrace_concurrency_analyzer test.c --analyze --format=sarif\n"
             << "  coretrace_concurrency_analyzer test.c -- --std=gnu11 -Wall\n";
     }
 
     void printRequestSummary(const ctrace::concurrency::CompileRequest& request, bool analyze,
+                             const ctrace::concurrency::AnalysisOptions& analysisOptions,
                              ctrace::concurrency::OutputFormat outputFormat,
                              llvm::raw_ostream& stream)
     {
@@ -50,8 +59,30 @@ namespace
         stream << "request.instrument: " << (request.instrument ? "true" : "false") << "\n";
         stream << "request.analyze: " << (analyze ? "true" : "false") << "\n";
         if (analyze)
+        {
+            auto ruleLabel = [](ctrace::concurrency::RuleId ruleId) -> std::string_view
+            {
+                switch (ruleId)
+                {
+                case ctrace::concurrency::RuleId::DataRaceGlobal:
+                    return "data-race";
+                case ctrace::concurrency::RuleId::MissingJoin:
+                    return "missing-join";
+                case ctrace::concurrency::RuleId::DeadlockLockOrder:
+                    return "deadlock-lock-order";
+                case ctrace::concurrency::RuleId::CompilerDiagnostic:
+                    return "compiler-diagnostic";
+                }
+                return "unknown";
+            };
+
             stream << "request.output-format: " << ctrace::concurrency::toString(outputFormat)
                    << "\n";
+            stream << "request.rules:";
+            for (const ctrace::concurrency::RuleId ruleId : analysisOptions.enabledRules)
+                stream << " " << ruleLabel(ruleId);
+            stream << "\n";
+        }
         stream << "request.extra-args-count: " << request.extraCompileArgs.size() << "\n";
         for (const std::string& arg : request.extraCompileArgs)
             stream << "request.extra-arg: " << arg << "\n";
@@ -104,6 +135,94 @@ namespace
         }
 
         return false;
+    }
+
+    std::string_view ruleOptionLabel(ctrace::concurrency::RuleId ruleId)
+    {
+        using ctrace::concurrency::RuleId;
+
+        switch (ruleId)
+        {
+        case RuleId::DataRaceGlobal:
+            return "data-race";
+        case RuleId::MissingJoin:
+            return "missing-join";
+        case RuleId::DeadlockLockOrder:
+            return "deadlock-lock-order";
+        case RuleId::CompilerDiagnostic:
+            return "compiler-diagnostic";
+        }
+        return "unknown";
+    }
+
+    bool parseAnalysisRule(std::string_view value, ctrace::concurrency::RuleId& out)
+    {
+        using ctrace::concurrency::RuleId;
+
+        if (value == "data-race")
+        {
+            out = RuleId::DataRaceGlobal;
+            return true;
+        }
+
+        if (value == "missing-join")
+        {
+            out = RuleId::MissingJoin;
+            return true;
+        }
+
+        if (value == "deadlock-lock-order")
+        {
+            out = RuleId::DeadlockLockOrder;
+            return true;
+        }
+
+        return false;
+    }
+
+    void appendRuleIfMissing(std::vector<ctrace::concurrency::RuleId>& enabledRules,
+                             ctrace::concurrency::RuleId ruleId)
+    {
+        if (std::find(enabledRules.begin(), enabledRules.end(), ruleId) == enabledRules.end())
+            enabledRules.push_back(ruleId);
+    }
+
+    bool parseAnalysisRules(std::string_view value, ctrace::concurrency::AnalysisOptions& options)
+    {
+        if (value == "all")
+        {
+            options = ctrace::concurrency::AnalysisOptions::allAvailable();
+            return true;
+        }
+
+        ctrace::concurrency::AnalysisOptions parsedOptions;
+        parsedOptions.enabledRules.clear();
+
+        std::size_t start = 0;
+        while (start <= value.size())
+        {
+            const std::size_t comma = value.find(',', start);
+            const std::string_view token = value.substr(
+                start, comma == std::string_view::npos ? std::string_view::npos : comma - start);
+            if (token.empty())
+                return false;
+
+            ctrace::concurrency::RuleId ruleId = ctrace::concurrency::RuleId::CompilerDiagnostic;
+            if (!parseAnalysisRule(token, ruleId))
+                return false;
+
+            appendRuleIfMissing(parsedOptions.enabledRules, ruleId);
+            if (comma == std::string_view::npos)
+                break;
+
+            start = comma + 1;
+        }
+
+        if (parsedOptions.enabledRules.empty())
+            return false;
+
+        options = std::move(parsedOptions);
+        return true;
     }
 
     ctrace::concurrency::internal::reporting::RenderContext
@@ -184,7 +303,9 @@ int main(int argc, char** argv)
     bool passthroughMode = false;
     bool verbose = false;
     bool outputFormatExplicit = false;
+    bool rulesExplicit = false;
     ctrace::concurrency::OutputFormat outputFormat = ctrace::concurrency::OutputFormat::Human;
+    ctrace::concurrency::AnalysisOptions analysisOptions;
 
     for (int i = 1; i < argc; ++i)
     {
@@ -243,6 +364,18 @@ int main(int argc, char** argv)
             continue;
         }
 
+        constexpr std::string_view rulesPrefix = "--rules=";
+        if (arg.rfind(rulesPrefix, 0) == 0)
+        {
+            if (!parseAnalysisRules(arg.substr(rulesPrefix.size()), analysisOptions))
+            {
+                llvm::errs() << "Unsupported --rules value: " << std::string(arg) << "\n";
+                return 1;
+            }
+            rulesExplicit = true;
+            continue;
+        }
+
         constexpr std::string_view compileArgPrefix = "--compile-arg=";
         if (arg.rfind(compileArgPrefix, 0) == 0)
         {
@@ -284,12 +417,18 @@ int main(int argc, char** argv)
         return 1;
     }
 
+    if (rulesExplicit && !analyze)
+    {
+        llvm::errs() << "--rules requires --analyze\n";
+        return 1;
+    }
+
     if (verbose)
     {
         llvm::raw_ostream& stream =
             (analyze && outputFormat != ctrace::concurrency::OutputFormat::Human) ? llvm::errs()
                                                                                   : llvm::outs();
-        printRequestSummary(request, analyze, outputFormat, stream);
+        printRequestSummary(request, analyze, analysisOptions, outputFormat, stream);
     }
 
     llvm::LLVMContext context;
@@ -320,7 +459,7 @@ int main(int argc, char** argv)
     if (analyze)
     {
         const auto startedAt = std::chrono::steady_clock::now();
-        ctrace::concurrency::SingleTUConcurrencyAnalyzer analyzer;
+        ctrace::concurrency::SingleTUConcurrencyAnalyzer analyzer(analysisOptions);
         const ctrace::concurrency::DiagnosticReport report = analyzer.analyze(*result.module);
         const auto finishedAt = std::chrono::steady_clock::now();
 

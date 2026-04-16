@@ -6,6 +6,7 @@
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -17,6 +18,8 @@ namespace llvm
 
 namespace ctrace::concurrency::internal::analysis
 {
+    using ThreadEntrySet = std::unordered_set<std::string>;
+
     struct EntryConcurrencyInfo
     {
         std::size_t staticSpawnCount = 0;
@@ -75,6 +78,36 @@ namespace ctrace::concurrency::internal::analysis
         std::set<std::string> heldLocks;
     };
 
+    struct LockOrderFact
+    {
+        std::string functionId;
+        std::string firstLockId;
+        std::string secondLockId;
+        SourceLocation location;
+    };
+
+    enum class ThreadHandleKind
+    {
+        PThread,
+        StdThread,
+    };
+
+    enum class ThreadLifecycleAction
+    {
+        Create,
+        Join,
+        Detach,
+    };
+
+    struct ThreadLifecycleFact
+    {
+        ThreadHandleKind handleKind = ThreadHandleKind::PThread;
+        ThreadLifecycleAction action = ThreadLifecycleAction::Create;
+        std::string handleGroupId;
+        std::string functionId;
+        SourceLocation location;
+    };
+
     struct PendingAccess
     {
         const llvm::Function* function = nullptr;
@@ -87,6 +120,9 @@ namespace ctrace::concurrency::internal::analysis
     {
         std::vector<SpawnFact> spawns;
         std::vector<AccessFact> accesses;
+        std::vector<LockOrderFact> lockOrders;
+        std::vector<ThreadLifecycleFact> threadLifecycles;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;
+        std::unordered_map<std::string, ThreadEntrySet> reachableThreadEntriesByFunction;
     };
 } // namespace ctrace::concurrency::internal::analysis

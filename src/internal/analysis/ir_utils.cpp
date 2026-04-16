@@ -2,6 +2,7 @@
 #include "ir_utils.hpp"
 
 #include <llvm/IR/DebugInfoMetadata.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
@@ -9,8 +10,10 @@
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/Value.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/Support/raw_ostream.h>
 
 #include <filesystem>
+#include <vector>
 
 namespace ctrace::concurrency::internal::analysis
 {
@@ -47,6 +50,32 @@ namespace ctrace::concurrency::internal::analysis
 
         const llvm::Value* followLocalPointerCopy(const llvm::LoadInst& load,
                                                   llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
+        const llvm::Value*
+        followStoredPointerValue(const llvm::LoadInst& load,
+                                 llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
+
+        std::string printValueOperand(const llvm::Value& value)
+        {
+            std::string rendered;
+            llvm::raw_string_ostream stream(rendered);
+            value.printAsOperand(stream, false);
+            return stream.str();
+        }
+
+        template <typename GEPType> std::string printGepIndices(const GEPType& gep)
+        {
+            std::string rendered;
+            for (const llvm::Value* index : gep.indices())
+            {
+                rendered += "[";
+                if (const auto* constantIndex = llvm::dyn_cast<llvm::ConstantInt>(index))
+                    rendered += std::to_string(constantIndex->getSExtValue());
+                else
+                    rendered += "*";
+                rendered += "]";
+            }
+            return rendered;
+        }
 
         SourceLocation sourceLocationFromDebugLocation(const llvm::DILocation& debugLocation,
                                                        std::string_view fallbackFunction)
@@ -154,6 +183,47 @@ namespace ctrace::concurrency::internal::analysis
 
             return resolveCopiedValue(*storedValue, seen);
         }
+
+        const llvm::Value* followStoredPointerValue(const llvm::LoadInst& load,
+                                                    llvm::SmallPtrSetImpl<const llvm::Value*>& seen)
+        {
+            const llvm::Value* slot = load.getPointerOperand()->stripPointerCastsAndAliases();
+            const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(slot);
+            if (alloca == nullptr || !seen.insert(alloca).second)
+                return nullptr;
+
+            const llvm::Value* storedValue = nullptr;
+            for (const llvm::User* user : alloca->users())
+            {
+                if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+                {
+                    if (store->getPointerOperand()->stripPointerCastsAndAliases() != alloca)
+                        return nullptr;
+
+                    const llvm::Value* candidate =
+                        store->getValueOperand()->stripPointerCastsAndAliases();
+                    if (storedValue == nullptr)
+                        storedValue = candidate;
+                    else if (storedValue != candidate)
+                        return nullptr;
+                    continue;
+                }
+
+                if (const auto* localLoad = llvm::dyn_cast<llvm::LoadInst>(user))
+                {
+                    if (localLoad->getPointerOperand()->stripPointerCastsAndAliases() != alloca)
+                        return nullptr;
+                    continue;
+                }
+
+                if (canIgnoreLocalSlotUser(*user))
+                    continue;
+
+                return nullptr;
+            }
+
+            return storedValue;
+        }
     } // namespace
 
     bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global)
@@ -174,6 +244,83 @@ namespace ctrace::concurrency::internal::analysis
             return std::nullopt;
 
         return normalizeValueName(global->getName());
+    }
+
+    std::optional<std::string> canonicalStorageGroupId(const llvm::Value& value)
+    {
+        const llvm::Value* current = &value;
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        std::vector<std::string> pathFragments;
+
+        auto withPath = [&pathFragments](std::string baseId) -> std::string
+        {
+            for (auto it = pathFragments.rbegin(); it != pathFragments.rend(); ++it)
+                baseId += *it;
+            return baseId;
+        };
+
+        while (current != nullptr)
+        {
+            if (!seen.insert(current).second)
+                return std::nullopt;
+
+            if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(current))
+                return withPath("global:" + normalizeValueName(global->getName()));
+
+            if (const auto* argument = llvm::dyn_cast<llvm::Argument>(current))
+            {
+                return withPath("arg:" + functionId(*argument->getParent()) + ":" +
+                                std::to_string(argument->getArgNo()));
+            }
+
+            if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(current))
+            {
+                return withPath("stack:" + functionId(*alloca->getFunction()) + ":" +
+                                printValueOperand(*alloca));
+            }
+
+            if (const auto* gepInstruction = llvm::dyn_cast<llvm::GetElementPtrInst>(current))
+            {
+                pathFragments.push_back(printGepIndices(*gepInstruction));
+                current = gepInstruction->getPointerOperand();
+                continue;
+            }
+
+            if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(current))
+            {
+                pathFragments.push_back(printGepIndices(*gep));
+                current = gep->getPointerOperand();
+                continue;
+            }
+
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(current))
+            {
+                // Probe stored-pointer forwarding on a local copy of the visited set so a failed
+                // probe does not poison the main traversal. This keeps the fallback path able to
+                // resolve the load's storage slot itself, which is required for handles whose
+                // value is produced by calls like pthread_create and later consumed by join/detach.
+                llvm::SmallPtrSet<const llvm::Value*, 8> probeSeen = seen;
+                if (const llvm::Value* copiedValue = followStoredPointerValue(*load, probeSeen))
+                {
+                    current = copiedValue;
+                    continue;
+                }
+
+                current = load->getPointerOperand();
+                continue;
+            }
+
+            const llvm::Value* stripped = current->stripPointerCastsAndAliases();
+            if (stripped != current)
+            {
+                current = stripped;
+                continue;
+            }
+
+            return std::nullopt;
+        }
+
+        return std::nullopt;
     }
 
     std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value)

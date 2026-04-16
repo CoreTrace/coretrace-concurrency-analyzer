@@ -14,13 +14,35 @@ namespace ctrace::concurrency::internal::analysis
             llvm::StringRef name = function.getName();
             if (name.starts_with("\x01"))
                 name = name.drop_front();
+            if (name.starts_with("\\01"))
+                name = name.drop_front(3);
             return name;
         }
 
         bool isStdThreadCtor(llvm::StringRef name)
         {
-            return name.contains("thread") &&
-                   (name.contains("threadC1") || name.contains("threadC2"));
+            if (!name.contains("thread"))
+                return false;
+
+            const bool isCtor = name.contains("threadC1") || name.contains("threadC2");
+            if (!isCtor)
+                return false;
+
+            // Exclude default/copy/move constructors; only thread-starting constructors
+            // should materialize lifecycle create facts.
+            if (name.contains("threadC1Ev") || name.contains("threadC2Ev") ||
+                name.contains("ERKS0_") || name.contains("EOS0_"))
+            {
+                return false;
+            }
+
+            return true;
+        }
+
+        bool matchesPlainSymbol(llvm::StringRef actual, llvm::StringRef expected)
+        {
+            return actual == expected ||
+                   (actual.starts_with("_") && actual.drop_front() == expected);
         }
 
         bool isStdMutexLock(llvm::StringRef name)
@@ -31,6 +53,16 @@ namespace ctrace::concurrency::internal::analysis
         bool isStdMutexUnlock(llvm::StringRef name)
         {
             return name.contains("mutex") && name.contains("6unlockEv");
+        }
+
+        bool isStdThreadJoin(llvm::StringRef name)
+        {
+            return name.contains("thread") && name.contains("4joinEv");
+        }
+
+        bool isStdThreadDetach(llvm::StringRef name)
+        {
+            return name.contains("thread") && name.contains("6detachEv");
         }
     } // namespace
 
@@ -52,14 +84,22 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::Unknown;
 
         const llvm::StringRef name = canonicalName(*callee);
-        if (name == "pthread_create")
+        if (matchesPlainSymbol(name, "pthread_create"))
             return CallKind::PThreadCreate;
-        if (name == "pthread_mutex_lock")
+        if (matchesPlainSymbol(name, "pthread_join"))
+            return CallKind::PThreadJoin;
+        if (matchesPlainSymbol(name, "pthread_detach"))
+            return CallKind::PThreadDetach;
+        if (matchesPlainSymbol(name, "pthread_mutex_lock"))
             return CallKind::PThreadMutexLock;
-        if (name == "pthread_mutex_unlock")
+        if (matchesPlainSymbol(name, "pthread_mutex_unlock"))
             return CallKind::PThreadMutexUnlock;
         if (isStdThreadCtor(name))
             return CallKind::StdThreadCtor;
+        if (isStdThreadJoin(name))
+            return CallKind::StdThreadJoin;
+        if (isStdThreadDetach(name))
+            return CallKind::StdThreadDetach;
         if (isStdMutexLock(name))
             return CallKind::StdMutexLock;
         if (isStdMutexUnlock(name))
@@ -75,12 +115,20 @@ namespace ctrace::concurrency::internal::analysis
             return "unknown";
         case CallKind::PThreadCreate:
             return "pthread_create";
+        case CallKind::PThreadJoin:
+            return "pthread_join";
+        case CallKind::PThreadDetach:
+            return "pthread_detach";
         case CallKind::PThreadMutexLock:
             return "pthread_mutex_lock";
         case CallKind::PThreadMutexUnlock:
             return "pthread_mutex_unlock";
         case CallKind::StdThreadCtor:
             return "std_thread_ctor";
+        case CallKind::StdThreadJoin:
+            return "std_thread_join";
+        case CallKind::StdThreadDetach:
+            return "std_thread_detach";
         case CallKind::StdMutexLock:
             return "std_mutex_lock";
         case CallKind::StdMutexUnlock:
