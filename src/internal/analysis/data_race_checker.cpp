@@ -122,6 +122,48 @@ namespace ctrace::concurrency::internal::analysis
             return std::vector<std::string>(conflictKinds.begin(), conflictKinds.end());
         }
 
+        std::vector<std::string> collectAliasProvenances(const AccessFact& lhs,
+                                                         const AccessFact& rhs)
+        {
+            std::set<std::string> aliasing;
+            aliasing.insert(std::string(toString(lhs.aliasProvenance)));
+            aliasing.insert(std::string(toString(rhs.aliasProvenance)));
+            return std::vector<std::string>(aliasing.begin(), aliasing.end());
+        }
+
+        std::vector<std::string> collectAliasProvenances(const AccessFact& access)
+        {
+            return {std::string(toString(access.aliasProvenance))};
+        }
+
+        ConfidenceLevel inferConfidence(const AccessFact& lhs, const AccessFact& rhs)
+        {
+            if (lhs.aliasProvenance == AliasProvenance::MayAlias ||
+                rhs.aliasProvenance == AliasProvenance::MayAlias)
+            {
+                return ConfidenceLevel::Low;
+            }
+
+            if (lhs.aliasProvenance == AliasProvenance::MustAlias ||
+                rhs.aliasProvenance == AliasProvenance::MustAlias)
+            {
+                return ConfidenceLevel::Medium;
+            }
+
+            return ConfidenceLevel::High;
+        }
+
+        ConfidenceLevel inferConfidence(const AccessFact& access)
+        {
+            if (access.aliasProvenance == AliasProvenance::MayAlias)
+                return ConfidenceLevel::Low;
+
+            if (access.aliasProvenance == AliasProvenance::MustAlias)
+                return ConfidenceLevel::Medium;
+
+            return ConfidenceLevel::High;
+        }
+
         std::string describeAccess(const AccessFact& access,
                                    const std::vector<std::string>& entries)
         {
@@ -145,9 +187,11 @@ namespace ctrace::concurrency::internal::analysis
             const std::vector<std::string> orderedRhsEntries = sortedThreadEntries(rhsEntries);
             const std::vector<std::string> conflictKinds =
                 collectConflictKinds(lhs, rhs, lhsEntries, rhsEntries, facts);
+            const std::vector<std::string> variableAliasing = collectAliasProvenances(lhs, rhs);
 
             DiagnosticBuilder builder(report, RuleId::DataRaceGlobal);
-            builder.primaryLocation(lhs.userLocation)
+            builder.confidence(inferConfidence(lhs, rhs))
+                .primaryLocation(lhs.userLocation)
                 .relatedLocation("Conflicting access", rhs.userLocation)
                 .message("unsynchronized concurrent access to global '" + lhs.symbol + "'")
                 .note("first access: " + describeAccess(lhs, orderedLhsEntries))
@@ -157,12 +201,14 @@ namespace ctrace::concurrency::internal::analysis
                 .property("symbol", lhs.symbol)
                 .property("firstAccessKind", std::string(toString(lhs.kind)))
                 .property("secondAccessKind", std::string(toString(rhs.kind)))
+                .property("firstAliasProvenance", std::string(toString(lhs.aliasProvenance)))
+                .property("secondAliasProvenance", std::string(toString(rhs.aliasProvenance)))
                 .property("firstProtected", !lhs.heldLocks.empty())
                 .property("secondProtected", !rhs.heldLocks.empty())
                 .property("firstThreadEntries", orderedLhsEntries)
                 .property("secondThreadEntries", orderedRhsEntries)
                 .property("conflictKinds", conflictKinds)
-                .property("variableAliasing", std::vector<std::string>{});
+                .property("variableAliasing", variableAliasing);
 
             if (hasDistinctLoweredLocation(lhs))
                 builder.relatedLocation("Lowered first access", lhs.loweredLocation);
@@ -179,9 +225,11 @@ namespace ctrace::concurrency::internal::analysis
             const std::string entryLabel =
                 orderedEntries.empty() ? access.functionId : joinValues(orderedEntries);
             const std::vector<std::string> conflictKinds = {"write/write"};
+            const std::vector<std::string> variableAliasing = collectAliasProvenances(access);
 
             DiagnosticBuilder builder(report, RuleId::DataRaceGlobal);
-            builder.primaryLocation(access.userLocation)
+            builder.confidence(inferConfidence(access))
+                .primaryLocation(access.userLocation)
                 .relatedLocation("Concurrent invocation", access.userLocation)
                 .message("unsynchronized concurrent access to global '" + access.symbol + "'")
                 .note("access: " + describeAccess(access, orderedEntries))
@@ -193,12 +241,14 @@ namespace ctrace::concurrency::internal::analysis
                 .property("symbol", access.symbol)
                 .property("firstAccessKind", std::string(toString(access.kind)))
                 .property("secondAccessKind", std::string(toString(access.kind)))
+                .property("firstAliasProvenance", std::string(toString(access.aliasProvenance)))
+                .property("secondAliasProvenance", std::string(toString(access.aliasProvenance)))
                 .property("firstProtected", !access.heldLocks.empty())
                 .property("secondProtected", !access.heldLocks.empty())
                 .property("firstThreadEntries", orderedEntries)
                 .property("secondThreadEntries", orderedEntries)
                 .property("conflictKinds", conflictKinds)
-                .property("variableAliasing", std::vector<std::string>{});
+                .property("variableAliasing", variableAliasing);
 
             if (hasDistinctLoweredLocation(access))
                 builder.relatedLocation("Lowered access", access.loweredLocation);
