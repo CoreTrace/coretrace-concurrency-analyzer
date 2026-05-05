@@ -43,9 +43,9 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] std::optional<std::string> canonicalGlobalId(const llvm::Value& value);
     [[nodiscard]] std::optional<std::string> canonicalStorageGroupId(const llvm::Value& value);
     [[nodiscard]] std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value);
-    [[nodiscard]] std::optional<AliasResolvedGlobal> resolveAliasGlobal(
-        const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
-        const std::vector<const llvm::GlobalVariable*>& candidateGlobals);
+    [[nodiscard]] std::optional<AliasResolvedGlobal>
+    resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
+                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals);
     [[nodiscard]] std::optional<FunctionBinding> resolveFunctionBinding(const llvm::Value& value);
     [[nodiscard]] const llvm::Function* resolveFunctionValue(const llvm::Value& value);
     [[nodiscard]] std::string functionId(const llvm::Function& function);

@@ -28,15 +28,13 @@ namespace ctrace::concurrency::internal::analysis
         }
     };
 
-    LlvmFunctionAnalysisProvider::LlvmFunctionAnalysisProvider()
-        : impl_(std::make_unique<Impl>())
+    LlvmFunctionAnalysisProvider::LlvmFunctionAnalysisProvider() : impl_(std::make_unique<Impl>())
     {
     }
 
     LlvmFunctionAnalysisProvider::~LlvmFunctionAnalysisProvider() = default;
 
-    llvm::AAResults&
-    LlvmFunctionAnalysisProvider::getAAResults(const llvm::Function& function)
+    llvm::AAResults& LlvmFunctionAnalysisProvider::getAAResults(const llvm::Function& function)
     {
         return impl_->functionAnalysisManager.getResult<llvm::AAManager>(
             const_cast<llvm::Function&>(function));

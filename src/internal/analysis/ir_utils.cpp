@@ -361,9 +361,9 @@ namespace ctrace::concurrency::internal::analysis
         return std::nullopt;
     }
 
-    std::optional<AliasResolvedGlobal> resolveAliasGlobal(
-        const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
-        const std::vector<const llvm::GlobalVariable*>& candidateGlobals)
+    std::optional<AliasResolvedGlobal>
+    resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
+                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals)
     {
         const std::optional<llvm::MemoryLocation> accessLocation =
             llvm::MemoryLocation::getOrNone(&accessInstruction);
@@ -380,8 +380,8 @@ namespace ctrace::concurrency::internal::analysis
             if (global == nullptr || !shouldTrackSharedGlobal(*global))
                 continue;
 
-            const llvm::AliasResult aliasResult = aaResults.alias(
-                *accessLocation, llvm::MemoryLocation::getBeforeOrAfter(global));
+            const llvm::AliasResult aliasResult =
+                aaResults.alias(*accessLocation, llvm::MemoryLocation::getBeforeOrAfter(global));
             const std::optional<AliasProvenance> aliasProvenance =
                 aliasProvenanceFromResult(aliasResult);
             if (!aliasProvenance.has_value())

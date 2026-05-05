@@ -61,9 +61,9 @@ namespace ctrace::concurrency::internal::analysis
         {
             std::ostringstream stream;
             stream << fact.symbol << "|" << fact.functionId << "|" << toString(fact.kind) << "|"
-                   << toString(fact.aliasProvenance) << "|"
-                   << fact.loweredLocation.file << "|" << fact.loweredLocation.line << "|"
-                   << fact.loweredLocation.column << "|" << fact.loweredLocation.function;
+                   << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.file << "|"
+                   << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
+                   << fact.loweredLocation.function;
 
             for (const std::string& lock : fact.heldLocks)
                 stream << "|lock:" << lock;
@@ -113,8 +113,7 @@ namespace ctrace::concurrency::internal::analysis
             std::ostringstream stream;
             stream << fact.symbol << "|" << toString(fact.kind) << "|" << fact.loweredLocation.file
                    << "|" << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.line
-                   << "|" << fact.loweredLocation.column << "|"
-                   << fact.loweredLocation.function;
+                   << "|" << fact.loweredLocation.column << "|" << fact.loweredLocation.function;
 
             for (const std::string& lock : fact.heldLocks)
                 stream << "|lock:" << lock;
