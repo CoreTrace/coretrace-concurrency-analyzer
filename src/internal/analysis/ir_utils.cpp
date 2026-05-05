@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "ir_utils.hpp"
 
+#include <llvm/Analysis/AliasAnalysis.h>
+#include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/IntrinsicInst.h>
@@ -224,6 +226,21 @@ namespace ctrace::concurrency::internal::analysis
 
             return storedValue;
         }
+
+        std::optional<AliasProvenance> aliasProvenanceFromResult(llvm::AliasResult aliasResult)
+        {
+            switch (aliasResult)
+            {
+            case llvm::AliasResult::NoAlias:
+                return std::nullopt;
+            case llvm::AliasResult::MustAlias:
+                return AliasProvenance::MustAlias;
+            case llvm::AliasResult::MayAlias:
+            case llvm::AliasResult::PartialAlias:
+                return AliasProvenance::MayAlias;
+            }
+            return std::nullopt;
+        }
     } // namespace
 
     bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global)
@@ -340,6 +357,68 @@ namespace ctrace::concurrency::internal::analysis
 
         if (const auto* argument = llvm::dyn_cast<llvm::Argument>(root))
             return RootBinding::argument(argument->getArgNo());
+
+        return std::nullopt;
+    }
+
+    std::optional<AliasResolvedGlobal> resolveAliasGlobal(
+        const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
+        const std::vector<const llvm::GlobalVariable*>& candidateGlobals)
+    {
+        const std::optional<llvm::MemoryLocation> accessLocation =
+            llvm::MemoryLocation::getOrNone(&accessInstruction);
+        if (!accessLocation.has_value())
+            return std::nullopt;
+
+        std::optional<std::string> mustAliasSymbol;
+        std::optional<std::string> mayAliasSymbol;
+        bool hasConflictingMustAlias = false;
+        bool hasAmbiguousMayAlias = false;
+
+        for (const llvm::GlobalVariable* global : candidateGlobals)
+        {
+            if (global == nullptr || !shouldTrackSharedGlobal(*global))
+                continue;
+
+            const llvm::AliasResult aliasResult = aaResults.alias(
+                *accessLocation, llvm::MemoryLocation::getBeforeOrAfter(global));
+            const std::optional<AliasProvenance> aliasProvenance =
+                aliasProvenanceFromResult(aliasResult);
+            if (!aliasProvenance.has_value())
+                continue;
+
+            const std::string symbol = normalizeValueName(global->getName());
+            if (*aliasProvenance == AliasProvenance::MustAlias)
+            {
+                if (!mustAliasSymbol.has_value())
+                    mustAliasSymbol = symbol;
+                else if (*mustAliasSymbol != symbol)
+                    hasConflictingMustAlias = true;
+
+                continue;
+            }
+
+            if (!mayAliasSymbol.has_value())
+                mayAliasSymbol = symbol;
+            else if (*mayAliasSymbol != symbol)
+                hasAmbiguousMayAlias = true;
+        }
+
+        if (!hasConflictingMustAlias && mustAliasSymbol.has_value())
+        {
+            return AliasResolvedGlobal{
+                .symbol = *mustAliasSymbol,
+                .aliasProvenance = AliasProvenance::MustAlias,
+            };
+        }
+
+        if (!hasAmbiguousMayAlias && mayAliasSymbol.has_value())
+        {
+            return AliasResolvedGlobal{
+                .symbol = *mayAliasSymbol,
+                .aliasProvenance = AliasProvenance::MayAlias,
+            };
+        }
 
         return std::nullopt;
     }
