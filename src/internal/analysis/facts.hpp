@@ -72,6 +72,7 @@ namespace ctrace::concurrency::internal::analysis
         std::string symbol;
         std::string functionId;
         AccessKind kind = AccessKind::Read;
+        AliasProvenance aliasProvenance = AliasProvenance::Direct;
         SourceLocation loweredLocation;
         SourceLocation userLocation;
         bool allowCallsiteProjection = false;
