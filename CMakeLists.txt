@@ -35,6 +35,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/concurrency_symbol_classifier.cpp
     src/internal/analysis/data_race_checker.cpp
     src/internal/analysis/interprocedural_bindings.cpp
+    src/internal/analysis/llvm_function_analysis_provider.cpp
     src/internal/analysis/lock_order_analyzer.cpp
     src/internal/analysis/lock_order_collector.cpp
     src/internal/analysis/lock_state_propagator.cpp
