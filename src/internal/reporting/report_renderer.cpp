@@ -447,6 +447,23 @@ namespace ctrace::concurrency::internal::reporting
                     related_locations.emplace_back(std::move(related_json));
                 }
 
+                llvm::json::Object result_properties;
+                if (diagnostic.confidence.has_value())
+                {
+                    result_properties.insert(
+                        {"confidence", confidenceUpper(*diagnostic.confidence)});
+                }
+
+                llvm::json::Object diagnostic_properties;
+                for (const auto& [key, value] : diagnostic.properties)
+                    diagnostic_properties.insert({key, toJsonValue(value)});
+
+                if (!diagnostic_properties.empty())
+                {
+                    result_properties.insert(
+                        {"coretraceDiagnosticProperties", std::move(diagnostic_properties)});
+                }
+
                 results.emplace_back(llvm::json::Object{
                     {"ruleId", std::string(toString(diagnostic.ruleId))},
                     {"level", sarifLevel(diagnostic.severity)},
@@ -456,6 +473,7 @@ namespace ctrace::concurrency::internal::reporting
                     {"partialFingerprints",
                      llvm::json::Object{
                          {"primaryLocationLineHash", fingerprintFor(diagnostic, context)}}},
+                    {"properties", std::move(result_properties)},
                 });
             }
 
