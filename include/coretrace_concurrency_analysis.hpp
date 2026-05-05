@@ -23,6 +23,13 @@ namespace ctrace::concurrency
         Write,
     };
 
+    enum class AliasProvenance
+    {
+        Direct,
+        MustAlias,
+        MayAlias,
+    };
+
     enum class Severity
     {
         Info,
@@ -166,6 +173,20 @@ namespace ctrace::concurrency
             return "read";
         case AccessKind::Write:
             return "write";
+        }
+        return "unknown";
+    }
+
+    constexpr std::string_view toString(AliasProvenance provenance)
+    {
+        switch (provenance)
+        {
+        case AliasProvenance::Direct:
+            return "direct";
+        case AliasProvenance::MustAlias:
+            return "must_alias";
+        case AliasProvenance::MayAlias:
+            return "may_alias";
         }
         return "unknown";
     }
