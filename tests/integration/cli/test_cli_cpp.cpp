@@ -370,6 +370,16 @@ namespace
             ok = assertContains(result.output, "\"symbol\": \"shared_counter\"",
                                 "json analyze output") &&
                  ok;
+            ok = assertContains(result.output, "\"confidence\": \"HIGH\"", "json analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"firstAliasProvenance\": \"direct\"",
+                                "json analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"secondAliasProvenance\": \"direct\"",
+                                "json analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"variableAliasing\": [", "json analyze output") &&
+                 ok;
             ok = assertContains(result.output, "\"startLine\": 10", "json analyze output") && ok;
             ok = assertContains(result.output, "\"startColumn\": 23", "json analyze output") && ok;
         }
@@ -412,6 +422,13 @@ namespace
                                 "sarif analyze output") &&
                  ok;
             ok = assertContains(result.output, "\"partialFingerprints\"", "sarif analyze output") &&
+                 ok;
+            ok = assertContains(result.output, "\"properties\"", "sarif analyze output") && ok;
+            ok =
+                assertContains(result.output, "\"confidence\": \"HIGH\"", "sarif analyze output") &&
+                ok;
+            ok = assertContains(result.output, "\"coretraceDiagnosticProperties\"",
+                                "sarif analyze output") &&
                  ok;
             ok = assertContains(result.output, "\"startLine\": 10", "sarif analyze output") && ok;
             ok = assertContains(result.output, "\"startColumn\": 23", "sarif analyze output") && ok;
