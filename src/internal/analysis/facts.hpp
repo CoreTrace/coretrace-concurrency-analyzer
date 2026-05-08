@@ -3,6 +3,7 @@
 
 #include "coretrace_concurrency_analysis.hpp"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -98,6 +99,7 @@ namespace ctrace::concurrency::internal::analysis
         Create,
         Join,
         Detach,
+        Move,
     };
 
     struct ThreadLifecycleFact
@@ -105,6 +107,7 @@ namespace ctrace::concurrency::internal::analysis
         ThreadHandleKind handleKind = ThreadHandleKind::PThread;
         ThreadLifecycleAction action = ThreadLifecycleAction::Create;
         std::string handleGroupId;
+        std::optional<std::string> sourceHandleGroupId;
         std::string functionId;
         SourceLocation location;
     };

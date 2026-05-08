@@ -39,6 +39,16 @@ namespace ctrace::concurrency::internal::analysis
             return true;
         }
 
+        bool isStdThreadMove(llvm::StringRef name)
+        {
+            if (!name.contains("thread") || !name.contains("EOS0_"))
+                return false;
+
+            const bool isMoveCtor = name.contains("threadC1") || name.contains("threadC2");
+            const bool isMoveAssignment = name.contains("threadaS");
+            return isMoveCtor || isMoveAssignment;
+        }
+
         bool matchesPlainSymbol(llvm::StringRef actual, llvm::StringRef expected)
         {
             return actual == expected ||
@@ -94,6 +104,8 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::PThreadMutexLock;
         if (matchesPlainSymbol(name, "pthread_mutex_unlock"))
             return CallKind::PThreadMutexUnlock;
+        if (isStdThreadMove(name))
+            return CallKind::StdThreadMove;
         if (isStdThreadCtor(name))
             return CallKind::StdThreadCtor;
         if (isStdThreadJoin(name))
@@ -125,6 +137,8 @@ namespace ctrace::concurrency::internal::analysis
             return "pthread_mutex_unlock";
         case CallKind::StdThreadCtor:
             return "std_thread_ctor";
+        case CallKind::StdThreadMove:
+            return "std_thread_move";
         case CallKind::StdThreadJoin:
             return "std_thread_join";
         case CallKind::StdThreadDetach:

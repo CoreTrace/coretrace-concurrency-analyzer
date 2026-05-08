@@ -81,8 +81,9 @@ namespace ctrace::concurrency::internal::analysis
             std::ostringstream stream;
             stream << static_cast<int>(fact.handleKind) << "|" << static_cast<int>(fact.action)
                    << "|" << fact.handleGroupId << "|" << fact.functionId << "|"
-                   << fact.location.file << "|" << fact.location.line << "|" << fact.location.column
-                   << "|" << fact.location.function;
+                   << fact.sourceHandleGroupId.value_or("") << "|" << fact.location.file << "|"
+                   << fact.location.line << "|" << fact.location.column << "|"
+                   << fact.location.function;
             return stream.str();
         }
 
@@ -203,16 +204,17 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         std::optional<LifecycleArgumentBinding>
-        parseLifecycleArgumentBinding(const ThreadLifecycleFact& fact)
+        parseLifecycleArgumentBinding(const std::string& functionId,
+                                      const std::string& handleGroupId)
         {
-            const std::string prefix = "arg:" + fact.functionId + ":";
-            if (!fact.handleGroupId.starts_with(prefix))
+            const std::string prefix = "arg:" + functionId + ":";
+            if (!handleGroupId.starts_with(prefix))
                 return std::nullopt;
 
             const std::size_t indexBegin = prefix.size();
             std::size_t indexEnd = indexBegin;
-            while (indexEnd < fact.handleGroupId.size() &&
-                   std::isdigit(static_cast<unsigned char>(fact.handleGroupId[indexEnd])))
+            while (indexEnd < handleGroupId.size() &&
+                   std::isdigit(static_cast<unsigned char>(handleGroupId[indexEnd])))
             {
                 ++indexEnd;
             }
@@ -222,9 +224,15 @@ namespace ctrace::concurrency::internal::analysis
 
             LifecycleArgumentBinding binding;
             binding.argumentIndex = static_cast<unsigned>(
-                std::stoul(fact.handleGroupId.substr(indexBegin, indexEnd - indexBegin)));
-            binding.suffix = fact.handleGroupId.substr(indexEnd);
+                std::stoul(handleGroupId.substr(indexBegin, indexEnd - indexBegin)));
+            binding.suffix = handleGroupId.substr(indexEnd);
             return binding;
+        }
+
+        std::optional<LifecycleArgumentBinding>
+        parseLifecycleArgumentBinding(const ThreadLifecycleFact& fact)
+        {
+            return parseLifecycleArgumentBinding(fact.functionId, fact.handleGroupId);
         }
 
         bool shouldRemapLifecycleLocation(const SourceLocation& location,
@@ -367,6 +375,22 @@ namespace ctrace::concurrency::internal::analysis
                     ThreadLifecycleFact propagated = fact;
                     propagated.functionId = callSite.callerFunctionId;
                     propagated.handleGroupId = *callerGroup + binding->suffix;
+                    if (fact.sourceHandleGroupId.has_value())
+                    {
+                        const auto sourceBinding = parseLifecycleArgumentBinding(
+                            fact.functionId, *fact.sourceHandleGroupId);
+                        if (sourceBinding.has_value() &&
+                            sourceBinding->argumentIndex < callSite.call->arg_size())
+                        {
+                            const auto sourceCallerGroup = canonicalStorageGroupId(
+                                *callSite.call->getArgOperand(sourceBinding->argumentIndex));
+                            if (!sourceCallerGroup.has_value())
+                                continue;
+
+                            propagated.sourceHandleGroupId =
+                                *sourceCallerGroup + sourceBinding->suffix;
+                        }
+                    }
                     if (shouldRemapLifecycleLocation(propagated.location, callSite.userLocation))
                         propagated.location = callSite.userLocation;
 

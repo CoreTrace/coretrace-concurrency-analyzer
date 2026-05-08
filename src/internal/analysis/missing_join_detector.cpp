@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <map>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 
 namespace ctrace::concurrency::internal::analysis
@@ -23,6 +24,44 @@ namespace ctrace::concurrency::internal::analysis
             std::size_t createCount = 0;
             std::size_t joinCount = 0;
             std::size_t detachCount = 0;
+        };
+
+        class HandleGroupAliases
+        {
+          public:
+            void unite(const std::string& lhs, const std::string& rhs)
+            {
+                const std::string lhsRoot = find(lhs);
+                const std::string rhsRoot = find(rhs);
+                if (lhsRoot == rhsRoot)
+                    return;
+
+                const bool lhsIsArgument = lhsRoot.starts_with("arg:");
+                const bool rhsIsArgument = rhsRoot.starts_with("arg:");
+                if (lhsIsArgument != rhsIsArgument)
+                {
+                    parent_[lhsIsArgument ? lhsRoot : rhsRoot] = lhsIsArgument ? rhsRoot : lhsRoot;
+                    return;
+                }
+
+                if (lhsRoot < rhsRoot)
+                    parent_[rhsRoot] = lhsRoot;
+                else
+                    parent_[lhsRoot] = rhsRoot;
+            }
+
+            std::string find(const std::string& groupId)
+            {
+                const auto [it, inserted] = parent_.try_emplace(groupId, groupId);
+                if (inserted || it->second == groupId)
+                    return groupId;
+
+                it->second = find(it->second);
+                return it->second;
+            }
+
+          private:
+            std::unordered_map<std::string, std::string> parent_;
         };
 
         std::string handleKindLabel(ThreadHandleKind kind)
@@ -49,10 +88,23 @@ namespace ctrace::concurrency::internal::analysis
 
     DiagnosticReport MissingJoinDetector::run(const TUFacts& facts) const
     {
+        HandleGroupAliases aliases;
+        for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
+        {
+            if (fact.action == ThreadLifecycleAction::Move && fact.sourceHandleGroupId.has_value())
+            {
+                aliases.unite(fact.handleGroupId, *fact.sourceHandleGroupId);
+            }
+        }
+
         std::map<std::string, LifecycleSummary> summariesByGroup;
         for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
         {
-            LifecycleSummary& summary = summariesByGroup[fact.handleGroupId];
+            if (fact.action == ThreadLifecycleAction::Move)
+                continue;
+
+            const std::string groupId = aliases.find(fact.handleGroupId);
+            LifecycleSummary& summary = summariesByGroup[groupId];
             summary.handleKind = fact.handleKind;
             summary.functionId = fact.functionId;
             if (summary.firstCreateLocation.file.empty() && summary.firstCreateLocation.line == 0 &&
@@ -74,6 +126,8 @@ namespace ctrace::concurrency::internal::analysis
                 break;
             case ThreadLifecycleAction::Detach:
                 ++summary.detachCount;
+                break;
+            case ThreadLifecycleAction::Move:
                 break;
             }
         }

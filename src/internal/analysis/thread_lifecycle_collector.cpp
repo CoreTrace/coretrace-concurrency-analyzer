@@ -22,6 +22,7 @@ namespace ctrace::concurrency::internal::analysis
             ThreadHandleKind handleKind = ThreadHandleKind::PThread;
             ThreadLifecycleAction action = ThreadLifecycleAction::Create;
             unsigned operandIndex = 0;
+            std::optional<unsigned> sourceOperandIndex;
         };
 
         std::optional<LifecycleDescriptor> classifyLifecycle(CallKind kind)
@@ -52,6 +53,13 @@ namespace ctrace::concurrency::internal::analysis
                     .action = ThreadLifecycleAction::Create,
                     .operandIndex = 0,
                 };
+            case CallKind::StdThreadMove:
+                return LifecycleDescriptor{
+                    .handleKind = ThreadHandleKind::StdThread,
+                    .action = ThreadLifecycleAction::Move,
+                    .operandIndex = 0,
+                    .sourceOperandIndex = 1,
+                };
             case CallKind::StdThreadJoin:
                 return LifecycleDescriptor{
                     .handleKind = ThreadHandleKind::StdThread,
@@ -73,8 +81,9 @@ namespace ctrace::concurrency::internal::analysis
         {
             return std::to_string(static_cast<int>(fact.handleKind)) + "|" +
                    std::to_string(static_cast<int>(fact.action)) + "|" + fact.handleGroupId + "|" +
-                   fact.functionId + "|" + fact.location.file + "|" +
-                   std::to_string(fact.location.line) + "|" + std::to_string(fact.location.column);
+                   fact.sourceHandleGroupId.value_or("") + "|" + fact.functionId + "|" +
+                   fact.location.file + "|" + std::to_string(fact.location.line) + "|" +
+                   std::to_string(fact.location.column);
         }
 
         std::optional<std::filesystem::path> primarySourceRoot(const llvm::Module& module)
@@ -155,11 +164,24 @@ namespace ctrace::concurrency::internal::analysis
                     if (!handleGroupId.has_value())
                         continue;
 
+                    std::optional<std::string> sourceHandleGroupId;
+                    if (descriptor->sourceOperandIndex.has_value())
+                    {
+                        if (*descriptor->sourceOperandIndex >= call->arg_size())
+                            continue;
+
+                        sourceHandleGroupId = canonicalStorageGroupId(
+                            *call->getArgOperand(*descriptor->sourceOperandIndex));
+                        if (!sourceHandleGroupId.has_value())
+                            continue;
+                    }
+
                     const ResolvedSourceLocations locations = resolveSourceLocations(instruction);
                     ThreadLifecycleFact fact{
                         .handleKind = descriptor->handleKind,
                         .action = descriptor->action,
                         .handleGroupId = *handleGroupId,
+                        .sourceHandleGroupId = std::move(sourceHandleGroupId),
                         .functionId = functionId(function),
                         .location = locations.userLocation,
                     };

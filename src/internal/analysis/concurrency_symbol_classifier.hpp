@@ -21,6 +21,7 @@ namespace ctrace::concurrency::internal::analysis
         PThreadMutexLock,
         PThreadMutexUnlock,
         StdThreadCtor,
+        StdThreadMove,
         StdThreadJoin,
         StdThreadDetach,
         StdMutexLock,
