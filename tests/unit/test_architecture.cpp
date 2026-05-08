@@ -90,6 +90,24 @@ entry:
         return false;
     }
 
+    bool hasOutputFlagVariantOutsideFinalPair(const std::vector<std::string>& args,
+                                              const std::string& outputPath)
+    {
+        for (std::size_t index = 0; index < args.size(); ++index)
+        {
+            if (args[index] == "-o" && index + 1 < args.size() && args[index + 1] == outputPath)
+            {
+                ++index;
+                continue;
+            }
+
+            if (isOutputFlagVariant(args[index]))
+                return true;
+        }
+
+        return false;
+    }
+
     std::optional<std::filesystem::path> findOutputPath(const std::vector<std::string>& args)
     {
         for (std::size_t index = 1; index < args.size(); ++index)
@@ -816,13 +834,14 @@ entry:
 
         const std::filesystem::path outputPath = fixturePath("build/output-attached.bc");
         const std::vector<std::string> bcArgs = CompileCommandBuilder::buildBC(request, outputPath);
-        const bool hasAttachedOutputFlag = hasOutputFlagVariant(bcArgs);
+        const bool hasStaleOutputFlag =
+            hasOutputFlagVariantOutsideFinalPair(bcArgs, outputPath.string());
         const bool bcOk =
             assertTrue(countToken(bcArgs, "-o") == 1, "BC args should contain exactly one -o") &&
             assertTrue(hasOutputPair(bcArgs, outputPath.string()),
                        "BC args should target requested output path") &&
             assertTrue(
-                !hasAttachedOutputFlag,
+                !hasStaleOutputFlag,
                 "BC args should strip stale attached -o variants before appending final pair");
 
         return llOk && bcOk;
