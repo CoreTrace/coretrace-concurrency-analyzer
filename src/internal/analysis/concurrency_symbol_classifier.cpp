@@ -31,7 +31,8 @@ namespace ctrace::concurrency::internal::analysis
             // Exclude default/copy/move constructors; only thread-starting constructors
             // should materialize lifecycle create facts.
             if (name.contains("threadC1Ev") || name.contains("threadC2Ev") ||
-                name.contains("ERKS0_") || name.contains("EOS0_"))
+                name.contains("ERKS0_") || name.contains("ERKS_") || name.contains("EOS0_") ||
+                name.contains("EOS_"))
             {
                 return false;
             }
@@ -41,7 +42,7 @@ namespace ctrace::concurrency::internal::analysis
 
         bool isStdThreadMove(llvm::StringRef name)
         {
-            if (!name.contains("thread") || !name.contains("EOS0_"))
+            if (!name.contains("thread") || (!name.contains("EOS0_") && !name.contains("EOS_")))
                 return false;
 
             const bool isMoveCtor = name.contains("threadC1") || name.contains("threadC2");
