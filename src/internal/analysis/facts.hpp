@@ -3,9 +3,11 @@
 
 #include "coretrace_concurrency_analysis.hpp"
 
+#include <optional>
 #include <set>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -17,6 +19,8 @@ namespace llvm
 
 namespace ctrace::concurrency::internal::analysis
 {
+    using ThreadEntrySet = std::unordered_set<std::string>;
+
     struct EntryConcurrencyInfo
     {
         std::size_t staticSpawnCount = 0;
@@ -69,10 +73,43 @@ namespace ctrace::concurrency::internal::analysis
         std::string symbol;
         std::string functionId;
         AccessKind kind = AccessKind::Read;
+        AliasProvenance aliasProvenance = AliasProvenance::Direct;
         SourceLocation loweredLocation;
         SourceLocation userLocation;
         bool allowCallsiteProjection = false;
         std::set<std::string> heldLocks;
+    };
+
+    struct LockOrderFact
+    {
+        std::string functionId;
+        std::string firstLockId;
+        std::string secondLockId;
+        SourceLocation location;
+    };
+
+    enum class ThreadHandleKind
+    {
+        PThread,
+        StdThread,
+    };
+
+    enum class ThreadLifecycleAction
+    {
+        Create,
+        Join,
+        Detach,
+        Move,
+    };
+
+    struct ThreadLifecycleFact
+    {
+        ThreadHandleKind handleKind = ThreadHandleKind::PThread;
+        ThreadLifecycleAction action = ThreadLifecycleAction::Create;
+        std::string handleGroupId;
+        std::optional<std::string> sourceHandleGroupId;
+        std::string functionId;
+        SourceLocation location;
     };
 
     struct PendingAccess
@@ -87,6 +124,9 @@ namespace ctrace::concurrency::internal::analysis
     {
         std::vector<SpawnFact> spawns;
         std::vector<AccessFact> accesses;
+        std::vector<LockOrderFact> lockOrders;
+        std::vector<ThreadLifecycleFact> threadLifecycles;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;
+        std::unordered_map<std::string, ThreadEntrySet> reachableThreadEntriesByFunction;
     };
 } // namespace ctrace::concurrency::internal::analysis

@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "data_race_checker.hpp"
 
+#include "fact_queries.hpp"
+#include "report_builder.hpp"
 #include "internal/diagnostics/diagnostic_builder.hpp"
 
-#include <llvm/Analysis/CallGraph.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Module.h>
 
 #include <algorithm>
-#include <deque>
 #include <map>
 #include <sstream>
 #include <set>
@@ -21,56 +21,7 @@ namespace ctrace::concurrency::internal::analysis
     namespace
     {
         using internal::diagnostics::DiagnosticBuilder;
-        using EntrySet = std::unordered_set<std::string>;
-
-        std::unordered_map<std::string, EntrySet>
-        computeThreadReachability(const llvm::Module& module, const TUFacts& facts)
-        {
-            llvm::Module& mutableModule = const_cast<llvm::Module&>(module);
-            llvm::CallGraph callGraph(mutableModule);
-
-            std::unordered_map<std::string, EntrySet> reachableEntriesByFunction;
-            for (const auto& [entryFunctionId, concurrency] : facts.entryConcurrency)
-            {
-                (void)concurrency;
-                llvm::Function* entryFunction = mutableModule.getFunction(entryFunctionId);
-                if (entryFunction == nullptr || entryFunction->isDeclaration())
-                    continue;
-
-                std::deque<const llvm::Function*> queue;
-                std::unordered_set<std::string> visited;
-                queue.push_back(entryFunction);
-                visited.insert(entryFunctionId);
-
-                while (!queue.empty())
-                {
-                    const llvm::Function* function = queue.front();
-                    queue.pop_front();
-                    reachableEntriesByFunction[function->getName().str()].insert(entryFunctionId);
-
-                    const llvm::CallGraphNode* node = callGraph[function];
-                    for (const auto& callRecord : *node)
-                    {
-                        if (!callRecord.first.has_value())
-                            continue;
-
-                        const llvm::CallGraphNode* calleeNode = callRecord.second;
-                        if (calleeNode == nullptr)
-                            continue;
-
-                        const llvm::Function* callee = calleeNode->getFunction();
-                        if (callee == nullptr || callee->isDeclaration())
-                            continue;
-
-                        const std::string calleeId = callee->getName().str();
-                        if (visited.insert(calleeId).second)
-                            queue.push_back(callee);
-                    }
-                }
-            }
-
-            return reachableEntriesByFunction;
-        }
+        using EntrySet = ThreadEntrySet;
 
         bool shareRecognizedLock(const AccessFact& lhs, const AccessFact& rhs)
         {
@@ -80,43 +31,6 @@ namespace ctrace::concurrency::internal::analysis
             return std::any_of(lhs.heldLocks.begin(), lhs.heldLocks.end(),
                                [&](const std::string& lock)
                                { return rhs.heldLocks.contains(lock); });
-        }
-
-        bool isSelfConcurrent(const EntrySet& entries, const TUFacts& facts)
-        {
-            return std::any_of(entries.begin(), entries.end(),
-                               [&](const std::string& entry)
-                               {
-                                   const auto it = facts.entryConcurrency.find(entry);
-                                   return it != facts.entryConcurrency.end() &&
-                                          it->second.isSelfConcurrent();
-                               });
-        }
-
-        bool mayRunConcurrently(const EntrySet& lhsEntries, const EntrySet& rhsEntries,
-                                const TUFacts& facts)
-        {
-            for (const std::string& lhsEntry : lhsEntries)
-            {
-                for (const std::string& rhsEntry : rhsEntries)
-                {
-                    if (lhsEntry != rhsEntry)
-                        return true;
-
-                    const auto it = facts.entryConcurrency.find(lhsEntry);
-                    if (it != facts.entryConcurrency.end() && it->second.isSelfConcurrent())
-                        return true;
-                }
-            }
-
-            return false;
-        }
-
-        std::vector<std::string> sortedEntries(const EntrySet& entries)
-        {
-            std::vector<std::string> ordered(entries.begin(), entries.end());
-            std::sort(ordered.begin(), ordered.end());
-            return ordered;
         }
 
         std::vector<std::string> sortedLocks(const AccessFact& access)
@@ -208,6 +122,48 @@ namespace ctrace::concurrency::internal::analysis
             return std::vector<std::string>(conflictKinds.begin(), conflictKinds.end());
         }
 
+        std::vector<std::string> collectAliasProvenances(const AccessFact& lhs,
+                                                         const AccessFact& rhs)
+        {
+            std::set<std::string> aliasing;
+            aliasing.insert(std::string(toString(lhs.aliasProvenance)));
+            aliasing.insert(std::string(toString(rhs.aliasProvenance)));
+            return std::vector<std::string>(aliasing.begin(), aliasing.end());
+        }
+
+        std::vector<std::string> collectAliasProvenances(const AccessFact& access)
+        {
+            return {std::string(toString(access.aliasProvenance))};
+        }
+
+        ConfidenceLevel inferConfidence(const AccessFact& lhs, const AccessFact& rhs)
+        {
+            if (lhs.aliasProvenance == AliasProvenance::MayAlias ||
+                rhs.aliasProvenance == AliasProvenance::MayAlias)
+            {
+                return ConfidenceLevel::Low;
+            }
+
+            if (lhs.aliasProvenance == AliasProvenance::MustAlias ||
+                rhs.aliasProvenance == AliasProvenance::MustAlias)
+            {
+                return ConfidenceLevel::Medium;
+            }
+
+            return ConfidenceLevel::High;
+        }
+
+        ConfidenceLevel inferConfidence(const AccessFact& access)
+        {
+            if (access.aliasProvenance == AliasProvenance::MayAlias)
+                return ConfidenceLevel::Low;
+
+            if (access.aliasProvenance == AliasProvenance::MustAlias)
+                return ConfidenceLevel::Medium;
+
+            return ConfidenceLevel::High;
+        }
+
         std::string describeAccess(const AccessFact& access,
                                    const std::vector<std::string>& entries)
         {
@@ -227,13 +183,15 @@ namespace ctrace::concurrency::internal::analysis
                                 const AccessFact& rhs, const EntrySet& lhsEntries,
                                 const EntrySet& rhsEntries, const TUFacts& facts)
         {
-            const std::vector<std::string> orderedLhsEntries = sortedEntries(lhsEntries);
-            const std::vector<std::string> orderedRhsEntries = sortedEntries(rhsEntries);
+            const std::vector<std::string> orderedLhsEntries = sortedThreadEntries(lhsEntries);
+            const std::vector<std::string> orderedRhsEntries = sortedThreadEntries(rhsEntries);
             const std::vector<std::string> conflictKinds =
                 collectConflictKinds(lhs, rhs, lhsEntries, rhsEntries, facts);
+            const std::vector<std::string> variableAliasing = collectAliasProvenances(lhs, rhs);
 
             DiagnosticBuilder builder(report, RuleId::DataRaceGlobal);
-            builder.primaryLocation(lhs.userLocation)
+            builder.confidence(inferConfidence(lhs, rhs))
+                .primaryLocation(lhs.userLocation)
                 .relatedLocation("Conflicting access", rhs.userLocation)
                 .message("unsynchronized concurrent access to global '" + lhs.symbol + "'")
                 .note("first access: " + describeAccess(lhs, orderedLhsEntries))
@@ -243,12 +201,14 @@ namespace ctrace::concurrency::internal::analysis
                 .property("symbol", lhs.symbol)
                 .property("firstAccessKind", std::string(toString(lhs.kind)))
                 .property("secondAccessKind", std::string(toString(rhs.kind)))
+                .property("firstAliasProvenance", std::string(toString(lhs.aliasProvenance)))
+                .property("secondAliasProvenance", std::string(toString(rhs.aliasProvenance)))
                 .property("firstProtected", !lhs.heldLocks.empty())
                 .property("secondProtected", !rhs.heldLocks.empty())
                 .property("firstThreadEntries", orderedLhsEntries)
                 .property("secondThreadEntries", orderedRhsEntries)
                 .property("conflictKinds", conflictKinds)
-                .property("variableAliasing", std::vector<std::string>{});
+                .property("variableAliasing", variableAliasing);
 
             if (hasDistinctLoweredLocation(lhs))
                 builder.relatedLocation("Lowered first access", lhs.loweredLocation);
@@ -261,13 +221,15 @@ namespace ctrace::concurrency::internal::analysis
         void emitSelfConcurrentDiagnostic(DiagnosticReport& report, const AccessFact& access,
                                           const EntrySet& entries)
         {
-            const std::vector<std::string> orderedEntries = sortedEntries(entries);
+            const std::vector<std::string> orderedEntries = sortedThreadEntries(entries);
             const std::string entryLabel =
                 orderedEntries.empty() ? access.functionId : joinValues(orderedEntries);
             const std::vector<std::string> conflictKinds = {"write/write"};
+            const std::vector<std::string> variableAliasing = collectAliasProvenances(access);
 
             DiagnosticBuilder builder(report, RuleId::DataRaceGlobal);
-            builder.primaryLocation(access.userLocation)
+            builder.confidence(inferConfidence(access))
+                .primaryLocation(access.userLocation)
                 .relatedLocation("Concurrent invocation", access.userLocation)
                 .message("unsynchronized concurrent access to global '" + access.symbol + "'")
                 .note("access: " + describeAccess(access, orderedEntries))
@@ -279,12 +241,14 @@ namespace ctrace::concurrency::internal::analysis
                 .property("symbol", access.symbol)
                 .property("firstAccessKind", std::string(toString(access.kind)))
                 .property("secondAccessKind", std::string(toString(access.kind)))
+                .property("firstAliasProvenance", std::string(toString(access.aliasProvenance)))
+                .property("secondAliasProvenance", std::string(toString(access.aliasProvenance)))
                 .property("firstProtected", !access.heldLocks.empty())
                 .property("secondProtected", !access.heldLocks.empty())
                 .property("firstThreadEntries", orderedEntries)
                 .property("secondThreadEntries", orderedEntries)
                 .property("conflictKinds", conflictKinds)
-                .property("variableAliasing", std::vector<std::string>{});
+                .property("variableAliasing", variableAliasing);
 
             if (hasDistinctLoweredLocation(access))
                 builder.relatedLocation("Lowered access", access.loweredLocation);
@@ -292,127 +256,13 @@ namespace ctrace::concurrency::internal::analysis
             builder.emit();
         }
 
-        DiagnosticSummary computeSummary(const std::vector<Diagnostic>& diagnostics)
-        {
-            DiagnosticSummary summary;
-            for (const Diagnostic& diagnostic : diagnostics)
-            {
-                switch (diagnostic.severity)
-                {
-                case Severity::Info:
-                    ++summary.info;
-                    break;
-                case Severity::Warning:
-                    ++summary.warning;
-                    break;
-                case Severity::Error:
-                    ++summary.error;
-                    break;
-                }
-            }
-            return summary;
-        }
-
-        std::vector<FunctionSummary>
-        buildFunctionSummaries(const TUFacts& facts,
-                               const std::unordered_map<std::string, EntrySet>& reachableEntries,
-                               const std::vector<Diagnostic>& diagnostics)
-        {
-            std::map<std::string, FunctionSummary> functions;
-
-            auto ensureSummary = [&](const std::string& functionId) -> FunctionSummary&
-            {
-                FunctionSummary& summary = functions[functionId];
-                if (summary.name.empty())
-                    summary.name = functionId;
-                return summary;
-            };
-
-            for (const AccessFact& access : facts.accesses)
-            {
-                FunctionSummary& summary = ensureSummary(access.functionId);
-                if (summary.name.empty() && !access.userLocation.function.empty())
-                    summary.name = access.userLocation.function;
-                else if (!access.userLocation.function.empty())
-                    summary.name = access.userLocation.function;
-
-                if (summary.file.empty() && !access.userLocation.file.empty())
-                    summary.file = access.userLocation.file;
-
-                ++summary.sharedAccessCount;
-                if (!access.heldLocks.empty())
-                    ++summary.protectedAccessCount;
-                if (access.kind == AccessKind::Write)
-                    ++summary.writeAccessCount;
-            }
-
-            for (const auto& [functionId, entries] : reachableEntries)
-            {
-                FunctionSummary& summary = ensureSummary(functionId);
-                summary.threadReachable = true;
-                summary.threadEntries = sortedEntries(entries);
-            }
-
-            for (const Diagnostic& diagnostic : diagnostics)
-            {
-                const std::string functionName = diagnostic.location.function.empty()
-                                                     ? std::string{}
-                                                     : diagnostic.location.function;
-                if (!functionName.empty())
-                {
-                    for (auto& [_, summary] : functions)
-                    {
-                        if (summary.name == functionName)
-                            summary.hasDiagnostics = true;
-                    }
-                }
-
-                for (const RelatedLocation& related : diagnostic.relatedLocations)
-                {
-                    if (related.location.function.empty())
-                        continue;
-
-                    for (auto& [_, summary] : functions)
-                    {
-                        if (summary.name == related.location.function)
-                            summary.hasDiagnostics = true;
-                    }
-                }
-            }
-
-            std::vector<FunctionSummary> ordered;
-            ordered.reserve(functions.size());
-            for (auto& [_, summary] : functions)
-                ordered.push_back(std::move(summary));
-
-            std::sort(ordered.begin(), ordered.end(),
-                      [](const FunctionSummary& lhs, const FunctionSummary& rhs)
-                      { return std::tie(lhs.name, lhs.file) < std::tie(rhs.name, rhs.file); });
-            return ordered;
-        }
-
-        void finalizeReport(DiagnosticReport& report)
-        {
-            std::sort(report.diagnostics.begin(), report.diagnostics.end(),
-                      [](const Diagnostic& lhs, const Diagnostic& rhs)
-                      {
-                          return std::tie(lhs.ruleId, lhs.location.file, lhs.location.line,
-                                          lhs.location.column, lhs.message) <
-                                 std::tie(rhs.ruleId, rhs.location.file, rhs.location.line,
-                                          rhs.location.column, rhs.message);
-                      });
-
-            for (std::size_t index = 0; index < report.diagnostics.size(); ++index)
-                report.diagnostics[index].id = "diag-" + std::to_string(index + 1);
-
-            report.diagnosticsSummary = computeSummary(report.diagnostics);
-        }
     } // namespace
 
     DiagnosticReport DataRaceChecker::run(const llvm::Module& module, const TUFacts& facts) const
     {
-        const std::unordered_map<std::string, EntrySet> reachableEntriesByFunction =
-            computeThreadReachability(module, facts);
+        (void)module;
+        const std::unordered_map<std::string, ThreadEntrySet>& reachableEntriesByFunction =
+            facts.reachableThreadEntriesByFunction;
 
         std::map<std::string, std::vector<const AccessFact*>> accessesBySymbol;
         for (const AccessFact& access : facts.accesses)
@@ -470,9 +320,7 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
-        report.functions =
-            buildFunctionSummaries(facts, reachableEntriesByFunction, report.diagnostics);
-        finalizeReport(report);
+        finalizeReport(report, facts);
         return report;
     }
 } // namespace ctrace::concurrency::internal::analysis

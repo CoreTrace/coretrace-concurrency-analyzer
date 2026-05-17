@@ -2,6 +2,7 @@
 #include "thread_spawn_detector.hpp"
 
 #include "concurrency_symbol_classifier.hpp"
+#include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
 
 #include <llvm/Analysis/LoopInfo.h>
@@ -127,54 +128,32 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         std::vector<DirectFunctionCallBinding>
-        collectDirectCallBindings(const llvm::Module& module,
-                                  const ConcurrencySymbolClassifier& classifier)
+        buildDirectCallBindings(const std::vector<DirectCallSite>& callSites)
         {
             std::vector<DirectFunctionCallBinding> bindings;
 
-            for (const llvm::Function& function : module)
+            for (const DirectCallSite& site : callSites)
             {
-                if (function.isDeclaration())
+                if (site.call == nullptr)
                     continue;
 
-                llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-                llvm::DominatorTree dominatorTree(mutableFunction);
-                llvm::LoopInfo loopInfo(dominatorTree);
+                DirectFunctionCallBinding binding;
+                binding.callerFunctionId = site.callerFunctionId;
+                binding.calleeFunctionId = site.calleeFunctionId;
+                binding.location = site.loweredLocation;
+                binding.insideLoop = site.insideLoop;
 
-                for (const llvm::BasicBlock& block : function)
+                for (unsigned argumentIndex = 0; argumentIndex < site.call->arg_size();
+                     ++argumentIndex)
                 {
-                    if (!dominatorTree.isReachableFromEntry(&block))
-                        continue;
-
-                    for (const llvm::Instruction& instruction : block)
-                    {
-                        const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                        if (call == nullptr)
-                            continue;
-
-                        const llvm::Function* callee = classifier.directCallee(*call);
-                        if (callee == nullptr || callee->isDeclaration())
-                            continue;
-
-                        DirectFunctionCallBinding binding;
-                        binding.callerFunctionId = functionId(function);
-                        binding.calleeFunctionId = functionId(*callee);
-                        binding.location = makeSourceLocation(instruction);
-                        binding.insideLoop = loopInfo.getLoopFor(call->getParent()) != nullptr;
-
-                        for (unsigned argumentIndex = 0; argumentIndex < call->arg_size();
-                             ++argumentIndex)
-                        {
-                            const std::optional<FunctionBinding> argumentBinding =
-                                resolveFunctionBinding(*call->getArgOperand(argumentIndex));
-                            if (argumentBinding.has_value())
-                                binding.argumentBindings.emplace(argumentIndex, *argumentBinding);
-                        }
-
-                        if (!binding.argumentBindings.empty())
-                            bindings.push_back(std::move(binding));
-                    }
+                    const std::optional<FunctionBinding> argumentBinding =
+                        resolveFunctionBinding(*site.call->getArgOperand(argumentIndex));
+                    if (argumentBinding.has_value())
+                        binding.argumentBindings.emplace(argumentIndex, *argumentBinding);
                 }
+
+                if (!binding.argumentBindings.empty())
+                    bindings.push_back(std::move(binding));
             }
 
             return bindings;
@@ -246,7 +225,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         const std::vector<DirectFunctionCallBinding> directCallBindings =
-            collectDirectCallBindings(module, classifier_);
+            buildDirectCallBindings(collectDirectCallSites(module, classifier_));
 
         bool changed = true;
         while (changed)

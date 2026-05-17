@@ -134,7 +134,7 @@ def run_human_analyzer(fixture_path: Path, binary: Path = BIN) -> subprocess.Com
     """Run the analyzer in human mode for a single fixture."""
 
     return subprocess.run(
-        [str(binary), str(fixture_path), "--analyze", "--format=human"],
+        [str(binary), str(fixture_path), "--analyze", "--rules=all", "--format=human"],
         cwd=ROOT,
         capture_output=True,
         text=True,

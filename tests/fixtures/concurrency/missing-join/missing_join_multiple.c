@@ -54,4 +54,13 @@ int main() {
 // 	     ↳ possible conflict kinds: write/write
 // 	     ↳ no common recognized lock protects the conflicting accesses
 // 	related: Concurrent invocation -> ${REPO_ROOT}/tests/fixtures/concurrency/missing-join/missing_join_multiple.c:12:17 in compute
+//
+// Function: main
+// 	severity: WARNING
+// 	ruleId: MissingJoin
+// 	at line 23, column 9
+// 	[!!!Warning] thread handle is not joined or detached before scope exit
+// 	     ↳ handle kind: pthread
+// 	     ↳ lifecycle summary: creates=1, joins=0, detaches=0
+// 	     ↳ outstanding joinable handles: 1
 // EXPECT-HUMAN-DIAGNOSTICS-END

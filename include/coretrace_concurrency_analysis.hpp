@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <initializer_list>
 #include <map>
 #include <optional>
 #include <string>
@@ -22,6 +23,13 @@ namespace ctrace::concurrency
         Write,
     };
 
+    enum class AliasProvenance
+    {
+        Direct,
+        MustAlias,
+        MayAlias,
+    };
+
     enum class Severity
     {
         Info,
@@ -33,6 +41,8 @@ namespace ctrace::concurrency
     {
         CompilerDiagnostic,
         DataRaceGlobal,
+        MissingJoin,
+        DeadlockLockOrder,
     };
 
     enum class ConfidenceLevel
@@ -122,10 +132,37 @@ namespace ctrace::concurrency
 
     using AnalysisReport = DiagnosticReport;
 
+    struct AnalysisOptions
+    {
+        std::vector<RuleId> enabledRules{RuleId::DataRaceGlobal, RuleId::MissingJoin,
+                                         RuleId::DeadlockLockOrder};
+
+        [[nodiscard]] bool isEnabled(RuleId ruleId) const
+        {
+            for (const RuleId enabledRule : enabledRules)
+            {
+                if (enabledRule == ruleId)
+                    return true;
+            }
+            return false;
+        }
+
+        [[nodiscard]] static AnalysisOptions allAvailable()
+        {
+            return AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
+                                                    RuleId::DeadlockLockOrder}};
+        }
+    };
+
     class SingleTUConcurrencyAnalyzer
     {
       public:
+        explicit SingleTUConcurrencyAnalyzer(AnalysisOptions options = {});
+
         [[nodiscard]] DiagnosticReport analyze(const llvm::Module& module) const;
+
+      private:
+        AnalysisOptions options_;
     };
 
     constexpr std::string_view toString(AccessKind kind)
@@ -136,6 +173,20 @@ namespace ctrace::concurrency
             return "read";
         case AccessKind::Write:
             return "write";
+        }
+        return "unknown";
+    }
+
+    constexpr std::string_view toString(AliasProvenance provenance)
+    {
+        switch (provenance)
+        {
+        case AliasProvenance::Direct:
+            return "direct";
+        case AliasProvenance::MustAlias:
+            return "must_alias";
+        case AliasProvenance::MayAlias:
+            return "may_alias";
         }
         return "unknown";
     }
@@ -162,6 +213,10 @@ namespace ctrace::concurrency
             return "CompilerDiagnostic";
         case RuleId::DataRaceGlobal:
             return "DataRaceGlobal";
+        case RuleId::MissingJoin:
+            return "MissingJoin";
+        case RuleId::DeadlockLockOrder:
+            return "DeadlockLockOrder";
         }
         return "UnknownRule";
     }
