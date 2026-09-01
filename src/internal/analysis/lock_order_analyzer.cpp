@@ -6,10 +6,15 @@
 #include "internal/diagnostics/diagnostic_builder.hpp"
 
 #include <algorithm>
+#include <functional>
+#include <iterator>
+#include <optional>
 #include <set>
 #include <sstream>
-#include <tuple>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
+#include <vector>
 
 namespace ctrace::concurrency::internal::analysis
 {
@@ -45,44 +50,145 @@ namespace ctrace::concurrency::internal::analysis
             return stream.str();
         }
 
-        std::string pairKey(const LockOrderFact& lhs, const LockOrderFact& rhs)
+        const ThreadEntrySet& entriesFor(const LockOrderFact& fact, const TUFacts& facts)
         {
-            const auto lhsKey = std::make_tuple(lhs.functionId, lhs.firstLockId, lhs.secondLockId);
-            const auto rhsKey = std::make_tuple(rhs.functionId, rhs.firstLockId, rhs.secondLockId);
-            const auto normalized = std::minmax(lhsKey, rhsKey);
+            static const ThreadEntrySet emptyEntries;
+            const auto it = facts.reachableThreadEntriesByFunction.find(fact.functionId);
+            return it != facts.reachableThreadEntriesByFunction.end() ? it->second : emptyEntries;
+        }
+
+        std::vector<std::string> contextLabel(const LockOrderFact& fact, const TUFacts& facts)
+        {
+            std::vector<std::string> entries = sortedThreadEntries(entriesFor(fact, facts));
+            if (entries.empty() && fact.inRootTask)
+                entries.push_back(rootTaskId());
+            return entries;
+        }
+
+        void emitCycleDiagnostic(DiagnosticReport& report,
+                                 const std::vector<const LockOrderFact*>& cycle,
+                                 const TUFacts& facts)
+        {
+            const LockOrderFact& first = *cycle.front();
+            const bool isInversion = cycle.size() == 2;
+
+            DiagnosticBuilder builder(report, RuleId::DeadlockLockOrder);
+            builder.primaryLocation(first.location)
+                .message(isInversion
+                             ? "potential deadlock caused by inconsistent lock acquisition order"
+                             : "potential deadlock caused by a cycle of " +
+                                   std::to_string(cycle.size()) + " lock acquisitions");
+
+            std::vector<std::string> cycleLocks;
+            for (std::size_t index = 0; index < cycle.size(); ++index)
+            {
+                const LockOrderFact& edge = *cycle[index];
+                cycleLocks.push_back(edge.firstLockId);
+
+                const std::string label =
+                    index == 0 ? std::string("first order") : std::string("conflicting order");
+                builder.note(label + ": acquire '" + edge.secondLockId + "' while holding '" +
+                             edge.firstLockId + "' at " + locationLabel(edge.location) +
+                             " (thread entries: " + joinValues(contextLabel(edge, facts)) + ")");
+
+                if (index != 0)
+                    builder.relatedLocation("Conflicting lock order", edge.location);
+            }
+
+            builder.property("firstLock", first.firstLockId)
+                .property("secondLock", first.secondLockId)
+                .property("cycleLocks", cycleLocks)
+                .property("firstThreadEntries", contextLabel(first, facts))
+                .property("secondThreadEntries", contextLabel(*cycle.back(), facts))
+                .emit();
+        }
+
+        /// Locks held at every acquisition of the cycle, excluding the cycle's own locks. Such an
+        /// outer "gate" serializes the whole cycle, so the inconsistent order can never deadlock.
+        bool hasCommonGateLock(const std::vector<const LockOrderFact*>& cycle)
+        {
+            std::set<std::string> cycleLocks;
+            for (const LockOrderFact* edge : cycle)
+            {
+                cycleLocks.insert(edge->firstLockId);
+                cycleLocks.insert(edge->secondLockId);
+            }
+
+            std::optional<std::set<std::string>> gates;
+            for (const LockOrderFact* edge : cycle)
+            {
+                std::set<std::string> candidates;
+                for (const std::string& heldLock : edge->heldLocks)
+                {
+                    if (!cycleLocks.contains(heldLock))
+                        candidates.insert(heldLock);
+                }
+
+                if (!gates.has_value())
+                {
+                    gates = std::move(candidates);
+                    continue;
+                }
+
+                std::set<std::string> intersection;
+                std::set_intersection(gates->begin(), gates->end(), candidates.begin(),
+                                      candidates.end(),
+                                      std::inserter(intersection, intersection.end()));
+                gates = std::move(intersection);
+            }
+
+            return gates.has_value() && !gates->empty();
+        }
+
+        std::string cycleKey(const std::vector<const LockOrderFact*>& cycle)
+        {
+            std::set<std::string> nodes;
+            for (const LockOrderFact* edge : cycle)
+                nodes.insert(edge->firstLockId + "->" + edge->secondLockId);
 
             std::ostringstream stream;
-            stream << std::get<0>(normalized.first) << "|" << std::get<1>(normalized.first) << "|"
-                   << std::get<2>(normalized.first) << "||" << std::get<0>(normalized.second) << "|"
-                   << std::get<1>(normalized.second) << "|" << std::get<2>(normalized.second);
+            for (const std::string& node : nodes)
+                stream << node << "||";
             return stream.str();
         }
 
-        void emitCycleDiagnostic(DiagnosticReport& report, const LockOrderFact& lhs,
-                                 const LockOrderFact& rhs, const TUFacts& facts)
+        void reportCycleIfDeadlocking(DiagnosticReport& report,
+                                      const std::vector<const LockOrderFact*>& path,
+                                      const std::string& cycleStartLock, const TUFacts& facts,
+                                      std::unordered_set<std::string>& emittedCycleKeys)
         {
-            const ThreadEntrySet& lhsEntries =
-                facts.reachableThreadEntriesByFunction.at(lhs.functionId);
-            const ThreadEntrySet& rhsEntries =
-                facts.reachableThreadEntriesByFunction.at(rhs.functionId);
-            const std::vector<std::string> orderedLhsEntries = sortedThreadEntries(lhsEntries);
-            const std::vector<std::string> orderedRhsEntries = sortedThreadEntries(rhsEntries);
+            const auto cycleBegin =
+                std::find_if(path.begin(), path.end(), [&](const LockOrderFact* edge)
+                             { return edge->firstLockId == cycleStartLock; });
+            if (cycleBegin == path.end())
+                return;
 
-            DiagnosticBuilder(report, RuleId::DeadlockLockOrder)
-                .primaryLocation(lhs.location)
-                .relatedLocation("Conflicting lock order", rhs.location)
-                .message("potential deadlock caused by inconsistent lock acquisition order")
-                .note("first order: acquire '" + lhs.secondLockId + "' while holding '" +
-                      lhs.firstLockId + "' at " + locationLabel(lhs.location) +
-                      " (thread entries: " + joinValues(orderedLhsEntries) + ")")
-                .note("conflicting order: acquire '" + rhs.secondLockId + "' while holding '" +
-                      rhs.firstLockId + "' at " + locationLabel(rhs.location) +
-                      " (thread entries: " + joinValues(orderedRhsEntries) + ")")
-                .property("firstLock", lhs.firstLockId)
-                .property("secondLock", lhs.secondLockId)
-                .property("firstThreadEntries", orderedLhsEntries)
-                .property("secondThreadEntries", orderedRhsEntries)
-                .emit();
+            const std::vector<const LockOrderFact*> cycle(cycleBegin, path.end());
+            if (cycle.size() < 2)
+                return;
+
+            // Every acquisition in the cycle must be able to run in parallel with every other one;
+            // otherwise no set of threads can hold the locks simultaneously.
+            for (std::size_t lhsIndex = 0; lhsIndex < cycle.size(); ++lhsIndex)
+            {
+                for (std::size_t rhsIndex = lhsIndex + 1; rhsIndex < cycle.size(); ++rhsIndex)
+                {
+                    if (!mayHappenInParallel(*cycle[lhsIndex], entriesFor(*cycle[lhsIndex], facts),
+                                             *cycle[rhsIndex], entriesFor(*cycle[rhsIndex], facts),
+                                             facts))
+                    {
+                        return;
+                    }
+                }
+            }
+
+            if (hasCommonGateLock(cycle))
+                return;
+
+            if (!emittedCycleKeys.insert(cycleKey(cycle)).second)
+                return;
+
+            emitCycleDiagnostic(report, cycle, facts);
         }
 
         void emitSelfDeadlockDiagnostic(DiagnosticReport& report, const LockOrderFact& fact)
@@ -102,42 +208,86 @@ namespace ctrace::concurrency::internal::analysis
     DiagnosticReport LockOrderAnalyzer::run(const TUFacts& facts) const
     {
         DiagnosticReport report;
-        std::unordered_set<std::string> emittedPairKeys;
+        std::unordered_set<std::string> emittedCycleKeys;
 
-        for (std::size_t lhsIndex = 0; lhsIndex < facts.lockOrders.size(); ++lhsIndex)
+        auto participatesInConcurrency = [&](const LockOrderFact& fact)
         {
-            const LockOrderFact& lhs = facts.lockOrders[lhsIndex];
-            if (lhs.firstLockId == lhs.secondLockId)
-            {
-                emitSelfDeadlockDiagnostic(report, lhs);
-                continue;
-            }
+            return facts.reachableThreadEntriesByFunction.contains(fact.functionId) ||
+                   fact.inRootTask;
+        };
 
-            const auto lhsEntriesIt = facts.reachableThreadEntriesByFunction.find(lhs.functionId);
-            if (lhsEntriesIt == facts.reachableThreadEntriesByFunction.end())
+        for (const LockOrderFact& fact : facts.lockOrders)
+        {
+            if (fact.firstLockId != fact.secondLockId)
                 continue;
 
-            for (std::size_t rhsIndex = lhsIndex + 1; rhsIndex < facts.lockOrders.size();
-                 ++rhsIndex)
+            // A recursive (or error-checking) mutex may legally be reacquired by its owner.
+            if (facts.recursiveLockIds.contains(fact.secondLockId))
+                continue;
+
+            emitSelfDeadlockDiagnostic(report, fact);
+        }
+
+        // Any cycle in the lock-order graph can deadlock, not only the two-lock inversion. Edges
+        // are grouped by lock pair so that a cycle of any length is found by a depth-first search.
+        std::unordered_map<std::string, std::vector<const LockOrderFact*>> edgesByFirstLock;
+        for (const LockOrderFact& fact : facts.lockOrders)
+        {
+            if (fact.firstLockId == fact.secondLockId || !participatesInConcurrency(fact))
+                continue;
+
+            edgesByFirstLock[fact.firstLockId].push_back(&fact);
+        }
+
+        std::vector<const LockOrderFact*> currentPath;
+        std::unordered_set<std::string> onPath;
+        std::unordered_set<std::string> exhausted;
+
+        const std::function<void(const std::string&)> explore =
+            [&](const std::string& lockId) -> void
+        {
+            onPath.insert(lockId);
+
+            const auto edgesIt = edgesByFirstLock.find(lockId);
+            if (edgesIt != edgesByFirstLock.end())
             {
-                const LockOrderFact& rhs = facts.lockOrders[rhsIndex];
-                if (lhs.firstLockId != rhs.secondLockId || lhs.secondLockId != rhs.firstLockId)
-                    continue;
+                for (const LockOrderFact* edge : edgesIt->second)
+                {
+                    currentPath.push_back(edge);
 
-                const auto rhsEntriesIt =
-                    facts.reachableThreadEntriesByFunction.find(rhs.functionId);
-                if (rhsEntriesIt == facts.reachableThreadEntriesByFunction.end())
-                    continue;
+                    if (onPath.contains(edge->secondLockId))
+                    {
+                        reportCycleIfDeadlocking(report, currentPath, edge->secondLockId, facts,
+                                                 emittedCycleKeys);
+                    }
+                    else if (!exhausted.contains(edge->secondLockId))
+                    {
+                        explore(edge->secondLockId);
+                    }
 
-                if (!mayRunConcurrently(lhsEntriesIt->second, rhsEntriesIt->second, facts))
-                    continue;
-
-                const std::string key = pairKey(lhs, rhs);
-                if (!emittedPairKeys.insert(key).second)
-                    continue;
-
-                emitCycleDiagnostic(report, lhs, rhs, facts);
+                    currentPath.pop_back();
+                }
             }
+
+            onPath.erase(lockId);
+            exhausted.insert(lockId);
+        };
+
+        std::vector<std::string> orderedRoots;
+        orderedRoots.reserve(edgesByFirstLock.size());
+        for (const auto& [lockId, edges] : edgesByFirstLock)
+        {
+            (void)edges;
+            orderedRoots.push_back(lockId);
+        }
+        std::sort(orderedRoots.begin(), orderedRoots.end());
+
+        for (const std::string& lockId : orderedRoots)
+        {
+            if (exhausted.contains(lockId))
+                continue;
+
+            explore(lockId);
         }
 
         finalizeReport(report, facts);
