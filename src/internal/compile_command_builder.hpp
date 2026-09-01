@@ -22,5 +22,7 @@ namespace ctrace::concurrency::internal
                                                 const std::string& token);
         static void appendIfMissing(std::vector<std::string>& args, const std::string& flag);
         static void removeOutputPathArgs(std::vector<std::string>& args);
+        /// Pins the optimization level the analysis is run at, whatever the caller asked for.
+        static void forceUnoptimizedCodegen(std::vector<std::string>& args);
     };
 } // namespace ctrace::concurrency::internal
