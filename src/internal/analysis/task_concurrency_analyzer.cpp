@@ -72,7 +72,8 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         FunctionLifecycleSites collectLifecycleSites(const llvm::Function& function,
-                                                     const ConcurrencySymbolClassifier& classifier)
+                                                     const ConcurrencySymbolClassifier& classifier,
+                                                     bool includeExternalEntries)
         {
             FunctionLifecycleSites sites;
 
@@ -108,7 +109,7 @@ namespace ctrace::concurrency::internal::analysis
 
                     const llvm::Function* entry =
                         resolveFunctionValue(*call->getArgOperand(*entryIndex));
-                    if (entry == nullptr || entry->isDeclaration())
+                    if (entry == nullptr || (entry->isDeclaration() && !includeExternalEntries))
                         continue;
 
                     sites.spawns.push_back(SpawnSite{
@@ -193,7 +194,8 @@ namespace ctrace::concurrency::internal::analysis
 
     TaskConcurrencyResult
     TaskConcurrencyAnalyzer::analyze(const llvm::Module& module,
-                                     const std::vector<DirectCallSite>& directCallSites) const
+                                     const std::vector<DirectCallSite>& directCallSites,
+                                     bool includeExternalEntries) const
     {
         TaskConcurrencyResult result;
         result.rootTaskFunctions = collectRootTaskFunctions(module, directCallSites);
@@ -206,7 +208,8 @@ namespace ctrace::concurrency::internal::analysis
                 continue;
 
             const std::string currentFunctionId = functionId(function);
-            FunctionLifecycleSites sites = collectLifecycleSites(function, classifier_);
+            FunctionLifecycleSites sites =
+                collectLifecycleSites(function, classifier_, includeExternalEntries);
             if (sites.spawns.empty())
             {
                 sitesByFunction.emplace(currentFunctionId, std::move(sites));

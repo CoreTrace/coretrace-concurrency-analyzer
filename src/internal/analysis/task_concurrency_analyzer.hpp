@@ -42,9 +42,12 @@ namespace ctrace::concurrency::internal::analysis
       public:
         explicit TaskConcurrencyAnalyzer(const ConcurrencySymbolClassifier& classifier);
 
+        /// `includeExternalEntries` mirrors ThreadSpawnDetector: a project-wide run must decide
+        /// whether two instances of an entry overlap even when its body lives in another unit,
+        /// because that verdict is only observable here, at the spawn sites.
         [[nodiscard]] TaskConcurrencyResult
-        analyze(const llvm::Module& module,
-                const std::vector<DirectCallSite>& directCallSites) const;
+        analyze(const llvm::Module& module, const std::vector<DirectCallSite>& directCallSites,
+                bool includeExternalEntries = false) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;

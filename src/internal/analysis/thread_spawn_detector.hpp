@@ -26,7 +26,11 @@ namespace ctrace::concurrency::internal::analysis
       public:
         explicit ThreadSpawnDetector(const ConcurrencySymbolClassifier& classifier);
 
-        [[nodiscard]] ThreadSpawnCollection collect(const llvm::Module& module) const;
+        /// `includeExternalEntries` keeps spawns whose entry is only declared here. A
+        /// single-unit run drops them: nothing can be said about a body it cannot see. A
+        /// project-wide run needs them, because that body is another unit's.
+        [[nodiscard]] ThreadSpawnCollection collect(const llvm::Module& module,
+                                                    bool includeExternalEntries = false) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
