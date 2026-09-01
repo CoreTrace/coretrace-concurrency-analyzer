@@ -8,6 +8,7 @@
 #include "lock_scope_tracker.hpp"
 #include "lock_state_propagator.hpp"
 #include "shared_access_collector.hpp"
+#include "cross_tu/program_symbol_index.hpp"
 #include "task_concurrency_analyzer.hpp"
 #include "thread_lifecycle_collector.hpp"
 #include "thread_spawn_detector.hpp"
@@ -22,6 +23,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
+#include <algorithm>
 #include <cctype>
 #include <optional>
 #include <sstream>
@@ -418,12 +420,14 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    TUFacts TUFactsBuilder::build(const llvm::Module& module) const
+    TUFacts TUFactsBuilder::build(const llvm::Module& module,
+                                  const ProgramSymbolIndex* program) const
     {
         const ConcurrencySymbolClassifier classifier;
 
         ThreadSpawnDetector spawnDetector(classifier);
-        ThreadSpawnCollection spawnFacts = spawnDetector.collect(module);
+        const bool crossTU = program != nullptr;
+        ThreadSpawnCollection spawnFacts = spawnDetector.collect(module, crossTU);
         ThreadLifecycleCollector threadLifecycleCollector(classifier);
         const std::vector<DirectCallSite> directCallSites =
             collectDirectCallSites(module, classifier);
@@ -457,7 +461,7 @@ namespace ctrace::concurrency::internal::analysis
         ThreadContextPropagator threadContextPropagator(classifier);
         const TaskConcurrencyAnalyzer taskConcurrencyAnalyzer(classifier);
         const TaskConcurrencyResult taskConcurrency =
-            taskConcurrencyAnalyzer.analyze(module, directCallSites);
+            taskConcurrencyAnalyzer.analyze(module, directCallSites, crossTU);
 
         TUFacts facts;
         facts.spawns = std::move(spawnFacts.spawns);
@@ -473,6 +477,24 @@ namespace ctrace::concurrency::internal::analysis
                 !taskConcurrency.overlappingSpawnEntries.contains(entryId))
             {
                 concurrency.staticSpawnCount = 1;
+            }
+        }
+
+        // A worker defined here may be spawned only from another unit: this module sees its body
+        // and never its creation. The program index supplies the missing half, already corrected
+        // by the unit that owns those spawn sites, so the local rule above must not run on it.
+        if (crossTU)
+        {
+            for (const llvm::Function& function : module)
+            {
+                if (function.isDeclaration() || !program->isThreadEntry(function))
+                    continue;
+
+                EntryConcurrencyInfo& concurrency = facts.entryConcurrency[functionId(function)];
+                concurrency.staticSpawnCount =
+                    std::max(concurrency.staticSpawnCount, program->spawnCount(function));
+                concurrency.hasSpawnInLoop =
+                    concurrency.hasSpawnInLoop || program->spawnedInLoop(function);
             }
         }
 
