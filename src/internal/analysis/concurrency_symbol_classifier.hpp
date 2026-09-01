@@ -48,6 +48,13 @@ namespace ctrace::concurrency::internal::analysis
         CondWaitWithoutPredicate,
         /// The predicate overload, which rechecks the condition itself and cannot wake early.
         CondWaitWithPredicate,
+        /// Duplicates the calling process. The copy inherits the address space but only the
+        /// calling thread, which is what makes it delicate in a threaded program.
+        ProcessFork,
+        /// Replaces the process image, which discards everything the fork inherited.
+        ProcessExec,
+        /// Collects a terminated child, releasing its entry in the process table.
+        ProcessWait,
     };
 
     class ConcurrencySymbolClassifier

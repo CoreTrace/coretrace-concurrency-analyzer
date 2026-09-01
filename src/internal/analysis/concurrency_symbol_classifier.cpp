@@ -257,6 +257,22 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::PThreadJoin;
         if (matchesPlainSymbol(name, "pthread_detach"))
             return CallKind::PThreadDetach;
+        if (matchesPlainSymbol(name, "fork") || matchesPlainSymbol(name, "vfork"))
+            return CallKind::ProcessFork;
+        if (matchesPlainSymbol(name, "execl") || matchesPlainSymbol(name, "execlp") ||
+            matchesPlainSymbol(name, "execle") || matchesPlainSymbol(name, "execv") ||
+            matchesPlainSymbol(name, "execvp") || matchesPlainSymbol(name, "execvpe") ||
+            matchesPlainSymbol(name, "execve") || matchesPlainSymbol(name, "posix_spawn") ||
+            matchesPlainSymbol(name, "posix_spawnp"))
+        {
+            return CallKind::ProcessExec;
+        }
+        if (matchesPlainSymbol(name, "wait") || matchesPlainSymbol(name, "waitpid") ||
+            matchesPlainSymbol(name, "waitid") || matchesPlainSymbol(name, "wait3") ||
+            matchesPlainSymbol(name, "wait4"))
+        {
+            return CallKind::ProcessWait;
+        }
         if (matchesPlainSymbol(name, "pthread_cond_wait") ||
             matchesPlainSymbol(name, "pthread_cond_timedwait"))
         {
@@ -372,6 +388,12 @@ namespace ctrace::concurrency::internal::analysis
             return "cond_wait_without_predicate";
         case CallKind::CondWaitWithPredicate:
             return "cond_wait_with_predicate";
+        case CallKind::ProcessFork:
+            return "fork";
+        case CallKind::ProcessExec:
+            return "exec";
+        case CallKind::ProcessWait:
+            return "wait";
         case CallKind::StdThreadCtor:
             return "std_thread_ctor";
         case CallKind::StdThreadMove:
