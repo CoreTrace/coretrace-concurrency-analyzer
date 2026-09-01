@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "internal/analysis/ir_utils.hpp"
+
 #include <string>
 #include <unordered_map>
-#include <unordered_set>
 
 namespace llvm
 {
@@ -53,6 +54,11 @@ namespace ctrace::concurrency::internal::analysis
         /// describe real shared state rather than an unresolved symbol.
         [[nodiscard]] bool isDefinedSomewhere(const llvm::GlobalVariable& global) const;
 
+        [[nodiscard]] const ProgramDefinedGlobals& definedGlobals() const noexcept
+        {
+            return definedGlobals_;
+        }
+
         [[nodiscard]] bool empty() const noexcept
         {
             return spawnSitesByEntry_.empty() && definedGlobals_.empty();
@@ -66,6 +72,6 @@ namespace ctrace::concurrency::internal::analysis
         };
 
         std::unordered_map<std::string, EntrySpawns> spawnSitesByEntry_;
-        std::unordered_set<std::string> definedGlobals_;
+        ProgramDefinedGlobals definedGlobals_;
     };
 } // namespace ctrace::concurrency::internal::analysis

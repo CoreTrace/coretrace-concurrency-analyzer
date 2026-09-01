@@ -376,7 +376,8 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
-            const TaskConcurrencyResult& taskConcurrency)
+            const TaskConcurrencyResult& taskConcurrency,
+            const ProgramDefinedGlobals* programDefined)
         {
             std::vector<DirectCallBinding> bindings;
 
@@ -406,8 +407,8 @@ namespace ctrace::concurrency::internal::analysis
                 for (unsigned argumentIndex = 0; argumentIndex < site.call->arg_size();
                      ++argumentIndex)
                 {
-                    const std::optional<RootBinding> root =
-                        resolveTrackedRoot(*site.call->getArgOperand(argumentIndex));
+                    const std::optional<RootBinding> root = resolveTrackedRoot(
+                        *site.call->getArgOperand(argumentIndex), programDefined);
                     if (root.has_value())
                         binding.argumentBindings.emplace(argumentIndex, *root);
                 }
@@ -432,8 +433,14 @@ namespace ctrace::concurrency::internal::analysis
         const std::vector<DirectCallSite> directCallSites =
             collectDirectCallSites(module, classifier);
 
+        // An `extern` declared here is real shared state only if the program defines it; a unit
+        // on its own cannot tell that from an unresolved symbol.
+        const ProgramDefinedGlobals* programDefined =
+            crossTU ? &program->definedGlobals() : nullptr;
+
         SharedAccessCollector accessCollector;
-        std::vector<PendingAccess> pendingAccesses = accessCollector.collect(module);
+        std::vector<PendingAccess> pendingAccesses =
+            accessCollector.collect(module, programDefined);
 
         std::unordered_map<std::string, std::unordered_set<const llvm::Instruction*>>
             trackedAccessesByFunction;
@@ -644,8 +651,9 @@ namespace ctrace::concurrency::internal::analysis
                                    });
         }
 
-        const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
-            directCallSites, lockPropagation.effectiveHeldLocksByCall, taskConcurrency);
+        const std::vector<DirectCallBinding> directCallBindings =
+            buildDirectCallBindings(directCallSites, lockPropagation.effectiveHeldLocksByCall,
+                                    taskConcurrency, programDefined);
 
         bool changed = true;
         while (changed)

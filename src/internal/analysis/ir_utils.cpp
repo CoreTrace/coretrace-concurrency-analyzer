@@ -455,10 +455,19 @@ namespace ctrace::concurrency::internal::analysis
         return !relativePath.empty() && *relativePath.begin() != "..";
     }
 
-    bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global)
+    bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global,
+                                 const ProgramDefinedGlobals* programDefined)
     {
-        if (global.isDeclaration() || global.isConstant() || global.isThreadLocal())
+        if (global.isConstant() || global.isThreadLocal())
             return false;
+
+        // An `extern` with no definition in sight designates nothing this analysis can reason
+        // about. Once the whole program is known, the same declaration may name real storage.
+        if (global.isDeclaration() &&
+            (programDefined == nullptr || !programDefined->contains(global.getGlobalIdentifier())))
+        {
+            return false;
+        }
 
         return !isSynchronizationPrimitiveType(global.getValueType());
     }
@@ -587,7 +596,8 @@ namespace ctrace::concurrency::internal::analysis
 
     std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
                                                   const llvm::DataLayout* layout,
-                                                  std::uint64_t byteSize)
+                                                  std::uint64_t byteSize,
+                                                  const ProgramDefinedGlobals* programDefined)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;
         AccessPathWalk walk;
@@ -604,7 +614,7 @@ namespace ctrace::concurrency::internal::analysis
         const MemoryRegion region = walk.region(byteSize != 0 ? byteSize : walk.designatedSize);
         if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(root))
         {
-            if (!shouldTrackSharedGlobal(*global))
+            if (!shouldTrackSharedGlobal(*global, programDefined))
                 return std::nullopt;
 
             return RootBinding::global(normalizeValueName(global->getName()), region);
@@ -616,14 +626,16 @@ namespace ctrace::concurrency::internal::analysis
         return std::nullopt;
     }
 
-    std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value)
+    std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
+                                                  const ProgramDefinedGlobals* programDefined)
     {
-        return resolveTrackedRoot(value, nullptr, 0);
+        return resolveTrackedRoot(value, nullptr, 0, programDefined);
     }
 
     std::optional<AliasResolvedGlobal>
     resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
-                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals)
+                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals,
+                       const ProgramDefinedGlobals* programDefined)
     {
         const std::optional<llvm::MemoryLocation> accessLocation =
             llvm::MemoryLocation::getOrNone(&accessInstruction);
@@ -639,7 +651,7 @@ namespace ctrace::concurrency::internal::analysis
 
         for (const llvm::GlobalVariable* global : candidateGlobals)
         {
-            if (global == nullptr || !shouldTrackSharedGlobal(*global))
+            if (global == nullptr || !shouldTrackSharedGlobal(*global, programDefined))
                 continue;
 
             const llvm::AliasResult aliasResult =

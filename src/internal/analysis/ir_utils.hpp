@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm
@@ -30,7 +31,13 @@ namespace ctrace::concurrency::internal::analysis
         SourceLocation userLocation;
     };
 
-    [[nodiscard]] bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global);
+    /// Global identifiers the program defines somewhere, or null when the analysis sees a
+    /// single unit. A unit alone cannot tell an `extern` backed by real storage from an
+    /// unresolved symbol, so it drops both; a whole-project run knows the difference.
+    using ProgramDefinedGlobals = std::unordered_set<std::string>;
+
+    [[nodiscard]] bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global,
+                                               const ProgramDefinedGlobals* programDefined);
 
     struct FunctionBinding
     {
@@ -75,13 +82,17 @@ namespace ctrace::concurrency::internal::analysis
     /// Resolves the tracked root of a pointer, together with the byte range it designates.
     /// `byteSize` is the extent of the access; zero means unknown and conservatively covers the
     /// whole object.
-    [[nodiscard]] std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
-                                                                const llvm::DataLayout* layout,
-                                                                std::uint64_t byteSize);
-    [[nodiscard]] std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value);
+    [[nodiscard]] std::optional<RootBinding>
+    resolveTrackedRoot(const llvm::Value& value, const llvm::DataLayout* layout,
+                       std::uint64_t byteSize,
+                       const ProgramDefinedGlobals* programDefined = nullptr);
+    [[nodiscard]] std::optional<RootBinding>
+    resolveTrackedRoot(const llvm::Value& value,
+                       const ProgramDefinedGlobals* programDefined = nullptr);
     [[nodiscard]] std::optional<AliasResolvedGlobal>
     resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
-                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals);
+                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals,
+                       const ProgramDefinedGlobals* programDefined = nullptr);
     [[nodiscard]] std::optional<FunctionBinding> resolveFunctionBinding(const llvm::Value& value);
     [[nodiscard]] const llvm::Function* resolveFunctionValue(const llvm::Value& value);
     [[nodiscard]] std::string functionId(const llvm::Function& function);

@@ -11,6 +11,7 @@
 #include "program_symbol_index.hpp"
 
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ThreadPool.h>
 
@@ -45,6 +46,13 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
         bool crossTUChangesFacts(const llvm::Module& module, const TUFacts& facts,
                                  const ProgramSymbolIndex& index)
         {
+            // An `extern` this unit dropped as unresolved turns out to name real storage.
+            for (const llvm::GlobalVariable& global : module.globals())
+            {
+                if (global.isDeclaration() && index.isDefinedSomewhere(global))
+                    return true;
+            }
+
             for (const llvm::Function& function : module)
             {
                 if (function.isDeclaration() || !index.isThreadEntry(function))
