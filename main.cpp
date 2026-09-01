@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analyzer.hpp"
 #include "coretrace_concurrency_analysis.hpp"
+#include "internal/compilation_database.hpp"
 #include "internal/diagnostics/compiler_diagnostic_parser.hpp"
 #include "internal/reporting/report_renderer.hpp"
 
@@ -9,6 +10,8 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <chrono>
+#include <optional>
+#include <memory>
 #include <cstddef>
 #include <filesystem>
 #include <algorithm>
@@ -29,6 +32,8 @@ namespace
             << "  --ir-format=ll|bc        Compilation output mode (default: bc)\n"
             << "  --compile-arg=<arg>      Forward a compile argument (repeatable)\n"
             << "  --instrument             Enable compilerlib instrumentation mode\n"
+            << "  --compile-commands=PATH  Analyse a whole project from a compile_commands.json\n"
+            << "                           instead of a single file (implies --analyze)\n"
             << "  --analyze                Run selected single-TU concurrency checks on the IR "
                "module\n"
             << "  --rules=data-race|missing-join|deadlock-lock-order|all\n"
@@ -46,7 +51,8 @@ namespace
             << "  coretrace_concurrency_analyzer test.c --analyze --format=human\n"
             << "  coretrace_concurrency_analyzer test.c --analyze --rules=all --format=human\n"
             << "  coretrace_concurrency_analyzer test.c --analyze --format=sarif\n"
-            << "  coretrace_concurrency_analyzer test.c -- --std=gnu11 -Wall\n";
+            << "  coretrace_concurrency_analyzer test.c -- --std=gnu11 -Wall\n"
+            << "  coretrace_concurrency_analyzer --compile-commands=build/compile_commands.json\n";
     }
 
     void printRequestSummary(const ctrace::concurrency::CompileRequest& request, bool analyze,
@@ -294,6 +300,103 @@ namespace
 
         return report;
     }
+
+    /// One compiled unit, kept alive for the whole project analysis. Each unit gets its own
+    /// context: contexts are not thread-safe, and nothing in the analysis compares type pointers
+    /// across modules.
+    struct CompiledUnit
+    {
+        std::unique_ptr<llvm::LLVMContext> context;
+        std::string bitcode;
+        std::unique_ptr<llvm::Module> module;
+    };
+
+    int analyzeProject(const std::string& databasePath,
+                       const ctrace::concurrency::AnalysisOptions& analysisOptions,
+                       ctrace::concurrency::OutputFormat outputFormat, bool verbose)
+    {
+        namespace internal = ctrace::concurrency::internal;
+
+        std::string loadError;
+        const std::optional<internal::CompilationDatabase> database =
+            internal::CompilationDatabase::loadFromFile(databasePath, loadError);
+        if (!database.has_value())
+        {
+            llvm::errs() << "failed to read compilation database '" << databasePath
+                         << "': " << loadError << "\n";
+            return 1;
+        }
+
+        const std::vector<internal::CompileCommand> commands =
+            database->analyzableSources(/*includeDependencies=*/false);
+        if (commands.empty())
+        {
+            llvm::errs() << "compilation database '" << databasePath
+                         << "' contains no analyzable source\n";
+            return 1;
+        }
+
+        // Compiled one at a time on purpose: the clang backend relies on process-wide state, and
+        // a race inside a race detector would be a poor trade for the wall-clock it would save.
+        // The analysis itself, which dominates once the IR exists, runs in parallel.
+        const auto startedAt = std::chrono::steady_clock::now();
+        ctrace::concurrency::InMemoryIRCompiler compiler;
+        std::vector<CompiledUnit> units;
+        std::vector<std::string> failedSources;
+
+        for (const internal::CompileCommand& command : commands)
+        {
+            ctrace::concurrency::CompileRequest request;
+            request.inputFile = command.file;
+            request.extraCompileArgs = command.arguments;
+            request.format = ctrace::concurrency::IRFormat::BC;
+
+            CompiledUnit unit;
+            unit.context = std::make_unique<llvm::LLVMContext>();
+            ctrace::concurrency::CompileResult result = compiler.compile(request, *unit.context);
+            if (!result.success || result.module == nullptr)
+            {
+                failedSources.push_back(command.file);
+                if (verbose && !result.diagnostics.empty())
+                    llvm::errs() << result.diagnostics;
+                continue;
+            }
+
+            // parseBC keeps a non-owning view over the bitcode buffer.
+            unit.bitcode = std::move(result.llvmBitcode);
+            unit.module = std::move(result.module);
+            units.push_back(std::move(unit));
+        }
+
+        if (units.empty())
+        {
+            llvm::errs() << "no unit of '" << databasePath << "' could be compiled\n";
+            return 1;
+        }
+
+        std::vector<const llvm::Module*> modules;
+        modules.reserve(units.size());
+        for (const CompiledUnit& unit : units)
+            modules.push_back(unit.module.get());
+
+        const ctrace::concurrency::ProjectAnalysisReport analysis =
+            ctrace::concurrency::ProjectConcurrencyAnalyzer(analysisOptions).analyze(modules);
+        const auto finishedAt = std::chrono::steady_clock::now();
+
+        // A partial project yields partial conclusions; saying so is part of the result.
+        for (const std::string& source : failedSources)
+            llvm::errs() << "skipped (compilation failed): " << source << "\n";
+
+        for (const std::string& module : analysis.skippedIncompatibleModules)
+            llvm::errs() << "skipped (target ABI differs from the project): " << module << "\n";
+
+        const auto duration =
+            std::chrono::duration_cast<std::chrono::milliseconds>(finishedAt - startedAt).count();
+        emitStructuredReport(analysis.report, makeRenderContext(databasePath, duration),
+                             outputFormat);
+
+        return failedSources.empty() ? 0 : 1;
+    }
 } // namespace
 
 int main(int argc, char** argv)
@@ -304,6 +407,7 @@ int main(int argc, char** argv)
     bool verbose = false;
     bool outputFormatExplicit = false;
     bool rulesExplicit = false;
+    std::string compileCommandsPath;
     ctrace::concurrency::OutputFormat outputFormat = ctrace::concurrency::OutputFormat::Human;
     ctrace::concurrency::AnalysisOptions analysisOptions;
 
@@ -376,6 +480,19 @@ int main(int argc, char** argv)
             continue;
         }
 
+        constexpr std::string_view compileCommandsPrefix = "--compile-commands=";
+        if (arg.starts_with(compileCommandsPrefix))
+        {
+            compileCommandsPath = std::string(arg.substr(compileCommandsPrefix.size()));
+            if (compileCommandsPath.empty())
+            {
+                llvm::errs() << "--compile-commands requires a path\n";
+                return 1;
+            }
+            analyze = true;
+            continue;
+        }
+
         constexpr std::string_view compileArgPrefix = "--compile-arg=";
         if (arg.rfind(compileArgPrefix, 0) == 0)
         {
@@ -403,6 +520,26 @@ int main(int argc, char** argv)
 
         llvm::errs() << "Unexpected positional argument: " << std::string(arg) << "\n";
         return 1;
+    }
+
+    if (!compileCommandsPath.empty())
+    {
+        // The database names the sources and how to build them; a positional file would describe
+        // a different, contradictory input.
+        if (!request.inputFile.empty())
+        {
+            llvm::errs() << "--compile-commands and a positional input file are exclusive\n";
+            return 1;
+        }
+
+        if (!request.extraCompileArgs.empty())
+        {
+            llvm::errs() << "--compile-arg does not apply to --compile-commands: each unit uses "
+                            "the flags recorded in the database\n";
+            return 1;
+        }
+
+        return analyzeProject(compileCommandsPath, analysisOptions, outputFormat, verbose);
     }
 
     if (request.inputFile.empty())
