@@ -114,6 +114,21 @@ namespace ctrace::concurrency::internal::diagnostics
                 },
         };
 
+        static const RuleMetadata kUnsafeSignalHandler{
+            .ruleId = RuleId::UnsafeSignalHandler,
+            .title = "Signal handler calls a function it may not call",
+            .shortDescription =
+                "Detects a signal handler that reaches an allocation, a stream or a lock, none "
+                "of which is async-signal-safe.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "479",
+                    .title = "Signal Handler Use of a Non-reentrant Function",
+                },
+        };
+
         switch (ruleId)
         {
         case RuleId::CompilerDiagnostic:
@@ -132,6 +147,8 @@ namespace ctrace::concurrency::internal::diagnostics
             return kUnreapedChildProcess;
         case RuleId::ThreadArgumentEscapesFrame:
             return kThreadArgumentEscapesFrame;
+        case RuleId::UnsafeSignalHandler:
+            return kUnsafeSignalHandler;
         }
 
         return kCompilerDiagnostic;

@@ -205,7 +205,8 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
 
             if (options_.isEnabled(RuleId::ForkAfterThreadCreation) ||
                 options_.isEnabled(RuleId::UnreapedChildProcess) ||
-                options_.isEnabled(RuleId::ThreadArgumentEscapesFrame))
+                options_.isEnabled(RuleId::ThreadArgumentEscapesFrame) ||
+                options_.isEnabled(RuleId::UnsafeSignalHandler))
             {
                 DiagnosticReport processReport = ProcessLifecycleChecker().run(facts);
                 std::erase_if(processReport.diagnostics, [this](const Diagnostic& diagnostic)

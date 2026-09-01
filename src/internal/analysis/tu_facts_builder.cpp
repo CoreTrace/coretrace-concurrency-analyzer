@@ -11,6 +11,7 @@
 #include "lock_wrapper_summaries.hpp"
 #include "process_lifecycle_collector.hpp"
 #include "shared_access_collector.hpp"
+#include "signal_handler_collector.hpp"
 #include "cross_tu/program_symbol_index.hpp"
 #include "task_concurrency_analyzer.hpp"
 #include "thread_lifecycle_collector.hpp"
@@ -604,6 +605,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         facts.threadArgumentEscapes = ThreadArgumentEscapeCollector(classifier).collect(module);
+        facts.signalHandlers = SignalHandlerCollector(classifier).collect(module, directCallSites);
 
         // A fork whose child goes on to replace its process image inherits nothing that
         // outlives the exec, so neither question this analysis asks about a fork applies to it.

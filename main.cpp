@@ -88,6 +88,8 @@ namespace
                     return "unreaped-child";
                 case ctrace::concurrency::RuleId::ThreadArgumentEscapesFrame:
                     return "thread-arg-escape";
+                case ctrace::concurrency::RuleId::UnsafeSignalHandler:
+                    return "unsafe-signal-handler";
                 case ctrace::concurrency::RuleId::DeadlockLockOrder:
                     return "deadlock-lock-order";
                 case ctrace::concurrency::RuleId::CompilerDiagnostic:
@@ -177,6 +179,8 @@ namespace
             return "unreaped-child";
         case RuleId::ThreadArgumentEscapesFrame:
             return "thread-arg-escape";
+        case RuleId::UnsafeSignalHandler:
+            return "unsafe-signal-handler";
         case RuleId::CompilerDiagnostic:
             return "compiler-diagnostic";
         }
@@ -226,6 +230,12 @@ namespace
         if (value == "thread-arg-escape")
         {
             out = RuleId::ThreadArgumentEscapesFrame;
+            return true;
+        }
+
+        if (value == "unsafe-signal-handler")
+        {
+            out = RuleId::UnsafeSignalHandler;
             return true;
         }
 

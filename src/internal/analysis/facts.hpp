@@ -263,6 +263,17 @@ namespace ctrace::concurrency::internal::analysis
         SourceLocation location;
     };
 
+    /// A signal handler that calls something a handler may not call.
+    struct SignalHandlerFact
+    {
+        /// Where the handler is installed, which is where the choice was made.
+        SourceLocation location;
+        std::string handlerFunctionId;
+        /// Where the offending call sits, which may be several calls deep inside the handler.
+        SourceLocation unsafeCallLocation;
+        std::string unsafeCallFunctionId;
+    };
+
     /// A place where the program duplicates itself.
     struct ProcessForkFact
     {
@@ -283,6 +294,7 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<ConditionWaitFact> conditionWaits;
         std::vector<ProcessForkFact> processForks;
         std::vector<ThreadArgumentEscapeFact> threadArgumentEscapes;
+        std::vector<SignalHandlerFact> signalHandlers;
         /// Some part of the program collects its terminated children.
         bool reapsChildProcesses = false;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;

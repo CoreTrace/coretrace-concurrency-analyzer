@@ -69,6 +69,23 @@ namespace ctrace::concurrency::internal::analysis
             builder.emit();
         }
 
+        for (const SignalHandlerFact& handler : facts.signalHandlers)
+        {
+            DiagnosticBuilder(report, RuleId::UnsafeSignalHandler)
+                .primaryLocation(handler.location)
+                .message("signal handler reaches a call it may not make")
+                .note("a handler interrupts its own thread at an arbitrary instruction, so it "
+                      "may run while the interrupted code is halfway through a structure: "
+                      "allocating, printing or locking there re-enters it")
+                .note("set a flag of type volatile sig_atomic_t and act on it outside the "
+                      "handler")
+                .relatedLocation("Unsafe call reached from the handler", handler.unsafeCallLocation)
+                .taxonomy("CERT", "SIG30-C",
+                          "Call only asynchronous-safe functions within signal handlers")
+                .property("handler", handler.handlerFunctionId)
+                .emit();
+        }
+
         finalizeReport(report, facts);
         return report;
     }
