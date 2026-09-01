@@ -185,6 +185,27 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     add_test(NAME coretrace_concurrency_compdb_tests COMMAND coretrace_concurrency_compdb_tests)
 
+    add_executable(coretrace_concurrency_ir_cache_tests
+      tests/unit/test_ir_cache.cpp
+    )
+
+    target_include_directories(coretrace_concurrency_ir_cache_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_compile_definitions(coretrace_concurrency_ir_cache_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    target_link_libraries(coretrace_concurrency_ir_cache_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_ir_cache_tests COMMAND coretrace_concurrency_ir_cache_tests)
+
     add_executable(coretrace_concurrency_error_tests
       tests/unit/test_error_model.cpp
     )
