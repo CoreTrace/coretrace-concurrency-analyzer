@@ -11,6 +11,7 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/Value.h>
 #include <llvm/ADT/SmallPtrSet.h>
@@ -188,15 +189,51 @@ namespace ctrace::concurrency::internal::analysis
             return structType->getName();
         }
 
+        /// Depth bound for looking through transparent wrappers. libstdc++ lowers its lock types
+        /// to an unnamed struct holding nothing but the POSIX primitive, so the recognizable name
+        /// sits below the type the pointer designates; libc++ names the outer type directly.
+        constexpr unsigned kMaxTypeNestingDepth = 4;
+
+        template <typename Predicate>
+        bool matchesNestedTypeName(const llvm::Type* type, Predicate&& matches, unsigned depth = 0)
+        {
+            if (type == nullptr || depth > kMaxTypeNestingDepth)
+                return false;
+
+            if (const llvm::StringRef name = structuralTypeName(type);
+                !name.empty() && matches(name))
+            {
+                return true;
+            }
+
+            if (const auto* arrayType = llvm::dyn_cast<llvm::ArrayType>(type))
+                return matchesNestedTypeName(arrayType->getElementType(), matches, depth + 1);
+
+            // Only a single-member struct is a wrapper. A user aggregate that merely *contains*
+            // a mutex next to its data is not a lock: treating it as one would stop tracking the
+            // data it guards.
+            const auto* structType = llvm::dyn_cast<llvm::StructType>(type);
+            if (structType == nullptr || structType->getNumElements() != 1)
+                return false;
+
+            return matchesNestedTypeName(structType->getElementType(0), matches, depth + 1);
+        }
+
+        bool isSynchronizationPrimitiveType(const llvm::Type* type)
+        {
+            return matchesNestedTypeName(type, isSyncPrimitiveTypeName);
+        }
+
+        bool isRecursiveLockType(const llvm::Type* type)
+        {
+            return matchesNestedTypeName(type, isRecursiveLockTypeName);
+        }
+
         void noteTraversedType(AccessPathWalk& walk, const llvm::Type* type)
         {
-            const llvm::StringRef name = structuralTypeName(type);
-            if (name.empty())
-                return;
-
-            if (isSyncPrimitiveTypeName(name))
+            if (isSynchronizationPrimitiveType(type))
                 walk.touchesSyncPrimitive = true;
-            if (isRecursiveLockTypeName(name))
+            if (isRecursiveLockType(type))
                 walk.touchesRecursiveLock = true;
         }
 
@@ -387,16 +424,43 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
+    std::optional<std::filesystem::path> primarySourceRoot(const llvm::Module& module)
+    {
+        for (const llvm::DICompileUnit* compileUnit : module.debug_compile_units())
+        {
+            if (compileUnit == nullptr || compileUnit->getFile() == nullptr)
+                continue;
+
+            std::filesystem::path filePath(compileUnit->getFile()->getFilename().str());
+            const std::string directory = compileUnit->getFile()->getDirectory().str();
+            if (!directory.empty() && filePath.is_relative())
+                filePath = std::filesystem::path(directory) / filePath;
+            filePath = filePath.lexically_normal();
+            if (!filePath.empty())
+                return filePath.parent_path();
+        }
+
+        return std::nullopt;
+    }
+
+    bool isLikelyUserLocation(const SourceLocation& location,
+                              const std::optional<std::filesystem::path>& sourceRoot)
+    {
+        if (location.file.empty() || !sourceRoot.has_value())
+            return false;
+
+        const std::filesystem::path filePath =
+            std::filesystem::path(location.file).lexically_normal();
+        const std::filesystem::path relativePath = filePath.lexically_relative(*sourceRoot);
+        return !relativePath.empty() && *relativePath.begin() != "..";
+    }
+
     bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global)
     {
         if (global.isDeclaration() || global.isConstant() || global.isThreadLocal())
             return false;
 
-        const llvm::Type* valueType = global.getValueType();
-        while (const auto* arrayType = llvm::dyn_cast_or_null<llvm::ArrayType>(valueType))
-            valueType = arrayType->getElementType();
-
-        return !isSyncPrimitiveTypeName(structuralTypeName(valueType));
+        return !isSynchronizationPrimitiveType(global.getValueType());
     }
 
     bool designatesSynchronizationPrimitive(const llvm::Value& pointerOperand)

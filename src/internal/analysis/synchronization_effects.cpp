@@ -68,7 +68,8 @@ namespace ctrace::concurrency::internal::analysis
             return {LockEffect{
                 .kind = *plainEffect,
                 .lockIds = {*lockId},
-                .recursiveLock = designatesRecursiveLockType(lockOperand),
+                .recursiveLock = designatesRecursiveLockType(lockOperand) ||
+                                 classifier_.targetsRecursiveLock(call),
             }};
         }
 
@@ -111,7 +112,9 @@ namespace ctrace::concurrency::internal::analysis
                 lockId.has_value())
             {
                 effect.lockIds.push_back(*lockId);
-                effect.recursiveLock = effect.recursiveLock || designatesRecursiveLockType(operand);
+                effect.recursiveLock = effect.recursiveLock ||
+                                       designatesRecursiveLockType(operand) ||
+                                       classifier_.targetsRecursiveLock(call);
             }
         }
 

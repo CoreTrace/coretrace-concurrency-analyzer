@@ -95,37 +95,6 @@ namespace ctrace::concurrency::internal::analysis
                    std::to_string(fact.location.column);
         }
 
-        std::optional<std::filesystem::path> primarySourceRoot(const llvm::Module& module)
-        {
-            for (llvm::DICompileUnit* compileUnit : module.debug_compile_units())
-            {
-                if (compileUnit == nullptr || compileUnit->getFile() == nullptr)
-                    continue;
-
-                std::filesystem::path filePath(compileUnit->getFile()->getFilename().str());
-                const std::string directory = compileUnit->getFile()->getDirectory().str();
-                if (!directory.empty() && filePath.is_relative())
-                    filePath = std::filesystem::path(directory) / filePath;
-                filePath = filePath.lexically_normal();
-                if (!filePath.empty())
-                    return filePath.parent_path();
-            }
-
-            return std::nullopt;
-        }
-
-        bool isLikelyUserLocation(const SourceLocation& location,
-                                  const std::optional<std::filesystem::path>& sourceRoot)
-        {
-            if (location.file.empty() || !sourceRoot.has_value())
-                return false;
-
-            const std::filesystem::path filePath =
-                std::filesystem::path(location.file).lexically_normal();
-            const std::filesystem::path relativePath = filePath.lexically_relative(*sourceRoot);
-            return !relativePath.empty() && *relativePath.begin() != "..";
-        }
-
         bool isRuntimeOwnedLifecycle(const ThreadLifecycleFact& fact,
                                      const SourceLocation& userLocation,
                                      const std::optional<std::filesystem::path>& sourceRoot)

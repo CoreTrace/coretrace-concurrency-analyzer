@@ -405,6 +405,7 @@ namespace ctrace::concurrency::internal::analysis
             ConfidenceLevel confidence = ConfidenceLevel::Low;
             bool isWriteWrite = false;
             bool isPrecise = false;
+            bool showsLoweredOrigin = false;
             std::size_t additionalPairs = 0;
             std::vector<std::pair<std::string, SourceLocation>> relatedSites;
             std::set<std::string> seenSiteKeys;
@@ -460,11 +461,15 @@ namespace ctrace::concurrency::internal::analysis
                     const ConfidenceLevel confidence = inferConfidence(lhs, rhs);
                     const bool isWriteWrite =
                         lhs.kind == AccessKind::Write && rhs.kind == AccessKind::Write;
+                    // Among equally precise candidates, the one whose primary access also shows
+                    // where it lowered tells the reader more: the line they wrote and the header
+                    // it expanded into.
+                    const bool showsLoweredOrigin = hasDistinctLoweredLocation(lhs);
 
                     if (conflict.lhs == nullptr ||
-                        std::make_tuple(isPrecise, confidence, isWriteWrite) >
-                            std::make_tuple(conflict.isPrecise, conflict.confidence,
-                                            conflict.isWriteWrite))
+                        std::make_tuple(isPrecise, showsLoweredOrigin, confidence, isWriteWrite) >
+                            std::make_tuple(conflict.isPrecise, conflict.showsLoweredOrigin,
+                                            conflict.confidence, conflict.isWriteWrite))
                     {
                         if (conflict.lhs != nullptr)
                             ++conflict.additionalPairs;
@@ -474,6 +479,7 @@ namespace ctrace::concurrency::internal::analysis
                         conflict.confidence = confidence;
                         conflict.isWriteWrite = isWriteWrite;
                         conflict.isPrecise = isPrecise;
+                        conflict.showsLoweredOrigin = showsLoweredOrigin;
                     }
                     else
                     {

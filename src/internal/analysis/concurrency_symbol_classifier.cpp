@@ -204,6 +204,17 @@ namespace ctrace::concurrency::internal::analysis
         return llvm::dyn_cast<llvm::Function>(calledOperand);
     }
 
+    bool ConcurrencySymbolClassifier::targetsRecursiveLock(const llvm::CallBase& call) const
+    {
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr)
+            return false;
+
+        const std::string canonical = canonicalName(*callee);
+        return llvm::StringRef(canonical).contains("recursive_mutex") ||
+               llvm::StringRef(canonical).contains("recursive_timed_mutex");
+    }
+
     CallKind ConcurrencySymbolClassifier::classify(const llvm::CallBase& call) const
     {
         const llvm::Function* callee = directCallee(call);

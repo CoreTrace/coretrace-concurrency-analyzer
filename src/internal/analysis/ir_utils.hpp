@@ -4,6 +4,7 @@
 #include "facts.hpp"
 
 #include <cstdint>
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -17,6 +18,7 @@ namespace llvm
     class DataLayout;
     class Instruction;
     class Value;
+    class Module;
     class AAResults;
 } // namespace llvm
 
@@ -51,6 +53,13 @@ namespace ctrace::concurrency::internal::analysis
     /// True when `pointerOperand` designates a lock type that may legally be reacquired by the
     /// thread already holding it (`std::recursive_mutex`, `std::recursive_timed_mutex`).
     [[nodiscard]] bool designatesRecursiveLockType(const llvm::Value& pointerOperand);
+
+    /// Directory of the translation unit's own source, from its first compile unit. Used to tell
+    /// code the user wrote from code a standard library header brought in.
+    [[nodiscard]] std::optional<std::filesystem::path>
+    primarySourceRoot(const llvm::Module& module);
+    [[nodiscard]] bool isLikelyUserLocation(const SourceLocation& location,
+                                            const std::optional<std::filesystem::path>& sourceRoot);
 
     [[nodiscard]] const llvm::GlobalVariable* resolveBaseGlobal(const llvm::Value& value);
     [[nodiscard]] std::optional<std::string> canonicalGlobalId(const llvm::Value& value);

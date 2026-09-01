@@ -50,6 +50,10 @@ namespace ctrace::concurrency::internal::analysis
       public:
         [[nodiscard]] const llvm::Function* directCallee(const llvm::CallBase& call) const;
         [[nodiscard]] CallKind classify(const llvm::CallBase& call) const;
+        /// True when the call targets a lock type that its owner may reacquire. Read from the
+        /// callee symbol because a standard library may lower the lock to an unnamed struct,
+        /// leaving the type name visible only in the mangled member function.
+        [[nodiscard]] bool targetsRecursiveLock(const llvm::CallBase& call) const;
         [[nodiscard]] static std::string_view toString(CallKind kind);
     };
 } // namespace ctrace::concurrency::internal::analysis
