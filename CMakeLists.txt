@@ -54,6 +54,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/thread_lifecycle_collector.cpp
     src/internal/analysis/thread_spawn_detector.cpp
     src/internal/analysis/tu_facts_builder.cpp
+    src/internal/compilation_database.cpp
     src/internal/compile_command_builder.cpp
     src/internal/compilation_backend.cpp
     src/internal/ir_loader.cpp
@@ -159,6 +160,27 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     )
 
     add_test(NAME coretrace_concurrency_arch_tests COMMAND coretrace_concurrency_arch_tests)
+
+    add_executable(coretrace_concurrency_compdb_tests
+      tests/unit/test_compilation_database.cpp
+    )
+
+    target_include_directories(coretrace_concurrency_compdb_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_compile_definitions(coretrace_concurrency_compdb_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    target_link_libraries(coretrace_concurrency_compdb_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_compdb_tests COMMAND coretrace_concurrency_compdb_tests)
 
     add_executable(coretrace_concurrency_error_tests
       tests/unit/test_error_model.cpp
