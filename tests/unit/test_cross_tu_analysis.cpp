@@ -194,6 +194,38 @@ namespace
                           "a unit listed twice must not duplicate its diagnostics");
     }
 
+    /// The second half of the boundary: the conflict is entirely inside one unit, but the object
+    /// it is about is defined in another. Without the whole-program view, `extern int` and an
+    /// unresolved symbol are indistinguishable.
+    bool testExternGlobalDefinedInAnotherUnitIsTracked()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-extern-global/app.c") ||
+            !project.add("cross-tu-extern-global/state.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(project.modules());
+
+        return assertTrue(countRacesOn(analysis.report, "g_shared_state") > 0,
+                          "a global defined in another unit must still be tracked");
+    }
+
+    /// The same application unit alone must stay silent, or the test above would prove nothing.
+    bool testUnresolvedExternIsNotTracked()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-extern-global/app.c"))
+            return false;
+
+        const DiagnosticReport report = SingleTUConcurrencyAnalyzer().analyze(project.moduleAt(0));
+
+        return assertTrue(countRacesOn(report, "g_shared_state") == 0,
+                          "an extern with no visible definition must not be reported");
+    }
+
     /// An empty project is a valid input, not a crash.
     bool testEmptyProjectIsAnEmptyReport()
     {
@@ -212,6 +244,8 @@ int main()
     ok = testWorkerUnitAloneReportsNothing() && ok;
     ok = testUnitOrderDoesNotChangeTheReport() && ok;
     ok = testRepeatedUnitIsNotReportedTwice() && ok;
+    ok = testExternGlobalDefinedInAnotherUnitIsTracked() && ok;
+    ok = testUnresolvedExternIsNotTracked() && ok;
     ok = testEmptyProjectIsAnEmptyReport() && ok;
 
     if (!ok)
