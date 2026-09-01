@@ -120,6 +120,10 @@ namespace ctrace::concurrency::internal::analysis
             bool touchesRecursiveLock = false;
             bool hasKnownOffset = true;
             std::int64_t byteOffset = 0;
+            /// Size of the object the pointer designates, taken from the innermost indexing step.
+            /// It bounds a coarse effect inferred for a call, which would otherwise cover the
+            /// whole root and collide with every sibling field.
+            std::uint64_t designatedSize = 0;
 
             [[nodiscard]] MemoryRegion region(std::uint64_t byteSize = 0) const
             {
@@ -196,10 +200,23 @@ namespace ctrace::concurrency::internal::analysis
                 walk.touchesRecursiveLock = true;
         }
 
+        std::uint64_t storeSizeOf(const AccessPathWalk& walk, llvm::Type* type)
+        {
+            if (walk.layout == nullptr || type == nullptr || !type->isSized())
+                return 0;
+
+            return walk.layout->getTypeStoreSize(type).getFixedValue();
+        }
+
         template <typename GEPType> void noteGepTypes(AccessPathWalk& walk, const GEPType& gep)
         {
             noteTraversedType(walk, gep.getSourceElementType());
             noteTraversedType(walk, gep.getResultElementType());
+
+            // The walk runs from the access towards the root, so the first step seen is the
+            // innermost and the most precise.
+            if (walk.designatedSize == 0)
+                walk.designatedSize = storeSizeOf(walk, gep.getResultElementType());
         }
 
         /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
@@ -238,7 +255,11 @@ namespace ctrace::concurrency::internal::analysis
                 if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(current))
                 {
                     if (walk != nullptr)
+                    {
                         noteTraversedType(*walk, global->getValueType());
+                        if (walk->designatedSize == 0)
+                            walk->designatedSize = storeSizeOf(*walk, global->getValueType());
+                    }
                     return current;
                 }
 
@@ -516,7 +537,7 @@ namespace ctrace::concurrency::internal::analysis
         if (walk.touchesSyncPrimitive)
             return std::nullopt;
 
-        const MemoryRegion region = walk.region(byteSize);
+        const MemoryRegion region = walk.region(byteSize != 0 ? byteSize : walk.designatedSize);
         if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(root))
         {
             if (!shouldTrackSharedGlobal(*global))

@@ -21,6 +21,7 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace ctrace::concurrency::internal::analysis
@@ -60,21 +61,99 @@ namespace ctrace::concurrency::internal::analysis
             if (llvm::isa<llvm::MemIntrinsic>(call))
                 return false;
 
-            // A callee defined in this module is summarized precisely by the interprocedural pass,
-            // including the atomicity of each access. Layering a coarse ModRef guess on top of that
-            // turns every standard-library wrapper into a spurious plain write.
-            const llvm::Function* callee = classifier.directCallee(call);
-            if (callee != nullptr && !callee->isDeclaration())
+            return classifier.classify(call) == CallKind::Unknown;
+        }
+
+        /// True when every memory operation a callee performs on memory it does not own is atomic,
+        /// following direct calls. The coarse effect inferred for such a call summarizes atomic
+        /// work only, so it must not be reported as a plain access: that is what turned a correct
+        /// `std::atomic` wrapper into a race.
+        ///
+        /// Answering this from the callee body rather than from its interprocedural summary keeps
+        /// the result identical whether or not the summary reaches the caller, which differs
+        /// between standard library implementations.
+        using AtomicOnlyCache = std::unordered_map<const llvm::Function*, bool>;
+
+        bool accessesMemoryAtomicallyOnly(const llvm::Function& function,
+                                          const ConcurrencySymbolClassifier& classifier,
+                                          AtomicOnlyCache& cache,
+                                          std::unordered_set<const llvm::Function*>& visiting)
+        {
+            if (const auto cached = cache.find(&function); cached != cache.end())
+                return cached->second;
+
+            if (function.isDeclaration())
                 return false;
 
-            return classifier.classify(call) == CallKind::Unknown;
+            // A cycle is assumed atomic-only; a genuine plain access elsewhere in it still
+            // decides the answer.
+            if (!visiting.insert(&function).second)
+                return true;
+
+            bool sawAtomic = false;
+            bool atomicOnly = true;
+            for (const llvm::BasicBlock& block : function)
+            {
+                for (const llvm::Instruction& instruction : block)
+                {
+                    if (llvm::isa<llvm::AtomicRMWInst>(instruction) ||
+                        llvm::isa<llvm::AtomicCmpXchgInst>(instruction))
+                    {
+                        sawAtomic = true;
+                        continue;
+                    }
+
+                    if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction))
+                    {
+                        if (llvm::isa<llvm::AllocaInst>(
+                                load->getPointerOperand()->stripPointerCastsAndAliases()))
+                            continue;
+
+                        sawAtomic = sawAtomic || load->isAtomic();
+                        atomicOnly = atomicOnly && load->isAtomic();
+                        continue;
+                    }
+
+                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
+                    {
+                        if (llvm::isa<llvm::AllocaInst>(
+                                store->getPointerOperand()->stripPointerCastsAndAliases()))
+                            continue;
+
+                        sawAtomic = sawAtomic || store->isAtomic();
+                        atomicOnly = atomicOnly && store->isAtomic();
+                        continue;
+                    }
+
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (call == nullptr || llvm::isa<llvm::DbgInfoIntrinsic>(call))
+                        continue;
+
+                    const llvm::Function* callee = classifier.directCallee(*call);
+                    if (callee == nullptr || callee->isDeclaration())
+                    {
+                        atomicOnly = false;
+                        continue;
+                    }
+
+                    if (!accessesMemoryAtomicallyOnly(*callee, classifier, cache, visiting))
+                        atomicOnly = false;
+                    else
+                        sawAtomic = true;
+                }
+            }
+
+            visiting.erase(&function);
+            const bool result = sawAtomic && atomicOnly;
+            cache.emplace(&function, result);
+            return result;
         }
 
         void appendAccess(std::vector<PendingAccess>& accesses, const llvm::Function& function,
                           const llvm::Instruction& instruction, const llvm::Value& pointerOperand,
                           AccessKind kind, AliasProvenance aliasProvenance,
                           const llvm::DataLayout& layout, std::uint64_t byteSize = 0,
-                          bool isAtomic = false)
+                          bool isAtomic = false, bool coarseCallEffect = false)
         {
             const std::optional<RootBinding> root =
                 resolveTrackedRoot(pointerOperand, &layout, byteSize);
@@ -89,6 +168,7 @@ namespace ctrace::concurrency::internal::analysis
             access.fact.kind = kind;
             access.fact.aliasProvenance = aliasProvenance;
             access.fact.isAtomic = isAtomic;
+            access.fact.coarseCallEffect = coarseCallEffect;
             const ResolvedSourceLocations locations = resolveSourceLocations(instruction);
             access.fact.loweredLocation = locations.loweredLocation;
             access.fact.userLocation = locations.userLocation;
@@ -137,10 +217,17 @@ namespace ctrace::concurrency::internal::analysis
                                             const llvm::Function& function,
                                             const llvm::CallBase& call, llvm::AAResults& aaResults,
                                             const ConcurrencySymbolClassifier& classifier,
-                                            const llvm::DataLayout& layout)
+                                            const llvm::DataLayout& layout,
+                                            AtomicOnlyCache& atomicOnlyCache)
         {
             if (!shouldInferCallMemoryEffects(call, classifier))
                 return;
+
+            const llvm::Function* callee = classifier.directCallee(call);
+            std::unordered_set<const llvm::Function*> visiting;
+            const bool atomicEffect =
+                callee != nullptr &&
+                accessesMemoryAtomicallyOnly(*callee, classifier, atomicOnlyCache, visiting);
 
             std::unordered_set<std::string> seenEffects;
             for (const llvm::Use& argument : call.args())
@@ -164,7 +251,7 @@ namespace ctrace::concurrency::internal::analysis
                     continue;
 
                 appendAccess(accesses, function, call, *value, *kind, AliasProvenance::Direct,
-                             layout);
+                             layout, 0, atomicEffect, true);
             }
         }
     } // namespace
@@ -182,6 +269,7 @@ namespace ctrace::concurrency::internal::analysis
 
         LlvmFunctionAnalysisProvider analysisProvider;
         ConcurrencySymbolClassifier classifier;
+        AtomicOnlyCache atomicOnlyCache;
         const llvm::DataLayout& layout = module.getDataLayout();
 
         for (const llvm::Function& function : module)
@@ -210,7 +298,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                     {
                         appendCallMemoryEffectAccesses(accesses, function, *call, aaResults,
-                                                       classifier, layout);
+                                                       classifier, layout, atomicOnlyCache);
                         continue;
                     }
 

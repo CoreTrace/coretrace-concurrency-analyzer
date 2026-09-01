@@ -54,6 +54,19 @@ namespace ctrace::concurrency::internal::analysis
             return lhs.isAtomic != rhs.isAtomic;
         }
 
+        /// A mixed atomic/plain conflict is only a bug when both sides reach the same location:
+        /// the atomic side orders nothing for a *different* field. An effect inferred for a call
+        /// has no known extent, so it cannot establish that, and pairing it with a plain access
+        /// to a neighbouring field would invent a race between two distinct members.
+        bool hasPreciseRegions(const AccessFact& lhs, const AccessFact& rhs)
+        {
+            if (lhs.coarseCallEffect || rhs.coarseCallEffect)
+                return false;
+
+            return lhs.region.hasKnownOffset && rhs.region.hasKnownOffset &&
+                   lhs.region.byteSize != 0 && rhs.region.byteSize != 0;
+        }
+
         std::string describeSymbol(const AccessFact& access)
         {
             return access.symbol;
@@ -113,6 +126,22 @@ namespace ctrace::concurrency::internal::analysis
             for (const std::string& context : contexts)
                 stream << "|" << context;
 
+            return stream.str();
+        }
+
+        /// Identifies the conflict independently of where inside the symbol it lands, so that a
+        /// coarse effect and the observed access it summarizes fall in the same bucket.
+        std::string conflictContextKey(const AccessFact& access, const EntrySet& lhsEntries,
+                                       const EntrySet& rhsEntries)
+        {
+            std::vector<std::string> contexts{joinValues(sortedThreadEntries(lhsEntries)),
+                                              joinValues(sortedThreadEntries(rhsEntries))};
+            std::sort(contexts.begin(), contexts.end());
+
+            std::ostringstream stream;
+            stream << access.symbol;
+            for (const std::string& context : contexts)
+                stream << "|" << context;
             return stream.str();
         }
 
@@ -375,6 +404,7 @@ namespace ctrace::concurrency::internal::analysis
             const AccessFact* rhs = nullptr;
             ConfidenceLevel confidence = ConfidenceLevel::Low;
             bool isWriteWrite = false;
+            bool isPrecise = false;
             std::size_t additionalPairs = 0;
             std::vector<std::pair<std::string, SourceLocation>> relatedSites;
             std::set<std::string> seenSiteKeys;
@@ -385,6 +415,7 @@ namespace ctrace::concurrency::internal::analysis
         {
             (void)symbol;
             std::map<std::string, LocationConflict> conflictsByLocation;
+            std::set<std::string> preciseConflictBuckets;
 
             for (std::size_t lhsIndex = 0; lhsIndex < accesses.size(); ++lhsIndex)
             {
@@ -402,12 +433,26 @@ namespace ctrace::concurrency::internal::analysis
                     if (isRaceFreeAtomicPair(lhs, rhs))
                         continue;
 
+                    if (isMixedAtomicPair(lhs, rhs) && !hasPreciseRegions(lhs, rhs))
+                        continue;
+
                     const EntrySet& lhsEntries = entriesOf(lhs);
                     const EntrySet& rhsEntries = entriesOf(rhs);
                     if (!mayHappenInParallel(lhs, lhsEntries, rhs, rhsEntries, facts))
                         continue;
 
                     if (shareRecognizedLock(lhs, rhs))
+                        continue;
+
+                    // An effect inferred for a call is weaker evidence than an observed access:
+                    // it names the call site, not the instruction that touches the memory. When
+                    // both describe the same conflict, the observed one must be reported.
+                    const bool isPrecise = !lhs.coarseCallEffect && !rhs.coarseCallEffect;
+                    if (isPrecise)
+                        preciseConflictBuckets.insert(
+                            conflictContextKey(lhs, lhsEntries, rhsEntries));
+                    else if (preciseConflictBuckets.contains(
+                                 conflictContextKey(lhs, lhsEntries, rhsEntries)))
                         continue;
 
                     LocationConflict& conflict =
@@ -417,8 +462,9 @@ namespace ctrace::concurrency::internal::analysis
                         lhs.kind == AccessKind::Write && rhs.kind == AccessKind::Write;
 
                     if (conflict.lhs == nullptr ||
-                        std::make_pair(confidence, isWriteWrite) >
-                            std::make_pair(conflict.confidence, conflict.isWriteWrite))
+                        std::make_tuple(isPrecise, confidence, isWriteWrite) >
+                            std::make_tuple(conflict.isPrecise, conflict.confidence,
+                                            conflict.isWriteWrite))
                     {
                         if (conflict.lhs != nullptr)
                             ++conflict.additionalPairs;
@@ -427,6 +473,7 @@ namespace ctrace::concurrency::internal::analysis
                         conflict.rhs = &rhs;
                         conflict.confidence = confidence;
                         conflict.isWriteWrite = isWriteWrite;
+                        conflict.isPrecise = isPrecise;
                     }
                     else
                     {

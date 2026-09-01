@@ -144,6 +144,10 @@ namespace ctrace::concurrency::internal::analysis
         /// True for atomic loads/stores and read-modify-write instructions: two atomic accesses to
         /// the same location never form a data race.
         bool isAtomic = false;
+        /// True when the access was inferred from a call's memory effects rather than observed on
+        /// an instruction. Such an effect summarizes a whole callee, so its region bounds the
+        /// object the pointer designates rather than the bytes actually touched.
+        bool coarseCallEffect = false;
         /// True when the access executes on the initial thread rather than inside a spawned entry.
         bool inRootTask = false;
         /// Spawned entries already running when a root-task access executes.

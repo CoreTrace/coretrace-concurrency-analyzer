@@ -18,6 +18,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
@@ -286,6 +287,21 @@ namespace ctrace::concurrency::internal::analysis
 
             const SynchronizationEffectResolver effectResolver(classifier, module.getDataLayout());
             std::unordered_set<std::string> recursiveLockIds;
+
+            // Recursiveness belongs to the object's type, so it is read from the global itself
+            // rather than from an acquisition site. A standard library that wraps the lock in
+            // another layer hides the type at the call, but never on the definition.
+            for (const llvm::GlobalVariable& global : module.globals())
+            {
+                if (!designatesRecursiveLockType(global))
+                    continue;
+
+                if (const auto lockId = canonicalLockId(global, &module.getDataLayout());
+                    lockId.has_value())
+                {
+                    recursiveLockIds.insert(*lockId);
+                }
+            }
             std::unordered_set<std::string> nonDefaultAttributeGroups;
             std::vector<const llvm::CallBase*> mutexInitCalls;
 
