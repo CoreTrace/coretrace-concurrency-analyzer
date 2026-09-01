@@ -186,6 +186,18 @@ namespace ctrace::concurrency::internal::analysis
         std::optional<std::string> sourceHandleGroupId;
         std::string functionId;
         SourceLocation location;
+        /// For a Create: some join or detach of the same handle runs on every path leaving it.
+        /// A conditional join leaves this false even though the counts balance.
+        bool resolvedOnAllPaths = true;
+        /// For a Create: the site sits in a loop, so it produces one handle per iteration while a
+        /// join outside the loop resolves only the last one.
+        bool insideLoop = false;
+        /// For a Create: the handle was moved into storage the analysis cannot follow (a container,
+        /// the heap), so its fate is unknown and reporting it would be a guess.
+        bool escapedToUntrackedStorage = false;
+        /// True once the fact has been rewritten onto a caller. Path-sensitive conclusions drawn
+        /// inside the callee no longer describe the caller's control flow, so they are dropped.
+        bool propagated = false;
     };
 
     struct PendingAccess

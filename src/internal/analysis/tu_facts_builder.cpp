@@ -499,6 +499,7 @@ namespace ctrace::concurrency::internal::analysis
 
                     ThreadLifecycleFact propagated = fact;
                     propagated.functionId = callSite.callerFunctionId;
+                    propagated.propagated = true;
                     propagated.handleGroupId = *callerGroup + binding->suffix;
                     if (fact.sourceHandleGroupId.has_value())
                     {
