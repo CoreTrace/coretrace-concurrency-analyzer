@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace llvm
@@ -40,6 +41,16 @@ namespace ctrace::concurrency::internal::analysis
         std::string symbol;
         AliasProvenance aliasProvenance = AliasProvenance::Direct;
     };
+
+    /// True when `pointerOperand` designates a synchronization primitive (a POSIX mutex/rwlock/
+    /// condition variable, or their C++ standard library counterparts) rather than user data.
+    /// Such objects are mutated by the runtime under its own synchronization, so treating them as
+    /// shared data reports the synchronization itself as a race.
+    [[nodiscard]] bool designatesSynchronizationPrimitive(const llvm::Value& pointerOperand);
+
+    /// True when `pointerOperand` designates a lock type that may legally be reacquired by the
+    /// thread already holding it (`std::recursive_mutex`, `std::recursive_timed_mutex`).
+    [[nodiscard]] bool designatesRecursiveLockType(const llvm::Value& pointerOperand);
 
     [[nodiscard]] const llvm::GlobalVariable* resolveBaseGlobal(const llvm::Value& value);
     [[nodiscard]] std::optional<std::string> canonicalGlobalId(const llvm::Value& value);

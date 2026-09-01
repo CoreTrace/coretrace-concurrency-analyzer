@@ -368,7 +368,30 @@ namespace ctrace::concurrency::internal::analysis
 
     bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global)
     {
-        return !global.isDeclaration() && !global.isConstant() && !global.isThreadLocal();
+        if (global.isDeclaration() || global.isConstant() || global.isThreadLocal())
+            return false;
+
+        const llvm::Type* valueType = global.getValueType();
+        while (const auto* arrayType = llvm::dyn_cast_or_null<llvm::ArrayType>(valueType))
+            valueType = arrayType->getElementType();
+
+        return !isSyncPrimitiveTypeName(structuralTypeName(valueType));
+    }
+
+    bool designatesSynchronizationPrimitive(const llvm::Value& pointerOperand)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        resolveCopiedValue(pointerOperand, seen, &walk);
+        return walk.touchesSyncPrimitive;
+    }
+
+    bool designatesRecursiveLockType(const llvm::Value& pointerOperand)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        resolveCopiedValue(pointerOperand, seen, &walk);
+        return walk.touchesRecursiveLock;
     }
 
     const llvm::GlobalVariable* resolveBaseGlobal(const llvm::Value& value)
@@ -486,6 +509,11 @@ namespace ctrace::concurrency::internal::analysis
         walk.layout = layout;
         const llvm::Value* root = resolveCopiedValue(value, seen, &walk);
         if (root == nullptr)
+            return std::nullopt;
+
+        // The runtime mutates lock and condition-variable objects under its own synchronization;
+        // surfacing those mutations as shared-data conflicts reports the synchronization itself.
+        if (walk.touchesSyncPrimitive)
             return std::nullopt;
 
         const MemoryRegion region = walk.region(byteSize);
