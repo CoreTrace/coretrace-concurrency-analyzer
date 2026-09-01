@@ -708,6 +708,8 @@ namespace
         std::size_t missingJoin = 0;
         std::size_t deadlock = 0;
         std::size_t conditionWait = 0;
+        std::size_t forkAfterThread = 0;
+        std::size_t unreapedChild = 0;
         /// Symbol the data-race diagnostics must name; empty when not asserted.
         std::string_view racingSymbol;
         bool requiresCxx20 = false;
@@ -920,6 +922,21 @@ namespace
              .intent = "std::jthread joins in its destructor",
              .requiresCxx20 = true},
 
+            // --- process lifecycle ---------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/process/fork_after_thread_creation.c",
+             .intent = "the child inherits a mutex no surviving thread can unlock",
+             // The child returns without joining, which is right: its copy of the handle names
+             // a thread that does not exist there. The join rule sees the path all the same.
+             .missingJoin = 1, .forkAfterThread = 1, .unreapedChild = 1},
+            {.path = "tests/fixtures/concurrency/process/fork_without_wait.c",
+             .intent = "the pid is dropped, so every finished child stays in the table",
+             .unreapedChild = 1},
+            {.path = "tests/fixtures/concurrency/process/fork_then_exec_no_fp.c",
+             .intent = "the child replaces its image at once and keeps nothing it inherited",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/process/fork_reaped_no_fp.c",
+             .intent = "no thread, and every child is collected"},
+
             // --- condition variables ------------------------------------------------------
             // The state around a condition variable is ordinary shared data, so the data-race
             // rule applies to it as well; the wait protocol itself is a separate question.
@@ -955,8 +972,9 @@ namespace
              .intent = "no rule models memory ordering yet; the plain accesses still race",
              .dataRace = 2},
             {.path = "tests/fixtures/concurrency/thread-escape/fork_thread_race.c",
-             .intent = "no rule models fork() semantics yet; the global access still races",
-             .dataRace = 1},
+             .intent = "forking while a thread runs, never collecting the child, and racing on "
+                       "the global besides",
+             .dataRace = 1, .forkAfterThread = 1, .unreapedChild = 1},
             {.path = "tests/fixtures/concurrency/data-race/cpp_race_std_async.cpp",
              .intent = "std::async spawns no recognized thread entry yet"},
 
@@ -979,9 +997,7 @@ namespace
         if (expectation.requiresCxx20)
             compileArgs.emplace_back(kCxx20Standard);
 
-        const AnalysisOptions options{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                                       RuleId::DeadlockLockOrder,
-                                                       RuleId::ConditionWaitWithoutPredicate}};
+        const AnalysisOptions options = AnalysisOptions::allAvailable();
         const std::optional<DiagnosticReport> report =
             analyzeFixture(expectation.path, options, std::move(compileArgs));
         if (!report.has_value())
@@ -999,6 +1015,8 @@ namespace
             {RuleId::MissingJoin, expectation.missingJoin, "missing-join"},
             {RuleId::DeadlockLockOrder, expectation.deadlock, "deadlock-lock-order"},
             {RuleId::ConditionWaitWithoutPredicate, expectation.conditionWait, "condition-wait"},
+            {RuleId::ForkAfterThreadCreation, expectation.forkAfterThread, "fork-after-thread"},
+            {RuleId::UnreapedChildProcess, expectation.unreapedChild, "unreaped-child"},
         };
 
         bool ok = true;
