@@ -69,6 +69,36 @@ namespace ctrace::concurrency::internal::diagnostics
                 },
         };
 
+        static const RuleMetadata kForkAfterThreadCreation{
+            .ruleId = RuleId::ForkAfterThreadCreation,
+            .title = "Fork in a threaded program without an exec in the child",
+            .shortDescription =
+                "Detects a fork performed by a program that creates threads, where the child "
+                "keeps running instead of replacing its process image.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "662",
+                    .title = "Improper Synchronization",
+                },
+        };
+
+        static const RuleMetadata kUnreapedChildProcess{
+            .ruleId = RuleId::UnreapedChildProcess,
+            .title = "Child process is never collected",
+            .shortDescription =
+                "Detects a program that forks but never waits on its children, leaving them as "
+                "zombies in the process table.",
+            .defaultSeverity = Severity::Warning,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "404",
+                    .title = "Improper Resource Shutdown or Release",
+                },
+        };
+
         switch (ruleId)
         {
         case RuleId::CompilerDiagnostic:
@@ -81,6 +111,10 @@ namespace ctrace::concurrency::internal::diagnostics
             return kDeadlockLockOrder;
         case RuleId::ConditionWaitWithoutPredicate:
             return kConditionWaitWithoutPredicate;
+        case RuleId::ForkAfterThreadCreation:
+            return kForkAfterThreadCreation;
+        case RuleId::UnreapedChildProcess:
+            return kUnreapedChildProcess;
         }
 
         return kCompilerDiagnostic;

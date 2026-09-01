@@ -82,6 +82,10 @@ namespace
                     return "missing-join";
                 case ctrace::concurrency::RuleId::ConditionWaitWithoutPredicate:
                     return "condition-wait";
+                case ctrace::concurrency::RuleId::ForkAfterThreadCreation:
+                    return "fork-after-thread";
+                case ctrace::concurrency::RuleId::UnreapedChildProcess:
+                    return "unreaped-child";
                 case ctrace::concurrency::RuleId::DeadlockLockOrder:
                     return "deadlock-lock-order";
                 case ctrace::concurrency::RuleId::CompilerDiagnostic:
@@ -165,6 +169,10 @@ namespace
             return "deadlock-lock-order";
         case RuleId::ConditionWaitWithoutPredicate:
             return "condition-wait";
+        case RuleId::ForkAfterThreadCreation:
+            return "fork-after-thread";
+        case RuleId::UnreapedChildProcess:
+            return "unreaped-child";
         case RuleId::CompilerDiagnostic:
             return "compiler-diagnostic";
         }
@@ -196,6 +204,18 @@ namespace
         if (value == "condition-wait")
         {
             out = RuleId::ConditionWaitWithoutPredicate;
+            return true;
+        }
+
+        if (value == "fork-after-thread")
+        {
+            out = RuleId::ForkAfterThreadCreation;
+            return true;
+        }
+
+        if (value == "unreaped-child")
+        {
+            out = RuleId::UnreapedChildProcess;
             return true;
         }
 

@@ -44,6 +44,8 @@ namespace ctrace::concurrency
         MissingJoin,
         DeadlockLockOrder,
         ConditionWaitWithoutPredicate,
+        ForkAfterThreadCreation,
+        UnreapedChildProcess,
     };
 
     enum class ConfidenceLevel
@@ -135,9 +137,10 @@ namespace ctrace::concurrency
 
     struct AnalysisOptions
     {
-        std::vector<RuleId> enabledRules{RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                         RuleId::DeadlockLockOrder,
-                                         RuleId::ConditionWaitWithoutPredicate};
+        std::vector<RuleId> enabledRules{
+            RuleId::DataRaceGlobal,          RuleId::MissingJoin,
+            RuleId::DeadlockLockOrder,       RuleId::ConditionWaitWithoutPredicate,
+            RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess};
 
         [[nodiscard]] bool isEnabled(RuleId ruleId) const
         {
@@ -151,9 +154,10 @@ namespace ctrace::concurrency
 
         [[nodiscard]] static AnalysisOptions allAvailable()
         {
-            return AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                                    RuleId::DeadlockLockOrder,
-                                                    RuleId::ConditionWaitWithoutPredicate}};
+            return AnalysisOptions{
+                .enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
+                                 RuleId::DeadlockLockOrder, RuleId::ConditionWaitWithoutPredicate,
+                                 RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess}};
         }
     };
 
@@ -246,6 +250,10 @@ namespace ctrace::concurrency
             return "DeadlockLockOrder";
         case RuleId::ConditionWaitWithoutPredicate:
             return "ConditionWaitWithoutPredicate";
+        case RuleId::ForkAfterThreadCreation:
+            return "ForkAfterThreadCreation";
+        case RuleId::UnreapedChildProcess:
+            return "UnreapedChildProcess";
         }
         return "UnknownRule";
     }

@@ -254,6 +254,17 @@ namespace ctrace::concurrency::internal::analysis
         bool viaHelper = false;
     };
 
+    /// A place where the program duplicates itself.
+    struct ProcessForkFact
+    {
+        std::string functionId;
+        SourceLocation location;
+        /// The forking function reaches an `exec`, directly or through a callee. The child then
+        /// replaces its image, which discards the inherited locks and makes the unreaped-child
+        /// question the caller's own design rather than an oversight.
+        bool execReachable = false;
+    };
+
     struct TUFacts
     {
         std::vector<SpawnFact> spawns;
@@ -261,6 +272,9 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<LockOrderFact> lockOrders;
         std::vector<ThreadLifecycleFact> threadLifecycles;
         std::vector<ConditionWaitFact> conditionWaits;
+        std::vector<ProcessForkFact> processForks;
+        /// Some part of the program collects its terminated children.
+        bool reapsChildProcesses = false;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;
         /// What each function of this unit does to the locks its callers hand it. Published so a
         /// caller in another unit can see a helper defined here.

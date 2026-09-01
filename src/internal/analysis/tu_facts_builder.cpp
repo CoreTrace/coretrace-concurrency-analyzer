@@ -9,6 +9,7 @@
 #include "lock_scope_tracker.hpp"
 #include "lock_state_propagator.hpp"
 #include "lock_wrapper_summaries.hpp"
+#include "process_lifecycle_collector.hpp"
 #include "shared_access_collector.hpp"
 #include "cross_tu/program_symbol_index.hpp"
 #include "task_concurrency_analyzer.hpp"
@@ -598,6 +599,37 @@ namespace ctrace::concurrency::internal::analysis
                                          lifecycleFactsByFunction, std::move(propagated)) ||
                         lifecycleChanged;
                 }
+            }
+        }
+
+        // A fork whose child goes on to replace its process image inherits nothing that
+        // outlives the exec, so neither question this analysis asks about a fork applies to it.
+        // Reachability runs over direct calls, the same way the wait obligation travels.
+        {
+            const ProcessLifecycleCollector processCollector(classifier);
+            ProcessLifecycleCollection processes = processCollector.collect(module);
+            facts.reapsChildProcesses = processes.reapsChildren;
+
+            bool execChanged = true;
+            while (execChanged)
+            {
+                execChanged = false;
+
+                for (const DirectCallSite& site : directCallSites)
+                {
+                    if (!processes.functionsReachingExec.contains(site.calleeFunctionId))
+                        continue;
+
+                    execChanged =
+                        processes.functionsReachingExec.insert(site.callerFunctionId).second ||
+                        execChanged;
+                }
+            }
+
+            for (ProcessForkFact& fork : processes.forks)
+            {
+                fork.execReachable = processes.functionsReachingExec.contains(fork.functionId);
+                facts.processForks.push_back(std::move(fork));
             }
         }
 

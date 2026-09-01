@@ -2,6 +2,7 @@
 #include "inter_tu_coordinator.hpp"
 
 #include "internal/analysis/condition_wait_checker.hpp"
+#include "internal/analysis/process_lifecycle_checker.hpp"
 #include "internal/analysis/data_race_checker.hpp"
 #include "internal/analysis/facts.hpp"
 #include "internal/analysis/ir_utils.hpp"
@@ -201,6 +202,15 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
 
             if (options_.isEnabled(RuleId::ConditionWaitWithoutPredicate))
                 append(ConditionWaitChecker().run(facts));
+
+            if (options_.isEnabled(RuleId::ForkAfterThreadCreation) ||
+                options_.isEnabled(RuleId::UnreapedChildProcess))
+            {
+                DiagnosticReport processReport = ProcessLifecycleChecker().run(facts);
+                std::erase_if(processReport.diagnostics, [this](const Diagnostic& diagnostic)
+                              { return !options_.isEnabled(diagnostic.ruleId); });
+                append(processReport);
+            }
 
             finalizeReport(moduleReport, facts);
 

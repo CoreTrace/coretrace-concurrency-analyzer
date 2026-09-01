@@ -2,6 +2,7 @@
 #include "coretrace_concurrency_analysis.hpp"
 
 #include "internal/analysis/condition_wait_checker.hpp"
+#include "internal/analysis/process_lifecycle_checker.hpp"
 #include "internal/analysis/cross_tu/inter_tu_coordinator.hpp"
 #include "internal/analysis/data_race_checker.hpp"
 #include "internal/analysis/lock_order_analyzer.hpp"
@@ -71,6 +72,16 @@ namespace ctrace::concurrency
         {
             internal::analysis::ConditionWaitChecker conditionWaitChecker;
             appendDiagnostics(report, conditionWaitChecker.run(facts));
+        }
+
+        if (options_.isEnabled(RuleId::ForkAfterThreadCreation) ||
+            options_.isEnabled(RuleId::UnreapedChildProcess))
+        {
+            internal::analysis::ProcessLifecycleChecker processChecker;
+            DiagnosticReport processReport = processChecker.run(facts);
+            std::erase_if(processReport.diagnostics, [this](const Diagnostic& diagnostic)
+                          { return !options_.isEnabled(diagnostic.ruleId); });
+            appendDiagnostics(report, processReport);
         }
 
         internal::analysis::finalizeReport(report, facts);

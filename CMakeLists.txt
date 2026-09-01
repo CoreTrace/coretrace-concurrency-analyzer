@@ -54,6 +54,8 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/synchronization_effects.cpp
     src/internal/analysis/task_concurrency_analyzer.cpp
     src/internal/reporting/report_renderer.cpp
+    src/internal/analysis/process_lifecycle_checker.cpp
+    src/internal/analysis/process_lifecycle_collector.cpp
     src/internal/analysis/shared_access_collector.cpp
     src/internal/analysis/thread_context_propagator.cpp
     src/internal/analysis/thread_lifecycle_collector.cpp
