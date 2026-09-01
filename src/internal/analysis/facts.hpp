@@ -148,6 +148,8 @@ namespace ctrace::concurrency::internal::analysis
         /// an instruction. Such an effect summarizes a whole callee, so its region bounds the
         /// object the pointer designates rather than the bytes actually touched.
         bool coarseCallEffect = false;
+        /// True when the symbol identity was guessed by alias analysis rather than resolved.
+        bool guessedIdentity = false;
         /// True when the access executes on the initial thread rather than inside a spawned entry.
         bool inRootTask = false;
         /// Spawned entries already running when a root-task access executes.

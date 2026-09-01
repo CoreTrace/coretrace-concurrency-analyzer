@@ -18,7 +18,6 @@
 #include <llvm/Support/ModRef.h>
 
 #include <cstdint>
-#include <filesystem>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -170,6 +169,7 @@ namespace ctrace::concurrency::internal::analysis
             access.fact.aliasProvenance = aliasProvenance;
             access.fact.isAtomic = isAtomic;
             access.fact.coarseCallEffect = coarseCallEffect;
+            access.fact.guessedIdentity = aliasProvenance != AliasProvenance::Direct;
             const ResolvedSourceLocations locations = resolveSourceLocations(instruction);
             access.fact.loweredLocation = locations.loweredLocation;
             access.fact.userLocation = locations.userLocation;
@@ -219,17 +219,9 @@ namespace ctrace::concurrency::internal::analysis
                                             const llvm::CallBase& call, llvm::AAResults& aaResults,
                                             const ConcurrencySymbolClassifier& classifier,
                                             const llvm::DataLayout& layout,
-                                            AtomicOnlyCache& atomicOnlyCache,
-                                            const std::optional<std::filesystem::path>& sourceRoot)
+                                            AtomicOnlyCache& atomicOnlyCache)
         {
             if (!shouldInferCallMemoryEffects(call, classifier))
-                return;
-
-            // A conservative guess made inside a standard library header, about an object the user
-            // never handed to it, describes the library's own bookkeeping rather than a race in
-            // the code under analysis. Observed accesses there are still projected onto the user's
-            // call site and keep their user location, so only the guesses are dropped.
-            if (!isLikelyUserLocation(resolveSourceLocations(call).userLocation, sourceRoot))
                 return;
 
             const llvm::Function* callee = classifier.directCallee(call);
@@ -279,7 +271,6 @@ namespace ctrace::concurrency::internal::analysis
         LlvmFunctionAnalysisProvider analysisProvider;
         ConcurrencySymbolClassifier classifier;
         AtomicOnlyCache atomicOnlyCache;
-        const std::optional<std::filesystem::path> sourceRoot = primarySourceRoot(module);
         const llvm::DataLayout& layout = module.getDataLayout();
 
         for (const llvm::Function& function : module)
@@ -308,8 +299,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                     {
                         appendCallMemoryEffectAccesses(accesses, function, *call, aaResults,
-                                                       classifier, layout, atomicOnlyCache,
-                                                       sourceRoot);
+                                                       classifier, layout, atomicOnlyCache);
                         continue;
                     }
 
@@ -364,12 +354,6 @@ namespace ctrace::concurrency::internal::analysis
                         // The global identity is a guess here, not a resolution. Made inside a
                         // standard library header, about an object the user never named, it
                         // attributes the library's own bookkeeping to their data.
-                        if (!isLikelyUserLocation(resolveSourceLocations(instruction).userLocation,
-                                                  sourceRoot))
-                        {
-                            continue;
-                        }
-
                         root = RootBinding::global(aliasResolvedGlobal->symbol);
                         aliasProvenance = aliasResolvedGlobal->aliasProvenance;
                     }
@@ -382,6 +366,7 @@ namespace ctrace::concurrency::internal::analysis
                     access.fact.kind = kind;
                     access.fact.aliasProvenance = aliasProvenance;
                     access.fact.isAtomic = isAtomicAccess;
+                    access.fact.guessedIdentity = aliasProvenance != AliasProvenance::Direct;
                     const ResolvedSourceLocations locations = resolveSourceLocations(instruction);
                     access.fact.loweredLocation = locations.loweredLocation;
                     access.fact.userLocation = locations.userLocation;

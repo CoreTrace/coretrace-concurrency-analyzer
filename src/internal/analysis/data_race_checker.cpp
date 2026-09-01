@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <filesystem>
 #include <map>
 #include <sstream>
 #include <set>
@@ -375,7 +376,6 @@ namespace ctrace::concurrency::internal::analysis
 
     DiagnosticReport DataRaceChecker::run(const llvm::Module& module, const TUFacts& facts) const
     {
-        (void)module;
         const std::unordered_map<std::string, ThreadEntrySet>& reachableEntriesByFunction =
             facts.reachableThreadEntriesByFunction;
         static const EntrySet emptyEntries;
@@ -386,9 +386,27 @@ namespace ctrace::concurrency::internal::analysis
             return it != reachableEntriesByFunction.end() ? it->second : emptyEntries;
         };
 
+        const std::optional<std::filesystem::path> sourceRoot = primarySourceRoot(module);
+
+        // A coarse call effect and a guessed identity are both approximations. Once projected onto
+        // a call site the user wrote, they describe that line and are worth reporting; left inside
+        // a standard library header, they describe the library's own bookkeeping. The decision
+        // belongs here, after projection, not at collection time when the user location is not yet
+        // known.
+        auto describesUserCode = [&](const AccessFact& access)
+        {
+            if (!access.coarseCallEffect && !access.guessedIdentity)
+                return true;
+
+            return isLikelyUserLocation(access.userLocation, sourceRoot);
+        };
+
         std::map<std::string, std::vector<const AccessFact*>> accessesBySymbol;
         for (const AccessFact& access : facts.accesses)
         {
+            if (!describesUserCode(access))
+                continue;
+
             // Code on the initial thread is analyzed too: it is a task like any other, bounded by
             // the spawns and joins surrounding it.
             if (!reachableEntriesByFunction.contains(access.functionId) && !access.inRootTask)
