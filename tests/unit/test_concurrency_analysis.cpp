@@ -711,6 +711,7 @@ namespace
         std::size_t forkAfterThread = 0;
         std::size_t unreapedChild = 0;
         std::size_t threadArgumentEscape = 0;
+        std::size_t unsafeSignalHandler = 0;
         /// Symbol the data-race diagnostics must name; empty when not asserted.
         std::string_view racingSymbol;
         bool requiresCxx20 = false;
@@ -924,6 +925,16 @@ namespace
              .intent = "std::jthread joins in its destructor",
              .requiresCxx20 = true},
 
+            // --- signal handlers -----------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/signal/signal_handler_unsafe_call.c",
+             .intent = "the handler prints and allocates, both of which it may interrupt",
+             .unsafeSignalHandler = 1},
+            {.path = "tests/fixtures/concurrency/signal/signal_handler_unsafe_via_helper.c",
+             .intent = "a handler is no safer than the helper it calls",
+             .unsafeSignalHandler = 1},
+            {.path = "tests/fixtures/concurrency/signal/signal_handler_flag_only_no_fp.c",
+             .intent = "writing a volatile sig_atomic_t flag is the shape the standard allows"},
+
             // --- thread arguments ----------------------------------------------------------
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_stack_escape.c",
              .intent = "a detached thread keeps reading a frame that is already gone",
@@ -1031,6 +1042,7 @@ namespace
             {RuleId::UnreapedChildProcess, expectation.unreapedChild, "unreaped-child"},
             {RuleId::ThreadArgumentEscapesFrame, expectation.threadArgumentEscape,
              "thread-arg-escape"},
+            {RuleId::UnsafeSignalHandler, expectation.unsafeSignalHandler, "unsafe-signal-handler"},
         };
 
         bool ok = true;
