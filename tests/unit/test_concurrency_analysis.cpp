@@ -957,6 +957,8 @@ namespace
             {.path = "tests/fixtures/concurrency/process/fork_then_exec_no_fp.c",
              .intent = "the child replaces its image at once and keeps nothing it inherited",
              .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/process/fork_sigchld_ignored_no_fp.c",
+             .intent = "handing SIGCHLD to SIG_IGN lets the system reap, so nothing is owed"},
             {.path = "tests/fixtures/concurrency/process/fork_reaped_no_fp.c",
              .intent = "no thread, and every child is collected"},
 
