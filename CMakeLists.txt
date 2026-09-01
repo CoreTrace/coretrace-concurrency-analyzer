@@ -57,6 +57,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/thread_spawn_detector.cpp
     src/internal/analysis/tu_facts_builder.cpp
     src/internal/compilation_database.cpp
+    src/internal/ir_cache.cpp
     src/internal/compile_command_builder.cpp
     src/internal/compilation_backend.cpp
     src/internal/ir_loader.cpp
