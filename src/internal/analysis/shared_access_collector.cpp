@@ -60,13 +60,21 @@ namespace ctrace::concurrency::internal::analysis
             if (llvm::isa<llvm::MemIntrinsic>(call))
                 return false;
 
+            // A callee defined in this module is summarized precisely by the interprocedural pass,
+            // including the atomicity of each access. Layering a coarse ModRef guess on top of that
+            // turns every standard-library wrapper into a spurious plain write.
+            const llvm::Function* callee = classifier.directCallee(call);
+            if (callee != nullptr && !callee->isDeclaration())
+                return false;
+
             return classifier.classify(call) == CallKind::Unknown;
         }
 
         void appendAccess(std::vector<PendingAccess>& accesses, const llvm::Function& function,
                           const llvm::Instruction& instruction, const llvm::Value& pointerOperand,
                           AccessKind kind, AliasProvenance aliasProvenance,
-                          const llvm::DataLayout& layout, std::uint64_t byteSize = 0)
+                          const llvm::DataLayout& layout, std::uint64_t byteSize = 0,
+                          bool isAtomic = false)
         {
             const std::optional<RootBinding> root =
                 resolveTrackedRoot(pointerOperand, &layout, byteSize);
@@ -80,6 +88,7 @@ namespace ctrace::concurrency::internal::analysis
             access.fact.functionId = functionId(function);
             access.fact.kind = kind;
             access.fact.aliasProvenance = aliasProvenance;
+            access.fact.isAtomic = isAtomic;
             const ResolvedSourceLocations locations = resolveSourceLocations(instruction);
             access.fact.loweredLocation = locations.loweredLocation;
             access.fact.userLocation = locations.userLocation;
@@ -189,6 +198,7 @@ namespace ctrace::concurrency::internal::analysis
                     const llvm::Value* pointerOperand = nullptr;
                     AccessKind kind = AccessKind::Read;
                     AliasProvenance aliasProvenance = AliasProvenance::Direct;
+                    bool isAtomicAccess = false;
                     std::uint64_t byteSize = 0;
 
                     if (const auto* intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(&instruction))
@@ -208,13 +218,32 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         pointerOperand = load->getPointerOperand();
                         kind = AccessKind::Read;
+                        isAtomicAccess = load->isAtomic();
                         byteSize = accessByteSize(layout, load->getType());
                     }
                     else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
                     {
                         pointerOperand = store->getPointerOperand();
                         kind = AccessKind::Write;
+                        isAtomicAccess = store->isAtomic();
                         byteSize = accessByteSize(layout, store->getValueOperand()->getType());
+                    }
+                    else if (const auto* atomicRmw =
+                                 llvm::dyn_cast<llvm::AtomicRMWInst>(&instruction))
+                    {
+                        pointerOperand = atomicRmw->getPointerOperand();
+                        kind = AccessKind::Write;
+                        isAtomicAccess = true;
+                        byteSize = accessByteSize(layout, atomicRmw->getType());
+                    }
+                    else if (const auto* compareExchange =
+                                 llvm::dyn_cast<llvm::AtomicCmpXchgInst>(&instruction))
+                    {
+                        pointerOperand = compareExchange->getPointerOperand();
+                        kind = AccessKind::Write;
+                        isAtomicAccess = true;
+                        byteSize =
+                            accessByteSize(layout, compareExchange->getCompareOperand()->getType());
                     }
                     else
                     {
@@ -244,6 +273,7 @@ namespace ctrace::concurrency::internal::analysis
                     access.fact.functionId = functionId(function);
                     access.fact.kind = kind;
                     access.fact.aliasProvenance = aliasProvenance;
+                    access.fact.isAtomic = isAtomicAccess;
                     const ResolvedSourceLocations locations = resolveSourceLocations(instruction);
                     access.fact.loweredLocation = locations.loweredLocation;
                     access.fact.userLocation = locations.userLocation;

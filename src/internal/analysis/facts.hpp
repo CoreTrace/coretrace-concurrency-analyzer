@@ -126,6 +126,9 @@ namespace ctrace::concurrency::internal::analysis
         SourceLocation loweredLocation;
         SourceLocation userLocation;
         bool allowCallsiteProjection = false;
+        /// True for atomic loads/stores and read-modify-write instructions: two atomic accesses to
+        /// the same location never form a data race.
+        bool isAtomic = false;
         std::set<std::string> heldLocks;
     };
 

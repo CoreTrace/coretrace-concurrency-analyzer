@@ -61,7 +61,7 @@ namespace ctrace::concurrency::internal::analysis
         {
             std::ostringstream stream;
             stream << fact.symbol << fact.region.suffix() << "|" << fact.functionId << "|"
-                   << toString(fact.kind) << "|"
+                   << toString(fact.kind) << "|" << (fact.isAtomic ? "atomic" : "plain") << "|"
                    << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.file << "|"
                    << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
                    << fact.loweredLocation.function;

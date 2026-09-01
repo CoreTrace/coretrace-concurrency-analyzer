@@ -33,6 +33,19 @@ namespace ctrace::concurrency::internal::analysis
                                { return rhs.heldLocks.contains(lock); });
         }
 
+        /// Two atomic operations on the same location are ordered by the memory model and never
+        /// form a data race. A mix of atomic and plain access still does, and is worth reporting
+        /// because the bug is the unsynchronized side.
+        bool isRaceFreeAtomicPair(const AccessFact& lhs, const AccessFact& rhs)
+        {
+            return lhs.isAtomic && rhs.isAtomic;
+        }
+
+        bool isMixedAtomicPair(const AccessFact& lhs, const AccessFact& rhs)
+        {
+            return lhs.isAtomic != rhs.isAtomic;
+        }
+
         std::vector<std::string> sortedLocks(const AccessFact& access)
         {
             return std::vector<std::string>(access.heldLocks.begin(), access.heldLocks.end());
@@ -168,6 +181,8 @@ namespace ctrace::concurrency::internal::analysis
                                    const std::vector<std::string>& entries)
         {
             std::ostringstream stream;
+            if (access.isAtomic)
+                stream << "atomic ";
             stream << toString(access.kind) << " at " << formatLocation(access.userLocation);
 
             if (!entries.empty())
@@ -208,7 +223,15 @@ namespace ctrace::concurrency::internal::analysis
                 .property("firstThreadEntries", orderedLhsEntries)
                 .property("secondThreadEntries", orderedRhsEntries)
                 .property("conflictKinds", conflictKinds)
-                .property("variableAliasing", variableAliasing);
+                .property("variableAliasing", variableAliasing)
+                .property("firstAtomic", lhs.isAtomic)
+                .property("secondAtomic", rhs.isAtomic);
+
+            if (isMixedAtomicPair(lhs, rhs))
+            {
+                builder.note("one side is atomic while the other is a plain access: atomicity on "
+                             "only one side does not order the pair");
+            }
 
             if (hasDistinctLoweredLocation(lhs))
                 builder.relatedLocation("Lowered first access", lhs.loweredLocation);
@@ -290,6 +313,9 @@ namespace ctrace::concurrency::internal::analysis
                     if (!lhs.region.mayOverlap(rhs.region))
                         continue;
 
+                    if (isRaceFreeAtomicPair(lhs, rhs))
+                        continue;
+
                     const EntrySet& lhsEntries = reachableEntriesByFunction.at(lhs.functionId);
                     const EntrySet& rhsEntries = reachableEntriesByFunction.at(rhs.functionId);
                     if (!mayRunConcurrently(lhsEntries, rhsEntries, facts))
@@ -308,7 +334,7 @@ namespace ctrace::concurrency::internal::analysis
 
             for (const AccessFact* access : accesses)
             {
-                if (access->kind != AccessKind::Write)
+                if (access->kind != AccessKind::Write || access->isAtomic)
                     continue;
 
                 const EntrySet& entries = reachableEntriesByFunction.at(access->functionId);
