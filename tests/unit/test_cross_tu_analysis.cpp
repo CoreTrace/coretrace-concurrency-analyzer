@@ -226,6 +226,61 @@ namespace
                           "an extern with no visible definition must not be reported");
     }
 
+    /// Existing single-unit fixtures, analysed as one-unit projects. The project mode adds
+    /// knowledge; it must never subtract any. This is what catches a cross-unit change quietly
+    /// losing a finding the single-unit path still makes.
+    bool testProjectModeKeepsEverySingleUnitFinding()
+    {
+        constexpr std::string_view kFixtures[] = {
+            "concurrency/data-race/data_race_basic.c",
+            "concurrency/data-race/data_race_mutex_protected.c",
+            "concurrency/deadlock/deadlock_basic.c",
+            "concurrency/deadlock/deadlock_consistent_order_no_diagnostic.c",
+            "concurrency/missing-join/missing_join_basic.c",
+            "concurrency/missing-join/pthread_join_all_no_missing_join.c",
+        };
+
+        bool ok = true;
+        for (const std::string_view fixture : kFixtures)
+        {
+            llvm::LLVMContext context;
+            CompileRequest request;
+            request.inputFile =
+                (std::filesystem::path(CORETRACE_PROJECT_SOURCE_DIR) / "tests/fixtures" / fixture)
+                    .string();
+            request.format = IRFormat::BC;
+
+            CompileResult compiled = InMemoryIRCompiler().compile(request, context);
+            if (!assertTrue(compiled.success && compiled.module != nullptr,
+                            std::string("fixture compiles: ") + std::string(fixture)))
+            {
+                ok = false;
+                continue;
+            }
+
+            const DiagnosticReport alone = SingleTUConcurrencyAnalyzer().analyze(*compiled.module);
+            const ProjectAnalysisReport asProject =
+                ProjectConcurrencyAnalyzer().analyze({compiled.module.get()});
+
+            ok = assertTrue(asProject.report.diagnostics.size() >= alone.diagnostics.size(),
+                            std::string("project mode keeps every finding of ") +
+                                std::string(fixture)) &&
+                 ok;
+
+            // A fixture with no diagnostic alone must stay clean: that is where a new false
+            // positive would show up.
+            if (alone.diagnostics.empty())
+            {
+                ok = assertTrue(asProject.report.diagnostics.empty(),
+                                std::string("project mode adds no finding to ") +
+                                    std::string(fixture)) &&
+                     ok;
+            }
+        }
+
+        return ok;
+    }
+
     /// An empty project is a valid input, not a crash.
     bool testEmptyProjectIsAnEmptyReport()
     {
@@ -246,6 +301,7 @@ int main()
     ok = testRepeatedUnitIsNotReportedTwice() && ok;
     ok = testExternGlobalDefinedInAnotherUnitIsTracked() && ok;
     ok = testUnresolvedExternIsNotTracked() && ok;
+    ok = testProjectModeKeepsEverySingleUnitFinding() && ok;
     ok = testEmptyProjectIsAnEmptyReport() && ok;
 
     if (!ok)
