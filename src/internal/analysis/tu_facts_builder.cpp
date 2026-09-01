@@ -441,8 +441,26 @@ namespace ctrace::concurrency::internal::analysis
 
         // Resolved once for the whole unit: a wrapper's effect on the lock it is handed does not
         // depend on which caller is being looked at.
-        const LockWrapperSummaries lockWrapperSummaries =
+        LockWrapperSummaries lockWrapperSummaries =
             collectLockWrapperSummaries(module, classifier, module.getDataLayout());
+
+        // A helper defined in another unit is only a declaration here, so its body cannot be
+        // summarised; the program supplies the summary the other unit produced.
+        if (crossTU)
+        {
+            for (const llvm::Function& function : module)
+            {
+                if (!function.isDeclaration())
+                    continue;
+
+                if (const std::vector<ParameterLockEffect>* summary =
+                        program->lockSummaryFor(function);
+                    summary != nullptr)
+                {
+                    lockWrapperSummaries.emplace(functionId(function), *summary);
+                }
+            }
+        }
 
         SharedAccessCollector accessCollector;
         std::vector<PendingAccess> pendingAccesses =
@@ -479,6 +497,7 @@ namespace ctrace::concurrency::internal::analysis
         TUFacts facts;
         facts.spawns = std::move(spawnFacts.spawns);
         facts.entryConcurrency = std::move(spawnFacts.entryConcurrency);
+        facts.lockWrapperSummaries = lockWrapperSummaries;
         facts.sequencedEntryPairs = taskConcurrency.sequencedEntryPairs;
 
         // Replace the raw spawn-site count by the number of instances that can actually be alive at

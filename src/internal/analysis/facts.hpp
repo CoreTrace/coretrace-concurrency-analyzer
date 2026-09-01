@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "lock_wrapper_summaries.hpp"
+
 #include "coretrace_concurrency_analysis.hpp"
 
 #include <cstdint>
@@ -242,6 +244,9 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<LockOrderFact> lockOrders;
         std::vector<ThreadLifecycleFact> threadLifecycles;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;
+        /// What each function of this unit does to the locks its callers hand it. Published so a
+        /// caller in another unit can see a helper defined here.
+        LockWrapperSummaries lockWrapperSummaries;
         std::unordered_map<std::string, ThreadEntrySet> reachableThreadEntriesByFunction;
         /// Locks whose runtime type or attributes allow recursive acquisition.
         std::unordered_set<std::string> recursiveLockIds;

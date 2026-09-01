@@ -26,6 +26,13 @@ namespace ctrace::concurrency::internal::analysis
         // `entryConcurrency` is already corrected by this module's own may-happen-in-parallel
         // analysis: two spawns on mutually exclusive branches count as one instance. Re-counting
         // spawn calls here would discard that verdict and report races the unit had ruled out.
+        for (const auto& [helperFunctionId, parameterEffects] : facts.lockWrapperSummaries)
+        {
+            const llvm::Function* helper = module.getFunction(helperFunctionId);
+            if (helper != nullptr && !helper->isDeclaration())
+                lockSummariesBySymbol_.emplace(programSymbol(*helper), parameterEffects);
+        }
+
         for (const auto& [entryFunctionId, concurrency] : facts.entryConcurrency)
         {
             const llvm::Function* entry = module.getFunction(entryFunctionId);
@@ -38,6 +45,13 @@ namespace ctrace::concurrency::internal::analysis
             spawns.instanceCount += concurrency.staticSpawnCount;
             spawns.insideLoop = spawns.insideLoop || concurrency.hasSpawnInLoop;
         }
+    }
+
+    const std::vector<ParameterLockEffect>*
+    ProgramSymbolIndex::lockSummaryFor(const llvm::Function& function) const
+    {
+        const auto it = lockSummariesBySymbol_.find(programSymbol(function));
+        return it == lockSummariesBySymbol_.end() ? nullptr : &it->second;
     }
 
     bool ProgramSymbolIndex::isThreadEntry(const llvm::Function& function) const

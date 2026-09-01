@@ -2,6 +2,7 @@
 #pragma once
 
 #include "internal/analysis/ir_utils.hpp"
+#include "internal/analysis/lock_wrapper_summaries.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -54,6 +55,11 @@ namespace ctrace::concurrency::internal::analysis
         /// describe real shared state rather than an unresolved symbol.
         [[nodiscard]] bool isDefinedSomewhere(const llvm::GlobalVariable& global) const;
 
+        /// Lock effects of a helper defined in some other unit, or null when no unit
+        /// summarises it.
+        [[nodiscard]] const std::vector<ParameterLockEffect>*
+        lockSummaryFor(const llvm::Function& function) const;
+
         [[nodiscard]] const ProgramDefinedGlobals& definedGlobals() const noexcept
         {
             return definedGlobals_;
@@ -61,7 +67,8 @@ namespace ctrace::concurrency::internal::analysis
 
         [[nodiscard]] bool empty() const noexcept
         {
-            return spawnSitesByEntry_.empty() && definedGlobals_.empty();
+            return spawnSitesByEntry_.empty() && definedGlobals_.empty() &&
+                   lockSummariesBySymbol_.empty();
         }
 
       private:
@@ -73,5 +80,6 @@ namespace ctrace::concurrency::internal::analysis
 
         std::unordered_map<std::string, EntrySpawns> spawnSitesByEntry_;
         ProgramDefinedGlobals definedGlobals_;
+        std::unordered_map<std::string, std::vector<ParameterLockEffect>> lockSummariesBySymbol_;
     };
 } // namespace ctrace::concurrency::internal::analysis

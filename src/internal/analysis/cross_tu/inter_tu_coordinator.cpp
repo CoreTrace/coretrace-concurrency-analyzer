@@ -53,6 +53,13 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                     return true;
             }
 
+            // A helper this unit only sees declared turns out to take a lock for its caller.
+            for (const llvm::Function& function : module)
+            {
+                if (function.isDeclaration() && index.lockSummaryFor(function) != nullptr)
+                    return true;
+            }
+
             for (const llvm::Function& function : module)
             {
                 if (function.isDeclaration() || !index.isThreadEntry(function))
