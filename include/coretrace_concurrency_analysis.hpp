@@ -46,6 +46,7 @@ namespace ctrace::concurrency
         ConditionWaitWithoutPredicate,
         ForkAfterThreadCreation,
         UnreapedChildProcess,
+        ThreadArgumentEscapesFrame,
     };
 
     enum class ConfidenceLevel
@@ -157,7 +158,8 @@ namespace ctrace::concurrency
             return AnalysisOptions{
                 .enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
                                  RuleId::DeadlockLockOrder, RuleId::ConditionWaitWithoutPredicate,
-                                 RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess}};
+                                 RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess,
+                                 RuleId::ThreadArgumentEscapesFrame}};
         }
     };
 
@@ -254,6 +256,8 @@ namespace ctrace::concurrency
             return "ForkAfterThreadCreation";
         case RuleId::UnreapedChildProcess:
             return "UnreapedChildProcess";
+        case RuleId::ThreadArgumentEscapesFrame:
+            return "ThreadArgumentEscapesFrame";
         }
         return "UnknownRule";
     }

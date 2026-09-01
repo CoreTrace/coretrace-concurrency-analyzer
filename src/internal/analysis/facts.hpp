@@ -254,6 +254,15 @@ namespace ctrace::concurrency::internal::analysis
         bool viaHelper = false;
     };
 
+    /// A thread handed a pointer into the frame that created it, with nothing keeping that
+    /// frame alive until the thread is done with it.
+    struct ThreadArgumentEscapeFact
+    {
+        std::string functionId;
+        std::string entryFunctionId;
+        SourceLocation location;
+    };
+
     /// A place where the program duplicates itself.
     struct ProcessForkFact
     {
@@ -273,6 +282,7 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<ThreadLifecycleFact> threadLifecycles;
         std::vector<ConditionWaitFact> conditionWaits;
         std::vector<ProcessForkFact> processForks;
+        std::vector<ThreadArgumentEscapeFact> threadArgumentEscapes;
         /// Some part of the program collects its terminated children.
         bool reapsChildProcesses = false;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;

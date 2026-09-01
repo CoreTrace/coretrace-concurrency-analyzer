@@ -75,7 +75,8 @@ namespace ctrace::concurrency
         }
 
         if (options_.isEnabled(RuleId::ForkAfterThreadCreation) ||
-            options_.isEnabled(RuleId::UnreapedChildProcess))
+            options_.isEnabled(RuleId::UnreapedChildProcess) ||
+            options_.isEnabled(RuleId::ThreadArgumentEscapesFrame))
         {
             internal::analysis::ProcessLifecycleChecker processChecker;
             DiagnosticReport processReport = processChecker.run(facts);

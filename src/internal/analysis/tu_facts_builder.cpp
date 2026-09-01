@@ -15,6 +15,7 @@
 #include "task_concurrency_analyzer.hpp"
 #include "thread_lifecycle_collector.hpp"
 #include "thread_spawn_detector.hpp"
+#include "thread_argument_escape_collector.hpp"
 #include "thread_context_propagator.hpp"
 
 #include "synchronization_effects.hpp"
@@ -601,6 +602,8 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
         }
+
+        facts.threadArgumentEscapes = ThreadArgumentEscapeCollector(classifier).collect(module);
 
         // A fork whose child goes on to replace its process image inherits nothing that
         // outlives the exec, so neither question this analysis asks about a fork applies to it.

@@ -86,6 +86,8 @@ namespace
                     return "fork-after-thread";
                 case ctrace::concurrency::RuleId::UnreapedChildProcess:
                     return "unreaped-child";
+                case ctrace::concurrency::RuleId::ThreadArgumentEscapesFrame:
+                    return "thread-arg-escape";
                 case ctrace::concurrency::RuleId::DeadlockLockOrder:
                     return "deadlock-lock-order";
                 case ctrace::concurrency::RuleId::CompilerDiagnostic:
@@ -173,6 +175,8 @@ namespace
             return "fork-after-thread";
         case RuleId::UnreapedChildProcess:
             return "unreaped-child";
+        case RuleId::ThreadArgumentEscapesFrame:
+            return "thread-arg-escape";
         case RuleId::CompilerDiagnostic:
             return "compiler-diagnostic";
         }
@@ -216,6 +220,12 @@ namespace
         if (value == "unreaped-child")
         {
             out = RuleId::UnreapedChildProcess;
+            return true;
+        }
+
+        if (value == "thread-arg-escape")
+        {
+            out = RuleId::ThreadArgumentEscapesFrame;
             return true;
         }
 

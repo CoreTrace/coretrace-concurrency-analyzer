@@ -99,6 +99,21 @@ namespace ctrace::concurrency::internal::diagnostics
                 },
         };
 
+        static const RuleMetadata kThreadArgumentEscapesFrame{
+            .ruleId = RuleId::ThreadArgumentEscapesFrame,
+            .title = "Thread argument points into the frame that created it",
+            .shortDescription =
+                "Detects a thread started with a pointer to a local variable of a function that "
+                "returns without waiting for it.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "562",
+                    .title = "Return of Stack Variable Address",
+                },
+        };
+
         switch (ruleId)
         {
         case RuleId::CompilerDiagnostic:
@@ -115,6 +130,8 @@ namespace ctrace::concurrency::internal::diagnostics
             return kForkAfterThreadCreation;
         case RuleId::UnreapedChildProcess:
             return kUnreapedChildProcess;
+        case RuleId::ThreadArgumentEscapesFrame:
+            return kThreadArgumentEscapesFrame;
         }
 
         return kCompilerDiagnostic;

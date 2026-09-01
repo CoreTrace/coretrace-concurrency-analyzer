@@ -50,6 +50,25 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        for (const ThreadArgumentEscapeFact& escape : facts.threadArgumentEscapes)
+        {
+            DiagnosticBuilder builder(report, RuleId::ThreadArgumentEscapesFrame);
+            builder.primaryLocation(escape.location)
+                .message("thread is given a pointer into the frame that created it")
+                .note("the argument is a local variable of this function, and no join stands "
+                      "between the creation and every way out: the frame is gone while the "
+                      "thread still reads it")
+                .note("either join before returning, or give the thread storage that outlives "
+                      "the call")
+                .taxonomy("CERT", "DCL30-C", "Declare objects with appropriate storage durations")
+                .property("function", escape.functionId);
+
+            if (!escape.entryFunctionId.empty())
+                builder.property("entry", escape.entryFunctionId);
+
+            builder.emit();
+        }
+
         finalizeReport(report, facts);
         return report;
     }
