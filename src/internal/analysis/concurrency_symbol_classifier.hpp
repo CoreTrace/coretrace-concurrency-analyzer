@@ -20,12 +20,29 @@ namespace ctrace::concurrency::internal::analysis
         PThreadDetach,
         PThreadMutexLock,
         PThreadMutexUnlock,
+        PThreadMutexTryLock,
+        PThreadRwLockAcquire,
+        PThreadRwLockTryAcquire,
+        PThreadRwLockUnlock,
+        PThreadSpinLock,
+        PThreadSpinUnlock,
+        PThreadSpinTryLock,
+        PThreadMutexInit,
+        PThreadMutexAttrSetType,
         StdThreadCtor,
         StdThreadMove,
         StdThreadJoin,
         StdThreadDetach,
+        StdThreadDtor,
+        StdJThreadCtor,
         StdMutexLock,
         StdMutexUnlock,
+        StdMutexTryLock,
+        /// RAII guard constructor (`lock_guard`, `unique_lock`, `scoped_lock`, `shared_lock`).
+        StdLockGuardCtor,
+        /// RAII guard constructor with a `defer_lock` tag, which does not acquire.
+        StdLockGuardDeferredCtor,
+        StdLockGuardDtor,
     };
 
     class ConcurrencySymbolClassifier
@@ -33,6 +50,10 @@ namespace ctrace::concurrency::internal::analysis
       public:
         [[nodiscard]] const llvm::Function* directCallee(const llvm::CallBase& call) const;
         [[nodiscard]] CallKind classify(const llvm::CallBase& call) const;
+        /// True when the call targets a lock type that its owner may reacquire. Read from the
+        /// callee symbol because a standard library may lower the lock to an unnamed struct,
+        /// leaving the type name visible only in the mangled member function.
+        [[nodiscard]] bool targetsRecursiveLock(const llvm::CallBase& call) const;
         [[nodiscard]] static std::string_view toString(CallKind kind);
     };
 } // namespace ctrace::concurrency::internal::analysis

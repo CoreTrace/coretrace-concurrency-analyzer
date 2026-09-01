@@ -8,12 +8,17 @@
 #include "lock_scope_tracker.hpp"
 #include "lock_state_propagator.hpp"
 #include "shared_access_collector.hpp"
+#include "task_concurrency_analyzer.hpp"
 #include "thread_lifecycle_collector.hpp"
 #include "thread_spawn_detector.hpp"
 #include "thread_context_propagator.hpp"
 
+#include "synchronization_effects.hpp"
+
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
@@ -41,7 +46,16 @@ namespace ctrace::concurrency::internal::analysis
             std::unordered_map<unsigned, RootBinding> argumentBindings;
             SourceLocation callsiteLocation;
             std::set<std::string> callsiteHeldLocks;
+            bool callerInRootTask = false;
+            ThreadEntrySet callsiteLiveEntries;
         };
+
+        ThreadEntrySet mergeLiveEntries(const ThreadEntrySet& lhs, const ThreadEntrySet& rhs)
+        {
+            ThreadEntrySet merged = lhs;
+            merged.insert(rhs.begin(), rhs.end());
+            return merged;
+        }
 
         struct LifecycleArgumentBinding
         {
@@ -52,15 +66,16 @@ namespace ctrace::concurrency::internal::analysis
         std::string rootBindingKey(const RootBinding& binding)
         {
             if (binding.kind == RootBindingKind::Global)
-                return "global:" + binding.symbol;
+                return "global:" + binding.symbol + binding.region.suffix();
 
-            return "argument:" + std::to_string(binding.argumentIndex);
+            return "argument:" + std::to_string(binding.argumentIndex) + binding.region.suffix();
         }
 
         std::string accessFactKey(const AccessFact& fact)
         {
             std::ostringstream stream;
-            stream << fact.symbol << "|" << fact.functionId << "|" << toString(fact.kind) << "|"
+            stream << fact.symbol << fact.region.suffix() << "|" << fact.functionId << "|"
+                   << toString(fact.kind) << "|" << (fact.isAtomic ? "atomic" : "plain") << "|"
                    << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.file << "|"
                    << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
                    << fact.loweredLocation.function;
@@ -112,9 +127,10 @@ namespace ctrace::concurrency::internal::analysis
         std::string projectedAccessPreferenceKey(const AccessFact& fact)
         {
             std::ostringstream stream;
-            stream << fact.symbol << "|" << toString(fact.kind) << "|" << fact.loweredLocation.file
-                   << "|" << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.line
-                   << "|" << fact.loweredLocation.column << "|" << fact.loweredLocation.function;
+            stream << fact.symbol << fact.region.suffix() << "|" << toString(fact.kind) << "|"
+                   << fact.loweredLocation.file << "|" << toString(fact.aliasProvenance) << "|"
+                   << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
+                   << fact.loweredLocation.function;
 
             for (const std::string& lock : fact.heldLocks)
                 stream << "|lock:" << lock;
@@ -255,9 +271,110 @@ namespace ctrace::concurrency::internal::analysis
             return merged;
         }
 
+        /// Locks that may legally be reacquired by their owner: `std::recursive_mutex` and friends,
+        /// recognized by type, plus any `pthread_mutex_t` initialized with a non-default type
+        /// attribute. `PTHREAD_MUTEX_NORMAL` is zero on every supported platform, so a non-zero
+        /// setting selects either recursive or error-checking behaviour, neither of which
+        /// deadlocks on reacquisition.
+        std::unordered_set<std::string>
+        collectRecursiveLockIds(const llvm::Module& module,
+                                const ConcurrencySymbolClassifier& classifier)
+        {
+            constexpr unsigned kAttrOperandIndex = 0;
+            constexpr unsigned kAttrTypeOperandIndex = 1;
+            constexpr unsigned kMutexOperandIndex = 0;
+            constexpr unsigned kInitAttrOperandIndex = 1;
+
+            const SynchronizationEffectResolver effectResolver(classifier, module.getDataLayout());
+            std::unordered_set<std::string> recursiveLockIds;
+
+            // Recursiveness belongs to the object's type, so it is read from the global itself
+            // rather than from an acquisition site. A standard library that wraps the lock in
+            // another layer hides the type at the call, but never on the definition.
+            for (const llvm::GlobalVariable& global : module.globals())
+            {
+                if (!designatesRecursiveLockType(global))
+                    continue;
+
+                if (const auto lockId = canonicalLockId(global, &module.getDataLayout());
+                    lockId.has_value())
+                {
+                    recursiveLockIds.insert(*lockId);
+                }
+            }
+            std::unordered_set<std::string> nonDefaultAttributeGroups;
+            std::vector<const llvm::CallBase*> mutexInitCalls;
+
+            for (const llvm::Function& function : module)
+            {
+                if (function.isDeclaration())
+                    continue;
+
+                for (const llvm::BasicBlock& block : function)
+                {
+                    for (const llvm::Instruction& instruction : block)
+                    {
+                        const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                        if (call == nullptr || call->arg_size() == 0)
+                            continue;
+
+                        for (const LockEffect& effect : effectResolver.resolve(*call))
+                        {
+                            if (!effect.recursiveLock)
+                                continue;
+
+                            recursiveLockIds.insert(effect.lockIds.begin(), effect.lockIds.end());
+                        }
+
+                        const CallKind kind = classifier.classify(*call);
+                        if (kind == CallKind::PThreadMutexAttrSetType &&
+                            call->arg_size() > kAttrTypeOperandIndex)
+                        {
+                            const auto* attributeType = llvm::dyn_cast<llvm::ConstantInt>(
+                                call->getArgOperand(kAttrTypeOperandIndex));
+                            if (attributeType == nullptr || attributeType->isZero())
+                                continue;
+
+                            if (const auto attrGroup = canonicalStorageGroupId(
+                                    *call->getArgOperand(kAttrOperandIndex));
+                                attrGroup.has_value())
+                            {
+                                nonDefaultAttributeGroups.insert(*attrGroup);
+                            }
+                            continue;
+                        }
+
+                        if (kind == CallKind::PThreadMutexInit &&
+                            call->arg_size() > kInitAttrOperandIndex)
+                        {
+                            mutexInitCalls.push_back(call);
+                        }
+                    }
+                }
+            }
+
+            for (const llvm::CallBase* call : mutexInitCalls)
+            {
+                const auto attrGroup =
+                    canonicalStorageGroupId(*call->getArgOperand(kInitAttrOperandIndex));
+                if (!attrGroup.has_value() || !nonDefaultAttributeGroups.contains(*attrGroup))
+                    continue;
+
+                if (const auto lockId = canonicalLockId(*call->getArgOperand(kMutexOperandIndex),
+                                                        &module.getDataLayout());
+                    lockId.has_value())
+                {
+                    recursiveLockIds.insert(*lockId);
+                }
+            }
+
+            return recursiveLockIds;
+        }
+
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
-            const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall)
+            const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
+            const TaskConcurrencyResult& taskConcurrency)
         {
             std::vector<DirectCallBinding> bindings;
 
@@ -271,6 +388,13 @@ namespace ctrace::concurrency::internal::analysis
                 binding.callerFunctionId = site.callerFunctionId;
                 binding.calleeFunctionId = site.calleeFunctionId;
                 binding.callsiteLocation = site.userLocation;
+                binding.callerInRootTask =
+                    taskConcurrency.rootTaskFunctions.contains(site.callerFunctionId);
+                if (const auto liveIt = taskConcurrency.liveEntriesAtInstruction.find(site.call);
+                    liveIt != taskConcurrency.liveEntriesAtInstruction.end())
+                {
+                    binding.callsiteLiveEntries = liveIt->second;
+                }
                 if (const auto heldLocksIt = heldLocksByCall.find(site.call);
                     heldLocksIt != heldLocksByCall.end())
                 {
@@ -331,10 +455,27 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         ThreadContextPropagator threadContextPropagator(classifier);
+        const TaskConcurrencyAnalyzer taskConcurrencyAnalyzer(classifier);
+        const TaskConcurrencyResult taskConcurrency =
+            taskConcurrencyAnalyzer.analyze(module, directCallSites);
 
         TUFacts facts;
         facts.spawns = std::move(spawnFacts.spawns);
         facts.entryConcurrency = std::move(spawnFacts.entryConcurrency);
+        facts.sequencedEntryPairs = taskConcurrency.sequencedEntryPairs;
+
+        // Replace the raw spawn-site count by the number of instances that can actually be alive at
+        // once: two spawn sites on mutually exclusive branches, or a spawn/join pair repeated
+        // sequentially, never yield two concurrent instances.
+        for (auto& [entryId, concurrency] : facts.entryConcurrency)
+        {
+            if (concurrency.staticSpawnCount >= 2 &&
+                !taskConcurrency.overlappingSpawnEntries.contains(entryId))
+            {
+                concurrency.staticSpawnCount = 1;
+            }
+        }
+
         facts.reachableThreadEntriesByFunction =
             threadContextPropagator.collect(module, facts.entryConcurrency);
 
@@ -374,6 +515,7 @@ namespace ctrace::concurrency::internal::analysis
 
                     ThreadLifecycleFact propagated = fact;
                     propagated.functionId = callSite.callerFunctionId;
+                    propagated.propagated = true;
                     propagated.handleGroupId = *callerGroup + binding->suffix;
                     if (fact.sourceHandleGroupId.has_value())
                     {
@@ -425,11 +567,18 @@ namespace ctrace::concurrency::internal::analysis
                 functionEntryLocks = entryLocksIt->second;
             }
 
-            std::vector<LockOrderFact> functionLockOrders =
-                lockOrderCollector.collect(function, functionEntryLocks);
+            const bool inRootTask =
+                taskConcurrency.rootTaskFunctions.contains(functionId(function));
+            std::vector<LockOrderFact> functionLockOrders = lockOrderCollector.collect(
+                function, functionEntryLocks, taskConcurrency.liveEntriesAtInstruction);
+            for (LockOrderFact& lockOrder : functionLockOrders)
+                lockOrder.inRootTask = inRootTask;
+
             facts.lockOrders.insert(facts.lockOrders.end(), functionLockOrders.begin(),
                                     functionLockOrders.end());
         }
+
+        facts.recursiveLockIds = collectRecursiveLockIds(module, classifier);
 
         for (PendingAccess& pendingAccess : pendingAccesses)
         {
@@ -445,15 +594,26 @@ namespace ctrace::concurrency::internal::analysis
                     mergeHeldLocks(pendingAccess.fact.heldLocks, entryLocksIt->second);
             }
 
+            if (const auto liveIt =
+                    taskConcurrency.liveEntriesAtInstruction.find(pendingAccess.instruction);
+                liveIt != taskConcurrency.liveEntriesAtInstruction.end())
+            {
+                pendingAccess.fact.liveEntries = liveIt->second;
+            }
+            pendingAccess.fact.inRootTask =
+                taskConcurrency.rootTaskFunctions.contains(pendingAccess.fact.functionId);
+
             if (pendingAccess.root.kind == RootBindingKind::Global)
             {
                 pendingAccess.fact.symbol = pendingAccess.root.symbol;
+                pendingAccess.fact.region = pendingAccess.root.region;
                 addConcreteAccess(concreteAccesses, concreteAccessKeys,
                                   std::move(pendingAccess.fact));
                 continue;
             }
 
             const std::string functionKey = pendingAccess.fact.functionId;
+            pendingAccess.fact.region = pendingAccess.root.region;
             pendingAccess.fact.allowCallsiteProjection = true;
             addParameterizedAccess(summariesByFunction, summaryKeysByFunction, functionKey,
                                    ParameterizedAccess{
@@ -462,8 +622,8 @@ namespace ctrace::concurrency::internal::analysis
                                    });
         }
 
-        const std::vector<DirectCallBinding> directCallBindings =
-            buildDirectCallBindings(directCallSites, lockPropagation.effectiveHeldLocksByCall);
+        const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
+            directCallSites, lockPropagation.effectiveHeldLocksByCall, taskConcurrency);
 
         bool changed = true;
         while (changed)
@@ -492,8 +652,14 @@ namespace ctrace::concurrency::internal::analysis
                         AccessFact concrete = access.fact;
                         concrete.functionId = callBinding.callerFunctionId;
                         concrete.symbol = bindingIt->second.symbol;
+                        // The callee's region is relative to the argument, which the call site
+                        // itself may already have indexed into.
+                        concrete.region = access.fact.region.rebasedOn(bindingIt->second.region);
                         concrete.heldLocks =
                             mergeHeldLocks(concrete.heldLocks, callBinding.callsiteHeldLocks);
+                        concrete.inRootTask = callBinding.callerInRootTask;
+                        concrete.liveEntries =
+                            mergeLiveEntries(concrete.liveEntries, callBinding.callsiteLiveEntries);
                         concrete.allowCallsiteProjection = true;
                         if (shouldRemapAccessToCallsite(concrete, callBinding.callsiteLocation))
                         {
@@ -509,9 +675,15 @@ namespace ctrace::concurrency::internal::analysis
                         .root = bindingIt->second,
                         .fact = access.fact,
                     };
+                    propagatedAccess.root.region =
+                        access.fact.region.rebasedOn(bindingIt->second.region);
                     propagatedAccess.fact.functionId = callBinding.callerFunctionId;
+                    propagatedAccess.fact.region = propagatedAccess.root.region;
                     propagatedAccess.fact.heldLocks = mergeHeldLocks(
                         propagatedAccess.fact.heldLocks, callBinding.callsiteHeldLocks);
+                    propagatedAccess.fact.inRootTask = callBinding.callerInRootTask;
+                    propagatedAccess.fact.liveEntries = mergeLiveEntries(
+                        propagatedAccess.fact.liveEntries, callBinding.callsiteLiveEntries);
                     if (shouldRemapAccessToCallsite(propagatedAccess.fact,
                                                     callBinding.callsiteLocation))
                     {
@@ -547,6 +719,9 @@ namespace ctrace::concurrency::internal::analysis
                     remapped.functionId = callBinding.callerFunctionId;
                     remapped.heldLocks =
                         mergeHeldLocks(remapped.heldLocks, callBinding.callsiteHeldLocks);
+                    remapped.inRootTask = callBinding.callerInRootTask;
+                    remapped.liveEntries =
+                        mergeLiveEntries(remapped.liveEntries, callBinding.callsiteLiveEntries);
                     remapped.userLocation = callBinding.callsiteLocation;
                     if (remapped.userLocation.file != remapped.loweredLocation.file)
                         remapped.allowCallsiteProjection = false;

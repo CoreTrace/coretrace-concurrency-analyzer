@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <vector>
@@ -24,6 +25,18 @@ namespace ctrace::concurrency::internal::analysis
             std::size_t createCount = 0;
             std::size_t joinCount = 0;
             std::size_t detachCount = 0;
+            /// Set when some creation is not followed by a join or detach on every path, when a
+            /// creation loops while its resolution does not, or when the handle escapes into
+            /// storage the analysis cannot name. The first two report despite balanced counts; the
+            /// third suppresses the report.
+            bool hasUnresolvedPath = false;
+            bool hasLoopedCreate = false;
+            bool hasEscapedHandle = false;
+            /// Every create in the group provably reaches a join or a detach on all paths.
+            bool allCreatesResolvedOnAllPaths = true;
+            /// False once the group spans several functions, is aliased by a move, or carries a
+            /// propagated fact: the intraprocedural path conclusions no longer describe it.
+            bool pathAnalysisApplies = true;
         };
 
         class HandleGroupAliases
@@ -98,15 +111,24 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         std::map<std::string, LifecycleSummary> summariesByGroup;
+        std::map<std::string, std::set<std::string>> functionsByGroup;
         for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
         {
             if (fact.action == ThreadLifecycleAction::Move)
+            {
+                // A move ties two storages together; the intraprocedural resolution search only
+                // looked at one of them.
+                summariesByGroup[aliases.find(fact.handleGroupId)].pathAnalysisApplies = false;
                 continue;
+            }
 
             const std::string groupId = aliases.find(fact.handleGroupId);
             LifecycleSummary& summary = summariesByGroup[groupId];
             summary.handleKind = fact.handleKind;
             summary.functionId = fact.functionId;
+            functionsByGroup[groupId].insert(fact.functionId);
+            if (fact.propagated)
+                summary.pathAnalysisApplies = false;
             if (summary.firstCreateLocation.file.empty() && summary.firstCreateLocation.line == 0 &&
                 fact.action == ThreadLifecycleAction::Create)
             {
@@ -117,6 +139,12 @@ namespace ctrace::concurrency::internal::analysis
             {
             case ThreadLifecycleAction::Create:
                 ++summary.createCount;
+                summary.hasUnresolvedPath = summary.hasUnresolvedPath || !fact.resolvedOnAllPaths;
+                summary.allCreatesResolvedOnAllPaths =
+                    summary.allCreatesResolvedOnAllPaths && fact.resolvedOnAllPaths;
+                summary.hasLoopedCreate = summary.hasLoopedCreate || fact.insideLoop;
+                summary.hasEscapedHandle =
+                    summary.hasEscapedHandle || fact.escapedToUntrackedStorage;
                 if (summary.firstCreateLocation.file.empty() &&
                     summary.firstCreateLocation.line == 0)
                     summary.firstCreateLocation = fact.location;
@@ -132,24 +160,61 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        for (auto& [groupId, summary] : summariesByGroup)
+        {
+            if (functionsByGroup[groupId].size() > 1)
+                summary.pathAnalysisApplies = false;
+        }
+
         DiagnosticReport report;
         for (const auto& [groupId, summary] : summariesByGroup)
         {
             if (groupId.starts_with("arg:"))
                 continue;
 
-            const std::size_t resolvedCount = summary.joinCount + summary.detachCount;
-            if (summary.createCount <= resolvedCount)
+            // A handle moved into storage the analysis cannot name may well be joined through it;
+            // reporting would be a guess rather than a finding.
+            if (summary.hasEscapedHandle)
                 continue;
 
-            const std::size_t outstandingCount = summary.createCount - resolvedCount;
-            DiagnosticBuilder(report, RuleId::MissingJoin)
-                .primaryLocation(summary.firstCreateLocation)
+            const std::size_t resolvedCount = summary.joinCount + summary.detachCount;
+            const bool unbalanced = summary.createCount > resolvedCount;
+
+            // Counts can be unbalanced while every handle is still resolved: two creations on
+            // mutually exclusive branches share the single join that follows them.
+            if (unbalanced && summary.createCount != 0 && summary.allCreatesResolvedOnAllPaths &&
+                !summary.hasLoopedCreate)
+            {
+                continue;
+            }
+
+            const bool pathSignal = summary.pathAnalysisApplies &&
+                                    (summary.hasUnresolvedPath || summary.hasLoopedCreate) &&
+                                    summary.createCount != 0;
+            if (!unbalanced && !pathSignal)
+                continue;
+
+            const std::size_t outstandingCount =
+                unbalanced ? summary.createCount - resolvedCount : 1;
+            DiagnosticBuilder builder(report, RuleId::MissingJoin);
+            builder.primaryLocation(summary.firstCreateLocation)
                 .message("thread handle is not joined or detached before scope exit")
                 .note("handle kind: " + handleKindLabel(summary.handleKind))
                 .note("lifecycle summary: " + describeSummary(summary))
-                .note("outstanding joinable handles: " + std::to_string(outstandingCount))
-                .property("handleKind", handleKindLabel(summary.handleKind))
+                .note("outstanding joinable handles: " + std::to_string(outstandingCount));
+
+            if (!unbalanced && summary.hasLoopedCreate)
+            {
+                builder.note("the handle is created inside a loop while it is resolved outside it, "
+                             "so every iteration but the last leaks its thread");
+            }
+            else if (!unbalanced && summary.hasUnresolvedPath)
+            {
+                builder.note("at least one path leaves the creation without reaching a join or a "
+                             "detach");
+            }
+
+            builder.property("handleKind", handleKindLabel(summary.handleKind))
                 .property("createCount", static_cast<std::int64_t>(summary.createCount))
                 .property("joinCount", static_cast<std::int64_t>(summary.joinCount))
                 .property("detachCount", static_cast<std::int64_t>(summary.detachCount))

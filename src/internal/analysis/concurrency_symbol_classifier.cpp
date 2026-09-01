@@ -5,23 +5,79 @@
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Value.h>
 
+#include <cctype>
+#include <string>
+
 namespace ctrace::concurrency::internal::analysis
 {
     namespace
     {
-        llvm::StringRef canonicalName(const llvm::Function& function)
+        /// Removes Itanium ABI tags (`B<length><chars>`, as in `threadC1B8ne200100Ev`) so that the
+        /// structural substrings below match the same way on a tagged and an untagged build.
+        /// libc++ tags every function hidden from its ABI, which is most of `<thread>` and
+        /// `<mutex>`.
+        std::string stripAbiTags(llvm::StringRef name)
+        {
+            std::string stripped;
+            stripped.reserve(name.size());
+
+            for (std::size_t index = 0; index < name.size();)
+            {
+                if (name[index] != 'B' || index + 1 >= name.size() ||
+                    std::isdigit(static_cast<unsigned char>(name[index + 1])) == 0)
+                {
+                    stripped.push_back(name[index]);
+                    ++index;
+                    continue;
+                }
+
+                std::size_t digitsEnd = index + 1;
+                while (digitsEnd < name.size() &&
+                       std::isdigit(static_cast<unsigned char>(name[digitsEnd])) != 0)
+                {
+                    ++digitsEnd;
+                }
+
+                const std::size_t tagLength =
+                    std::stoul(name.substr(index + 1, digitsEnd - index - 1).str());
+                if (digitsEnd + tagLength > name.size())
+                {
+                    stripped.push_back(name[index]);
+                    ++index;
+                    continue;
+                }
+
+                index = digitsEnd + tagLength;
+            }
+
+            return stripped;
+        }
+
+        std::string canonicalName(const llvm::Function& function)
         {
             llvm::StringRef name = function.getName();
             if (name.starts_with("\x01"))
                 name = name.drop_front();
             if (name.starts_with("\\01"))
                 name = name.drop_front(3);
-            return name;
+
+            // Plain C symbols carry no tags; stripping is a no-op for them.
+            return name.starts_with("_Z") ? stripAbiTags(name) : name.str();
+        }
+
+        /// Itanium-mangled entities declared in namespace `std` start with `_ZNSt`/`_ZNKSt`
+        /// (libstdc++) or embed the inline versioning namespace (`_ZNSt3__1`, libc++). Gating the
+        /// substring heuristics on this prevents a user type whose name merely contains "thread" or
+        /// "mutex" from being mistaken for a standard library primitive.
+        bool isStdNamespaceSymbol(llvm::StringRef name)
+        {
+            return name.starts_with("_ZNSt") || name.starts_with("_ZNKSt") ||
+                   name.starts_with("_ZSt") || name.starts_with("_ZNVSt");
         }
 
         bool isStdThreadCtor(llvm::StringRef name)
         {
-            if (!name.contains("thread"))
+            if (!isStdNamespaceSymbol(name) || !name.contains("thread"))
                 return false;
 
             const bool isCtor = name.contains("threadC1") || name.contains("threadC2");
@@ -40,14 +96,50 @@ namespace ctrace::concurrency::internal::analysis
             return true;
         }
 
+        /// `std::jthread` joins in its destructor, so its construction must not be reported as an
+        /// unjoined handle. Its mangling contains "threadC1"/"threadC2" and would otherwise be
+        /// classified as a plain `std::thread` constructor.
+        bool isStdJThreadCtor(llvm::StringRef name)
+        {
+            return isStdNamespaceSymbol(name) && name.contains("jthread") &&
+                   (name.contains("threadC1") || name.contains("threadC2"));
+        }
+
         bool isStdThreadMove(llvm::StringRef name)
         {
-            if (!name.contains("thread") || (!name.contains("EOS0_") && !name.contains("EOS_")))
+            if (!isStdNamespaceSymbol(name) || !name.contains("thread") ||
+                (!name.contains("EOS0_") && !name.contains("EOS_")))
+            {
                 return false;
+            }
 
             const bool isMoveCtor = name.contains("threadC1") || name.contains("threadC2");
             const bool isMoveAssignment = name.contains("threadaS");
             return isMoveCtor || isMoveAssignment;
+        }
+
+        bool isLockGuardTemplate(llvm::StringRef name)
+        {
+            return name.contains("lock_guard") || name.contains("unique_lock") ||
+                   name.contains("scoped_lock") || name.contains("shared_lock");
+        }
+
+        bool isStdLockGuardCtor(llvm::StringRef name)
+        {
+            return isStdNamespaceSymbol(name) && isLockGuardTemplate(name) &&
+                   (name.contains("C1E") || name.contains("C2E"));
+        }
+
+        /// `unique_lock(m, std::defer_lock)` stores the mutex without locking it.
+        bool isDeferredLockGuardCtor(llvm::StringRef name)
+        {
+            return name.contains("defer_lock");
+        }
+
+        bool isStdLockGuardDtor(llvm::StringRef name)
+        {
+            return isStdNamespaceSymbol(name) && isLockGuardTemplate(name) &&
+                   (name.contains("D1Ev") || name.contains("D2Ev"));
         }
 
         bool matchesPlainSymbol(llvm::StringRef actual, llvm::StringRef expected)
@@ -58,22 +150,46 @@ namespace ctrace::concurrency::internal::analysis
 
         bool isStdMutexLock(llvm::StringRef name)
         {
-            return name.contains("mutex") && name.contains("4lockEv");
+            if (!isStdNamespaceSymbol(name) || !name.contains("mutex"))
+                return false;
+
+            return name.contains("4lockEv") || name.contains("11lock_sharedEv");
         }
 
         bool isStdMutexUnlock(llvm::StringRef name)
         {
-            return name.contains("mutex") && name.contains("6unlockEv");
+            if (!isStdNamespaceSymbol(name) || !name.contains("mutex"))
+                return false;
+
+            return name.contains("6unlockEv") || name.contains("13unlock_sharedEv");
+        }
+
+        bool isStdMutexTryLock(llvm::StringRef name)
+        {
+            if (!isStdNamespaceSymbol(name) || !name.contains("mutex"))
+                return false;
+
+            return name.contains("8try_lockEv") || name.contains("15try_lock_sharedEv");
         }
 
         bool isStdThreadJoin(llvm::StringRef name)
         {
-            return name.contains("thread") && name.contains("4joinEv");
+            return isStdNamespaceSymbol(name) && name.contains("thread") &&
+                   name.contains("4joinEv");
+        }
+
+        /// `~thread()` neither joins nor detaches; it terminates when the handle is still
+        /// joinable. It is recognized only so that it is not mistaken for an ownership transfer.
+        bool isStdThreadDtor(llvm::StringRef name)
+        {
+            return isStdNamespaceSymbol(name) && name.contains("thread") &&
+                   (name.contains("threadD1") || name.contains("threadD2"));
         }
 
         bool isStdThreadDetach(llvm::StringRef name)
         {
-            return name.contains("thread") && name.contains("6detachEv");
+            return isStdNamespaceSymbol(name) && name.contains("thread") &&
+                   name.contains("6detachEv");
         }
     } // namespace
 
@@ -88,13 +204,25 @@ namespace ctrace::concurrency::internal::analysis
         return llvm::dyn_cast<llvm::Function>(calledOperand);
     }
 
+    bool ConcurrencySymbolClassifier::targetsRecursiveLock(const llvm::CallBase& call) const
+    {
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr)
+            return false;
+
+        const std::string canonical = canonicalName(*callee);
+        return llvm::StringRef(canonical).contains("recursive_mutex") ||
+               llvm::StringRef(canonical).contains("recursive_timed_mutex");
+    }
+
     CallKind ConcurrencySymbolClassifier::classify(const llvm::CallBase& call) const
     {
         const llvm::Function* callee = directCallee(call);
         if (callee == nullptr)
             return CallKind::Unknown;
 
-        const llvm::StringRef name = canonicalName(*callee);
+        const std::string canonical = canonicalName(*callee);
+        const llvm::StringRef name = canonical;
         if (matchesPlainSymbol(name, "pthread_create"))
             return CallKind::PThreadCreate;
         if (matchesPlainSymbol(name, "pthread_join"))
@@ -105,6 +233,31 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::PThreadMutexLock;
         if (matchesPlainSymbol(name, "pthread_mutex_unlock"))
             return CallKind::PThreadMutexUnlock;
+        if (matchesPlainSymbol(name, "pthread_mutex_trylock") ||
+            matchesPlainSymbol(name, "pthread_mutex_timedlock"))
+            return CallKind::PThreadMutexTryLock;
+        if (matchesPlainSymbol(name, "pthread_rwlock_rdlock") ||
+            matchesPlainSymbol(name, "pthread_rwlock_wrlock"))
+            return CallKind::PThreadRwLockAcquire;
+        if (matchesPlainSymbol(name, "pthread_rwlock_tryrdlock") ||
+            matchesPlainSymbol(name, "pthread_rwlock_trywrlock") ||
+            matchesPlainSymbol(name, "pthread_rwlock_timedrdlock") ||
+            matchesPlainSymbol(name, "pthread_rwlock_timedwrlock"))
+            return CallKind::PThreadRwLockTryAcquire;
+        if (matchesPlainSymbol(name, "pthread_rwlock_unlock"))
+            return CallKind::PThreadRwLockUnlock;
+        if (matchesPlainSymbol(name, "pthread_spin_lock"))
+            return CallKind::PThreadSpinLock;
+        if (matchesPlainSymbol(name, "pthread_spin_unlock"))
+            return CallKind::PThreadSpinUnlock;
+        if (matchesPlainSymbol(name, "pthread_spin_trylock"))
+            return CallKind::PThreadSpinTryLock;
+        if (matchesPlainSymbol(name, "pthread_mutex_init"))
+            return CallKind::PThreadMutexInit;
+        if (matchesPlainSymbol(name, "pthread_mutexattr_settype"))
+            return CallKind::PThreadMutexAttrSetType;
+        if (isStdJThreadCtor(name))
+            return CallKind::StdJThreadCtor;
         if (isStdThreadMove(name))
             return CallKind::StdThreadMove;
         if (isStdThreadCtor(name))
@@ -113,10 +266,21 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::StdThreadJoin;
         if (isStdThreadDetach(name))
             return CallKind::StdThreadDetach;
+        if (isStdThreadDtor(name))
+            return CallKind::StdThreadDtor;
+        if (isStdMutexTryLock(name))
+            return CallKind::StdMutexTryLock;
         if (isStdMutexLock(name))
             return CallKind::StdMutexLock;
         if (isStdMutexUnlock(name))
             return CallKind::StdMutexUnlock;
+        if (isStdLockGuardDtor(name))
+            return CallKind::StdLockGuardDtor;
+        if (isStdLockGuardCtor(name))
+        {
+            return isDeferredLockGuardCtor(name) ? CallKind::StdLockGuardDeferredCtor
+                                                 : CallKind::StdLockGuardCtor;
+        }
         return CallKind::Unknown;
     }
 
@@ -136,6 +300,36 @@ namespace ctrace::concurrency::internal::analysis
             return "pthread_mutex_lock";
         case CallKind::PThreadMutexUnlock:
             return "pthread_mutex_unlock";
+        case CallKind::PThreadMutexTryLock:
+            return "pthread_mutex_trylock";
+        case CallKind::PThreadRwLockAcquire:
+            return "pthread_rwlock_acquire";
+        case CallKind::PThreadRwLockTryAcquire:
+            return "pthread_rwlock_tryacquire";
+        case CallKind::PThreadRwLockUnlock:
+            return "pthread_rwlock_unlock";
+        case CallKind::PThreadSpinLock:
+            return "pthread_spin_lock";
+        case CallKind::PThreadSpinUnlock:
+            return "pthread_spin_unlock";
+        case CallKind::PThreadSpinTryLock:
+            return "pthread_spin_trylock";
+        case CallKind::PThreadMutexInit:
+            return "pthread_mutex_init";
+        case CallKind::PThreadMutexAttrSetType:
+            return "pthread_mutexattr_settype";
+        case CallKind::StdThreadDtor:
+            return "std_thread_dtor";
+        case CallKind::StdJThreadCtor:
+            return "std_jthread_ctor";
+        case CallKind::StdMutexTryLock:
+            return "std_mutex_try_lock";
+        case CallKind::StdLockGuardCtor:
+            return "std_lock_guard_ctor";
+        case CallKind::StdLockGuardDeferredCtor:
+            return "std_lock_guard_deferred_ctor";
+        case CallKind::StdLockGuardDtor:
+            return "std_lock_guard_dtor";
         case CallKind::StdThreadCtor:
             return "std_thread_ctor";
         case CallKind::StdThreadMove:

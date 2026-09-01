@@ -42,13 +42,15 @@ namespace
     }
 
     std::optional<DiagnosticReport> analyzeFixture(std::string_view relativePath,
-                                                   AnalysisOptions options = {})
+                                                   AnalysisOptions options = {},
+                                                   std::vector<std::string> extraCompileArgs = {})
     {
         llvm::LLVMContext context;
         InMemoryIRCompiler compiler;
 
         CompileRequest request;
         request.inputFile = fixturePath(relativePath).string();
+        request.extraCompileArgs = std::move(extraCompileArgs);
         request.format = IRFormat::BC;
 
         CompileResult compileResult = compiler.compile(request, context);
@@ -684,6 +686,387 @@ namespace
                assertTrue(report->diagnosticsSummary.error == 0,
                           "independent lock pairs should not count error diagnostics");
     }
+
+    // -----------------------------------------------------------------------------------
+    // Fixture expectation table
+    //
+    // One row per concurrency fixture, pinning the exact number of diagnostics each rule
+    // produces. Counting rather than merely asserting presence catches both regression
+    // directions with the same row: a false positive raises a count, a false negative lowers
+    // one. Adding a case costs a line, which is what makes broad coverage affordable.
+    // -----------------------------------------------------------------------------------
+
+    constexpr std::string_view kCxx20Standard = "-std=c++20";
+
+    struct FixtureExpectation
+    {
+        /// Path relative to the project source directory.
+        std::string_view path;
+        /// Why this fixture exists; printed when the row fails.
+        std::string_view intent;
+        std::size_t dataRace = 0;
+        std::size_t missingJoin = 0;
+        std::size_t deadlock = 0;
+        /// Symbol the data-race diagnostics must name; empty when not asserted.
+        std::string_view racingSymbol;
+        bool requiresCxx20 = false;
+        /// The fixture is kept to exercise the compiler error path and is never analyzed.
+        bool expectCompileFailure = false;
+        /// Counts are lower bounds rather than exact values. Reserved for fixtures whose
+        /// diagnostics depend on how a standard library lowers its own templates: libc++ and
+        /// libstdc++ expose a different number of intermediate accesses for the same source, and
+        /// pinning one of them would fail the other. What must not regress is that the race is
+        /// still found at all.
+        bool countsAreMinimums = false;
+    };
+
+    // clang-format off
+    const std::vector<FixtureExpectation>& fixtureExpectations()
+    {
+        static const std::vector<FixtureExpectation> expectations = {
+            // --- data race: conflicts that must be reported -------------------------------
+            {.path = "tests/fixtures/concurrency/data-race/data_race_basic.c",
+             .intent = "two workers increment the same global",
+             .dataRace = 1, .racingSymbol = "shared_counter"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_split_symbols.c",
+             .intent = "only the unprotected global of the pair races",
+             .dataRace = 1, .racingSymbol = "racy_counter"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_mixed_access.c",
+             .intent = "writer and reader entries conflict on the shared flag and value",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callsite_unprotected_helper_reports_race.c",
+             .intent = "helper reached from an unprotected call site still races",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_partial_callsite_lock_reports_race.c",
+             .intent = "one unprotected call site among several keeps the race",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_alias_global_pointer_reports_low_confidence.c",
+             .intent = "alias-resolved global access is reported with low confidence",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/race_condition_check_then_use.c",
+             .intent = "check-then-use on shared state, with an unjoined handle",
+             .dataRace = 2, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_data_race_class.cpp",
+             .intent = "member function of a global object races",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_shared_object_by_ref.cpp",
+             .intent = "object shared by reference races on its global counter",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_atomic_vs_non_atomic.cpp",
+             .intent = "non-atomic field of a partially atomic struct races",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_move_semantics_race.cpp",
+             .intent = "producer and consumer race on the moved-from resource",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+
+            // --- data race: regressions fixed, must stay silent ---------------------------
+            {.path = "tests/fixtures/concurrency/data-race/data_race_mutex_protected.c",
+             .intent = "a common mutex protects both accesses"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_callsite_lock_protected.c",
+             .intent = "the lock held at the call site protects the helper"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_nested_callsite_lock_protected_no_race.c",
+             .intent = "nested call sites all hold the lock"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_alias_ambiguous_pointer_no_fp.c",
+             .intent = "an ambiguous alias is dropped rather than guessed"},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_thread_local_class.cpp",
+             .intent = "each worker owns its instance"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_disjoint_array_elements_no_fp.c",
+             .intent = "workers own distinct elements of a global array"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_disjoint_struct_fields_no_fp.c",
+             .intent = "workers write distinct fields of a global struct"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_sequential_threads_no_fp.c",
+             .intent = "a join separates the two spawns"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_exclusive_branch_spawns_no_fp.c",
+             .intent = "mutually exclusive branches never run two instances at once"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_rwlock_protected_no_fp.c",
+             .intent = "a reader/writer lock protects the value, and is not data itself"},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_lock_guard_protected_no_fp.cpp",
+             .intent = "std::lock_guard is a recognized acquisition"},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_scoped_lock_protected_no_fp.cpp",
+             .intent = "std::scoped_lock acquires both mutexes safely"},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_atomic_operations_no_fp.cpp",
+             .intent = "atomic operations never race with each other"},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_condition_variable_no_fp.cpp",
+             .intent = "a textbook wait/notify pair is synchronized"},
+
+            // --- data race: regressions fixed, must be reported ---------------------------
+            {.path = "tests/fixtures/concurrency/data-race/data_race_main_thread_vs_worker.c",
+             .intent = "the initial thread writes between the spawn and the join",
+             .dataRace = 1, .racingSymbol = "escaping_counter"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_mixed_atomic_and_plain.c",
+             .intent = "an atomic RMW still races against a plain increment",
+             .dataRace = 1, .racingSymbol = "mixed_counter"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_distinct_member_mutexes.c",
+             .intent = "sibling mutexes are distinct locks, so the field is unprotected",
+             .dataRace = 1, .racingSymbol = "state"},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_posix.c",
+             .intent = "a helper called from main and from a worker races with itself",
+             .dataRace = 1, .racingSymbol = "buffer_index"},
+
+            // --- deadlock -----------------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_basic.c",
+             .intent = "two workers take the same pair of locks in opposite orders",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/recursive_deadlock.c",
+             .intent = "a helper reacquires a lock its caller already holds",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/lock_order_violation.c",
+             .intent = "a three-lock wait-for cycle",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_three_lock_cycle.c",
+             .intent = "cycles longer than a pair are found",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_main_thread_vs_worker.c",
+             .intent = "the initial thread participates in the lock order",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_consistent_order_no_diagnostic.c",
+             .intent = "a single consistent order cannot deadlock"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_independent_locks_no_diagnostic.c",
+             .intent = "independent lock pairs form no cycle"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_opposite_order_not_concurrent_no_diagnostic.c",
+             .intent = "opposite orders outside any thread cannot interleave"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_sibling_member_mutexes_no_diagnostic.c",
+             .intent = "two mutexes in one aggregate are distinct locks"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_pthread_recursive_mutex_no_diagnostic.c",
+             .intent = "a recursive mutex may be reacquired by its owner"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_lock_serializes_no_diagnostic.c",
+             .intent = "a common outer lock serializes the inner orders"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_sequential_threads_no_diagnostic.c",
+             .intent = "the two lock orders belong to threads with disjoint lifetimes"},
+            {.path = "tests/fixtures/concurrency/deadlock/cpp_recursive_mutex_no_diagnostic.cpp",
+             .intent = "std::recursive_mutex is designed to be relocked"},
+
+            // --- missing join --------------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/missing-join/missing_join_basic.c",
+             .intent = "a created handle is never joined",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/missing_join_detach_mix.c",
+             .intent = "only the handle that is neither joined nor detached is reported",
+             .dataRace = 2, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/missing_join_multiple.c",
+             .intent = "loop-created handles joined once; array-element insensitivity is known",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_mix_reports_only_unresolved_handle.c",
+             .intent = "only the unresolved handle of the pair is reported",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/cpp_std_thread_missing_join.cpp",
+             .intent = "a std::thread destroyed while joinable",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join.cpp",
+             .intent = "the worker races while its handle is left joinable",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_loop_create_single_join_reports_missing_join.c",
+             .intent = "a loop creates one handle per iteration, joined only once",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "cpp_conditional_join_reports_missing_join.cpp",
+             .intent = "a join on only one branch leaves a path without one",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/pthread_join_all_no_missing_join.c",
+             .intent = "every handle is joined"},
+            {.path = "tests/fixtures/concurrency/missing-join/pthread_detach_all_no_missing_join.c",
+             .intent = "detaching resolves a handle as well as joining"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_create_join_through_handle_pointer_no_missing_join.c",
+             .intent = "the handle is joined through a local pointer copy"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "cpp_std_thread_join_no_missing_join.cpp",
+             .intent = "the std::thread is joined"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "cpp_std_thread_move_join_no_missing_join.cpp",
+             .intent = "a moved-to handle carries the obligation"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_branch_creates_single_join_no_missing_join.c",
+             .intent = "exclusive creation branches share the join that follows"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_detached_attribute_no_missing_join.c",
+             .intent = "PTHREAD_CREATE_DETACHED resolves the handle at creation"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "cpp_thread_vector_join_no_missing_join.cpp",
+             .intent = "handles moved into a container are joined through it"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "cpp_user_type_named_thread_no_missing_join.cpp",
+             .intent = "a user type whose mangling contains \"thread\" is not a std::thread"},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_jthread_auto_join_no_missing_join.cpp",
+             .intent = "std::jthread joins in its destructor",
+             .requiresCxx20 = true},
+
+            // --- condition variables ------------------------------------------------------
+            // The state around a condition variable is ordinary shared data: the existing rules
+            // still apply to it. Only the wait protocol itself is unmodelled.
+            {.path = "tests/fixtures/concurrency/condition-variable/"
+                     "condition_variable_unprotected_predicate.c",
+             .intent = "the predicate is published without the mutex the waiter holds",
+             .dataRace = 2,
+             .racingSymbol = "data_ready"},
+            {.path = "tests/fixtures/concurrency/condition-variable/"
+                     "condition_variable_predicate_loop_no_diagnostic.c",
+             .intent = "rechecking the predicate in a loop is the correct protocol"},
+            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_spurious.c",
+             .intent = "checking the predicate with if instead of while: no rule models "
+                       "spurious wakeups yet"},
+
+            // --- rules that do not exist yet: pinned as silent -----------------------------
+            {.path = "tests/fixtures/concurrency/memory-barrier/missing_memory_barrier.c",
+             .intent = "no rule models memory ordering yet; the plain accesses still race",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/thread-escape/fork_thread_race.c",
+             .intent = "no rule models fork() semantics yet; the global access still races",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/cpp_race_std_async.cpp",
+             .intent = "std::async spawns no recognized thread entry yet"},
+
+            // --- compiler error path -------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
+             .intent = "kept to exercise the compile failure path",
+             .expectCompileFailure = true},
+        };
+
+        return expectations;
+    }
+    // clang-format on
+
+    /// Analyzes a fixture once with every rule enabled, then compares each rule's diagnostic
+    /// count. Running the rules separately would recompile the fixture three times, and the
+    /// checkers are independent, so one pass gives the same counts.
+    bool checkFixtureExpectation(const FixtureExpectation& expectation)
+    {
+        std::vector<std::string> compileArgs;
+        if (expectation.requiresCxx20)
+            compileArgs.emplace_back(kCxx20Standard);
+
+        const AnalysisOptions options{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
+                                                       RuleId::DeadlockLockOrder}};
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture(expectation.path, options, std::move(compileArgs));
+        if (!report.has_value())
+            return false;
+
+        struct RuleColumn
+        {
+            RuleId rule;
+            std::size_t expected;
+            std::string_view name;
+        };
+
+        const RuleColumn columns[] = {
+            {RuleId::DataRaceGlobal, expectation.dataRace, "data-race"},
+            {RuleId::MissingJoin, expectation.missingJoin, "missing-join"},
+            {RuleId::DeadlockLockOrder, expectation.deadlock, "deadlock-lock-order"},
+        };
+
+        bool ok = true;
+        for (const RuleColumn& column : columns)
+        {
+            const std::size_t actual = countDiagnosticsForRule(*report, column.rule);
+            const bool satisfied = expectation.countsAreMinimums ? actual >= column.expected
+                                                                 : actual == column.expected;
+            if (satisfied)
+                continue;
+
+            std::cerr << "[FAIL] " << expectation.path << " (" << expectation.intent
+                      << "): " << column.name << " expected "
+                      << (expectation.countsAreMinimums ? "at least " : "") << column.expected
+                      << " diagnostic(s), got " << actual << "\n";
+            ok = false;
+        }
+
+        if (!expectation.racingSymbol.empty() &&
+            !hasDiagnosticForSymbol(*report, expectation.racingSymbol))
+        {
+            std::cerr << "[FAIL] " << expectation.path << " (" << expectation.intent
+                      << "): expected a race on '" << expectation.racingSymbol << "'\n";
+            ok = false;
+        }
+
+        return ok;
+    }
+
+    bool testFixtureExpectationTable()
+    {
+        bool ok = true;
+        for (const FixtureExpectation& expectation : fixtureExpectations())
+        {
+            if (expectation.expectCompileFailure)
+                continue;
+
+            ok = checkFixtureExpectation(expectation) && ok;
+        }
+
+        return ok;
+    }
+
+    /// Guards against fixtures that exist but are asserted nowhere. Two real defects — the
+    /// three-lock cycle and the helper shared between main and a worker — sat in the tree
+    /// undetected precisely because their fixtures were never referenced.
+    bool testEveryConcurrencyFixtureIsCovered()
+    {
+        static constexpr std::string_view kFixtureRoots[] = {
+            "tests/fixtures/concurrency",
+            "tests/fixtures/concurrency-cxx20",
+        };
+
+        std::vector<std::string> expectedPaths;
+        expectedPaths.reserve(fixtureExpectations().size());
+        for (const FixtureExpectation& expectation : fixtureExpectations())
+            expectedPaths.emplace_back(expectation.path);
+        std::sort(expectedPaths.begin(), expectedPaths.end());
+
+        const std::filesystem::path projectRoot(CORETRACE_PROJECT_SOURCE_DIR);
+        bool ok = true;
+
+        for (const std::string_view root : kFixtureRoots)
+        {
+            const std::filesystem::path rootPath = projectRoot / root;
+            if (!assertTrue(std::filesystem::is_directory(rootPath),
+                            "fixture root " + std::string(root) + " should exist"))
+            {
+                ok = false;
+                continue;
+            }
+
+            for (const std::filesystem::directory_entry& entry :
+                 std::filesystem::recursive_directory_iterator(rootPath))
+            {
+                if (!entry.is_regular_file())
+                    continue;
+
+                const std::string extension = entry.path().extension().string();
+                if (extension != ".c" && extension != ".cpp")
+                    continue;
+
+                const std::string relativePath =
+                    entry.path().lexically_relative(projectRoot).generic_string();
+                if (std::binary_search(expectedPaths.begin(), expectedPaths.end(), relativePath))
+                    continue;
+
+                std::cerr << "[FAIL] fixture " << relativePath
+                          << " is not listed in the expectation table; add a row describing what "
+                             "it pins\n";
+                ok = false;
+            }
+        }
+
+        return ok;
+    }
 } // namespace
 
 int main()
@@ -720,6 +1103,8 @@ int main()
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
+    ok = testFixtureExpectationTable() && ok;
+    ok = testEveryConcurrencyFixtureIsCovered() && ok;
 
     if (!ok)
         return 1;
