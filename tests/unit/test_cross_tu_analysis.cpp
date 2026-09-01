@@ -226,6 +226,50 @@ namespace
                           "an extern with no visible definition must not be reported");
     }
 
+    std::size_t countDeadlocks(const DiagnosticReport& report)
+    {
+        std::size_t count = 0;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+        {
+            if (diagnostic.ruleId == RuleId::DeadlockLockOrder)
+                ++count;
+        }
+
+        return count;
+    }
+
+    /// The third thing that crosses the boundary: what a helper does to the lock it is handed.
+    /// `workers.c` holds the inversion and never names a lock primitive; `sync.c` holds the
+    /// helpers and no ordering of its own.
+    bool testLockWrapperDefinedInAnotherUnitClosesTheCycle()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-lock-wrapper/workers.c") ||
+            !project.add("cross-tu-lock-wrapper/sync.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(project.modules());
+
+        return assertTrue(countDeadlocks(analysis.report) > 0,
+                          "an inversion through helpers defined elsewhere must be reported");
+    }
+
+    /// The worker unit alone cannot see what the helpers do, and must not guess.
+    bool testWorkerUnitWithoutTheHelpersReportsNoCycle()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-lock-wrapper/workers.c"))
+            return false;
+
+        const DiagnosticReport report = SingleTUConcurrencyAnalyzer().analyze(project.moduleAt(0));
+
+        return assertTrue(countDeadlocks(report) == 0,
+                          "opaque helpers must not produce a lock-order finding");
+    }
+
     /// Existing single-unit fixtures, analysed as one-unit projects. The project mode adds
     /// knowledge; it must never subtract any. This is what catches a cross-unit change quietly
     /// losing a finding the single-unit path still makes.
@@ -301,6 +345,8 @@ int main()
     ok = testRepeatedUnitIsNotReportedTwice() && ok;
     ok = testExternGlobalDefinedInAnotherUnitIsTracked() && ok;
     ok = testUnresolvedExternIsNotTracked() && ok;
+    ok = testLockWrapperDefinedInAnotherUnitClosesTheCycle() && ok;
+    ok = testWorkerUnitWithoutTheHelpersReportsNoCycle() && ok;
     ok = testProjectModeKeepsEverySingleUnitFinding() && ok;
     ok = testEmptyProjectIsAnEmptyReport() && ok;
 
