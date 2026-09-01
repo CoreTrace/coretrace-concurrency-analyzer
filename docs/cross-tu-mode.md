@@ -57,13 +57,13 @@ addresses that have no common meaning.
 
 ## Cost
 
-Measured on this repository (40 units, macOS arm64, 8 cores):
+Measured on this repository (42 units, macOS arm64, 8 cores):
 
 | Phase | Cold | Warm |
 | --- | --- | --- |
-| Compile | 32.0 s | 8.0 s |
-| Analyse | 24.5 s | 24.8 s |
-| **Total** | **56.5 s** | **32.8 s** |
+| Compile | 49.3 s | 8.5 s |
+| Analyse | 27.1 s | 27.0 s |
+| **Total** | **76.4 s** | **35.5 s** |
 
 Compiling is about half the run and almost none of it is useful work a second time, so compiled
 IR is cached under `.coretrace-ir-cache/` beside the database. An entry is keyed on the source,
