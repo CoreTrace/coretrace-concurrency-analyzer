@@ -707,6 +707,7 @@ namespace
         std::size_t dataRace = 0;
         std::size_t missingJoin = 0;
         std::size_t deadlock = 0;
+        std::size_t conditionWait = 0;
         /// Symbol the data-race diagnostics must name; empty when not asserted.
         std::string_view racingSymbol;
         bool requiresCxx20 = false;
@@ -920,8 +921,8 @@ namespace
              .requiresCxx20 = true},
 
             // --- condition variables ------------------------------------------------------
-            // The state around a condition variable is ordinary shared data: the existing rules
-            // still apply to it. Only the wait protocol itself is unmodelled.
+            // The state around a condition variable is ordinary shared data, so the data-race
+            // rule applies to it as well; the wait protocol itself is a separate question.
             {.path = "tests/fixtures/concurrency/condition-variable/"
                      "condition_variable_unprotected_predicate.c",
              .intent = "the predicate is published without the mutex the waiter holds",
@@ -930,9 +931,24 @@ namespace
             {.path = "tests/fixtures/concurrency/condition-variable/"
                      "condition_variable_predicate_loop_no_diagnostic.c",
              .intent = "rechecking the predicate in a loop is the correct protocol"},
+            {.path = "tests/fixtures/concurrency/condition-variable/"
+                     "cpp_condition_wait_predicate_no_fp.cpp",
+             .intent = "every safe C++ spelling of a wait, including the bare one inside a loop",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/condition-variable/"
+                     "cpp_condition_wait_without_predicate.cpp",
+             .intent = "wait and wait_for that read waking up as proof the condition holds",
+             .conditionWait = 2,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/condition-variable/"
+                     "cpp_condition_wait_through_helper.cpp",
+             .intent = "the loop belongs to the caller of a forwarding helper, not to the helper",
+             .conditionWait = 1,
+             .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_spurious.c",
-             .intent = "checking the predicate with if instead of while: no rule models "
-                       "spurious wakeups yet"},
+             .intent = "checking the predicate with if instead of while leaves a wake-up "
+                       "unverified",
+             .conditionWait = 1},
 
             // --- rules that do not exist yet: pinned as silent -----------------------------
             {.path = "tests/fixtures/concurrency/memory-barrier/missing_memory_barrier.c",
@@ -964,7 +980,8 @@ namespace
             compileArgs.emplace_back(kCxx20Standard);
 
         const AnalysisOptions options{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                                       RuleId::DeadlockLockOrder}};
+                                                       RuleId::DeadlockLockOrder,
+                                                       RuleId::ConditionWaitWithoutPredicate}};
         const std::optional<DiagnosticReport> report =
             analyzeFixture(expectation.path, options, std::move(compileArgs));
         if (!report.has_value())
@@ -981,6 +998,7 @@ namespace
             {RuleId::DataRaceGlobal, expectation.dataRace, "data-race"},
             {RuleId::MissingJoin, expectation.missingJoin, "missing-join"},
             {RuleId::DeadlockLockOrder, expectation.deadlock, "deadlock-lock-order"},
+            {RuleId::ConditionWaitWithoutPredicate, expectation.conditionWait, "condition-wait"},
         };
 
         bool ok = true;
