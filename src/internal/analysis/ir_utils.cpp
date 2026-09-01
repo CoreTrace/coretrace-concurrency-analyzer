@@ -5,6 +5,8 @@
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/IR/DebugInfoMetadata.h>
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
@@ -15,6 +17,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <filesystem>
+#include <string_view>
 #include <vector>
 
 namespace ctrace::concurrency::internal::analysis
@@ -108,8 +111,123 @@ namespace ctrace::concurrency::internal::analysis
             return location;
         }
 
+        /// Collected while walking from an access back to its root: the accumulated byte offset,
+        /// and whether any traversed type is a synchronization primitive.
+        struct AccessPathWalk
+        {
+            const llvm::DataLayout* layout = nullptr;
+            bool touchesSyncPrimitive = false;
+            bool touchesRecursiveLock = false;
+            bool hasKnownOffset = true;
+            std::int64_t byteOffset = 0;
+
+            [[nodiscard]] MemoryRegion region(std::uint64_t byteSize = 0) const
+            {
+                return MemoryRegion{
+                    .hasKnownOffset = hasKnownOffset,
+                    .byteOffset = byteOffset,
+                    .byteSize = byteSize,
+                };
+            }
+        };
+
+        bool isSyncPrimitiveTypeName(llvm::StringRef name)
+        {
+            static constexpr std::string_view posixTypes[] = {
+                "pthread_mutex_t",
+                "pthread_rwlock_t",
+                "pthread_cond_t",
+                "pthread_spinlock_t",
+                "pthread_barrier_t",
+                "pthread_once_t",
+                "pthread_mutexattr_t",
+                "pthread_attr_t",
+                "pthread_rwlockattr_t",
+                "pthread_condattr_t",
+                "sem_t",
+            };
+            for (const std::string_view posixType : posixTypes)
+            {
+                if (name.contains(posixType))
+                    return true;
+            }
+
+            if (!name.contains("std::"))
+                return false;
+
+            static constexpr std::string_view stdTypes[] = {
+                "::mutex",      "recursive_mutex",    "timed_mutex",
+                "shared_mutex", "shared_timed_mutex", "condition_variable",
+                "once_flag",    "counting_semaphore", "binary_semaphore",
+                "::latch",      "::barrier",
+            };
+            for (const std::string_view stdType : stdTypes)
+            {
+                if (name.contains(stdType))
+                    return true;
+            }
+
+            return false;
+        }
+
+        bool isRecursiveLockTypeName(llvm::StringRef name)
+        {
+            return name.contains("recursive_mutex") || name.contains("recursive_timed_mutex");
+        }
+
+        llvm::StringRef structuralTypeName(const llvm::Type* type)
+        {
+            const auto* structType = llvm::dyn_cast_or_null<llvm::StructType>(type);
+            if (structType == nullptr || !structType->hasName())
+                return {};
+
+            return structType->getName();
+        }
+
+        void noteTraversedType(AccessPathWalk& walk, const llvm::Type* type)
+        {
+            const llvm::StringRef name = structuralTypeName(type);
+            if (name.empty())
+                return;
+
+            if (isSyncPrimitiveTypeName(name))
+                walk.touchesSyncPrimitive = true;
+            if (isRecursiveLockTypeName(name))
+                walk.touchesRecursiveLock = true;
+        }
+
+        template <typename GEPType> void noteGepTypes(AccessPathWalk& walk, const GEPType& gep)
+        {
+            noteTraversedType(walk, gep.getSourceElementType());
+            noteTraversedType(walk, gep.getResultElementType());
+        }
+
+        /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
+        /// which keeps the region conservatively overlapping every sibling.
+        void accumulateGepOffset(AccessPathWalk& walk, const llvm::GEPOperator& gep)
+        {
+            if (!walk.hasKnownOffset)
+                return;
+
+            if (walk.layout == nullptr)
+            {
+                walk.hasKnownOffset = false;
+                return;
+            }
+
+            llvm::APInt offset(walk.layout->getIndexTypeSizeInBits(gep.getType()), 0);
+            if (!gep.accumulateConstantOffset(*walk.layout, offset))
+            {
+                walk.hasKnownOffset = false;
+                return;
+            }
+
+            walk.byteOffset += offset.getSExtValue();
+        }
+
         const llvm::Value* resolveCopiedValue(const llvm::Value& value,
-                                              llvm::SmallPtrSetImpl<const llvm::Value*>& seen)
+                                              llvm::SmallPtrSetImpl<const llvm::Value*>& seen,
+                                              AccessPathWalk* walk = nullptr)
         {
             const llvm::Value* current = value.stripPointerCastsAndAliases();
             while (current != nullptr)
@@ -117,18 +235,23 @@ namespace ctrace::concurrency::internal::analysis
                 if (!seen.insert(current).second)
                     return nullptr;
 
-                if (llvm::isa<llvm::GlobalVariable>(current) ||
-                    llvm::isa<llvm::Argument>(current) || llvm::isa<llvm::Function>(current))
-                    return current;
-
-                if (const auto* gepInstruction = llvm::dyn_cast<llvm::GetElementPtrInst>(current))
+                if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(current))
                 {
-                    current = gepInstruction->getPointerOperand()->stripPointerCastsAndAliases();
-                    continue;
+                    if (walk != nullptr)
+                        noteTraversedType(*walk, global->getValueType());
+                    return current;
                 }
+
+                if (llvm::isa<llvm::Argument>(current) || llvm::isa<llvm::Function>(current))
+                    return current;
 
                 if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(current))
                 {
+                    if (walk != nullptr)
+                    {
+                        noteGepTypes(*walk, *gep);
+                        accumulateGepOffset(*walk, *gep);
+                    }
                     current = gep->getPointerOperand()->stripPointerCastsAndAliases();
                     continue;
                 }
@@ -263,6 +386,20 @@ namespace ctrace::concurrency::internal::analysis
         return normalizeValueName(global->getName());
     }
 
+    std::optional<std::string> canonicalLockId(const llvm::Value& value,
+                                               const llvm::DataLayout* layout)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        walk.layout = layout;
+        const auto* global =
+            llvm::dyn_cast_or_null<llvm::GlobalVariable>(resolveCopiedValue(value, seen, &walk));
+        if (global == nullptr)
+            return std::nullopt;
+
+        return normalizeValueName(global->getName()) + walk.region().suffix();
+    }
+
     std::optional<std::string> canonicalStorageGroupId(const llvm::Value& value)
     {
         const llvm::Value* current = &value;
@@ -340,25 +477,35 @@ namespace ctrace::concurrency::internal::analysis
         return std::nullopt;
     }
 
-    std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value)
+    std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
+                                                  const llvm::DataLayout* layout,
+                                                  std::uint64_t byteSize)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;
-        const llvm::Value* root = resolveCopiedValue(value, seen);
+        AccessPathWalk walk;
+        walk.layout = layout;
+        const llvm::Value* root = resolveCopiedValue(value, seen, &walk);
         if (root == nullptr)
             return std::nullopt;
 
+        const MemoryRegion region = walk.region(byteSize);
         if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(root))
         {
             if (!shouldTrackSharedGlobal(*global))
                 return std::nullopt;
 
-            return RootBinding::global(normalizeValueName(global->getName()));
+            return RootBinding::global(normalizeValueName(global->getName()), region);
         }
 
         if (const auto* argument = llvm::dyn_cast<llvm::Argument>(root))
-            return RootBinding::argument(argument->getArgNo());
+            return RootBinding::argument(argument->getArgNo(), region);
 
         return std::nullopt;
+    }
+
+    std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value)
+    {
+        return resolveTrackedRoot(value, nullptr, 0);
     }
 
     std::optional<AliasResolvedGlobal>

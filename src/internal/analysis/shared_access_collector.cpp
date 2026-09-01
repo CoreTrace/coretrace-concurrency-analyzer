@@ -13,8 +13,11 @@
 #include <llvm/IR/Module.h>
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/MemoryLocation.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/DataLayout.h>
 #include <llvm/Support/ModRef.h>
 
+#include <cstdint>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -27,9 +30,18 @@ namespace ctrace::concurrency::internal::analysis
         std::string rootBindingKey(const RootBinding& binding)
         {
             if (binding.kind == RootBindingKind::Global)
-                return "global:" + binding.symbol;
+                return "global:" + binding.symbol + binding.region.suffix();
 
-            return "argument:" + std::to_string(binding.argumentIndex);
+            return "argument:" + std::to_string(binding.argumentIndex) + binding.region.suffix();
+        }
+
+        /// Extent of a scalar access, so that writes to adjacent fields do not appear to overlap.
+        std::uint64_t accessByteSize(const llvm::DataLayout& layout, const llvm::Type* accessedType)
+        {
+            if (accessedType == nullptr || !accessedType->isSized())
+                return 0;
+
+            return layout.getTypeStoreSize(const_cast<llvm::Type*>(accessedType)).getFixedValue();
         }
 
         std::string callEffectKey(const RootBinding& binding, AccessKind kind)
@@ -53,9 +65,11 @@ namespace ctrace::concurrency::internal::analysis
 
         void appendAccess(std::vector<PendingAccess>& accesses, const llvm::Function& function,
                           const llvm::Instruction& instruction, const llvm::Value& pointerOperand,
-                          AccessKind kind, AliasProvenance aliasProvenance)
+                          AccessKind kind, AliasProvenance aliasProvenance,
+                          const llvm::DataLayout& layout, std::uint64_t byteSize = 0)
         {
-            const std::optional<RootBinding> root = resolveTrackedRoot(pointerOperand);
+            const std::optional<RootBinding> root =
+                resolveTrackedRoot(pointerOperand, &layout, byteSize);
             if (!root.has_value())
                 return;
 
@@ -72,21 +86,31 @@ namespace ctrace::concurrency::internal::analysis
             accesses.push_back(std::move(access));
         }
 
+        /// Byte count of a memory intrinsic when it is a compile-time constant; zero otherwise,
+        /// which keeps the region covering the whole object.
+        std::uint64_t memoryIntrinsicLength(const llvm::MemIntrinsic& intrinsic)
+        {
+            const auto* length = llvm::dyn_cast<llvm::ConstantInt>(intrinsic.getLength());
+            return length == nullptr ? 0 : length->getZExtValue();
+        }
+
         void appendMemoryIntrinsicAccesses(std::vector<PendingAccess>& accesses,
                                            const llvm::Function& function,
-                                           const llvm::MemIntrinsic& intrinsic)
+                                           const llvm::MemIntrinsic& intrinsic,
+                                           const llvm::DataLayout& layout)
         {
+            const std::uint64_t length = memoryIntrinsicLength(intrinsic);
             if (const auto* transfer = llvm::dyn_cast<llvm::MemTransferInst>(&intrinsic))
             {
                 appendAccess(accesses, function, intrinsic, *transfer->getRawDest(),
-                             AccessKind::Write, AliasProvenance::Direct);
+                             AccessKind::Write, AliasProvenance::Direct, layout, length);
                 appendAccess(accesses, function, intrinsic, *transfer->getRawSource(),
-                             AccessKind::Read, AliasProvenance::Direct);
+                             AccessKind::Read, AliasProvenance::Direct, layout, length);
                 return;
             }
 
             appendAccess(accesses, function, intrinsic, *intrinsic.getRawDest(), AccessKind::Write,
-                         AliasProvenance::Direct);
+                         AliasProvenance::Direct, layout, length);
         }
 
         std::optional<AccessKind> accessKindFromModRef(llvm::ModRefInfo modRefInfo)
@@ -103,7 +127,8 @@ namespace ctrace::concurrency::internal::analysis
         void appendCallMemoryEffectAccesses(std::vector<PendingAccess>& accesses,
                                             const llvm::Function& function,
                                             const llvm::CallBase& call, llvm::AAResults& aaResults,
-                                            const ConcurrencySymbolClassifier& classifier)
+                                            const ConcurrencySymbolClassifier& classifier,
+                                            const llvm::DataLayout& layout)
         {
             if (!shouldInferCallMemoryEffects(call, classifier))
                 return;
@@ -115,7 +140,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (value == nullptr || !value->getType()->isPointerTy())
                     continue;
 
-                const std::optional<RootBinding> root = resolveTrackedRoot(*value);
+                const std::optional<RootBinding> root = resolveTrackedRoot(*value, &layout, 0);
                 if (!root.has_value())
                     continue;
 
@@ -129,7 +154,8 @@ namespace ctrace::concurrency::internal::analysis
                 if (!seenEffects.insert(key).second)
                     continue;
 
-                appendAccess(accesses, function, call, *value, *kind, AliasProvenance::Direct);
+                appendAccess(accesses, function, call, *value, *kind, AliasProvenance::Direct,
+                             layout);
             }
         }
     } // namespace
@@ -147,6 +173,7 @@ namespace ctrace::concurrency::internal::analysis
 
         LlvmFunctionAnalysisProvider analysisProvider;
         ConcurrencySymbolClassifier classifier;
+        const llvm::DataLayout& layout = module.getDataLayout();
 
         for (const llvm::Function& function : module)
         {
@@ -162,17 +189,18 @@ namespace ctrace::concurrency::internal::analysis
                     const llvm::Value* pointerOperand = nullptr;
                     AccessKind kind = AccessKind::Read;
                     AliasProvenance aliasProvenance = AliasProvenance::Direct;
+                    std::uint64_t byteSize = 0;
 
                     if (const auto* intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(&instruction))
                     {
-                        appendMemoryIntrinsicAccesses(accesses, function, *intrinsic);
+                        appendMemoryIntrinsicAccesses(accesses, function, *intrinsic, layout);
                         continue;
                     }
 
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                     {
                         appendCallMemoryEffectAccesses(accesses, function, *call, aaResults,
-                                                       classifier);
+                                                       classifier, layout);
                         continue;
                     }
 
@@ -180,11 +208,13 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         pointerOperand = load->getPointerOperand();
                         kind = AccessKind::Read;
+                        byteSize = accessByteSize(layout, load->getType());
                     }
                     else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
                     {
                         pointerOperand = store->getPointerOperand();
                         kind = AccessKind::Write;
+                        byteSize = accessByteSize(layout, store->getValueOperand()->getType());
                     }
                     else
                     {
@@ -194,7 +224,8 @@ namespace ctrace::concurrency::internal::analysis
                     if (pointerOperand == nullptr)
                         continue;
 
-                    std::optional<RootBinding> root = resolveTrackedRoot(*pointerOperand);
+                    std::optional<RootBinding> root =
+                        resolveTrackedRoot(*pointerOperand, &layout, byteSize);
                     if (!root.has_value())
                     {
                         const std::optional<AliasResolvedGlobal> aliasResolvedGlobal =

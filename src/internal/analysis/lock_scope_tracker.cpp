@@ -6,6 +6,7 @@
 
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/Module.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 
@@ -23,7 +24,8 @@ namespace ctrace::concurrency::internal::analysis
 
         std::optional<std::pair<bool, std::string>>
         lockOperation(const llvm::Instruction& instruction,
-                      const ConcurrencySymbolClassifier& classifier)
+                      const ConcurrencySymbolClassifier& classifier,
+                      const llvm::DataLayout& layout)
         {
             const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
             if (call == nullptr)
@@ -40,7 +42,8 @@ namespace ctrace::concurrency::internal::analysis
             if (call->arg_size() == 0)
                 return std::nullopt;
 
-            const std::optional<std::string> lockId = canonicalGlobalId(*call->getArgOperand(0));
+            const std::optional<std::string> lockId =
+                canonicalLockId(*call->getArgOperand(0), &layout);
             if (!lockId.has_value())
                 return std::nullopt;
 
@@ -141,7 +144,8 @@ namespace ctrace::concurrency::internal::analysis
                         heldLocksByAccess[&instruction] = currentLocks;
 
                     const std::optional<std::pair<bool, std::string>> operation =
-                        lockOperation(instruction, classifier_);
+                        lockOperation(instruction, classifier_,
+                                      function.getParent()->getDataLayout());
                     if (!operation.has_value())
                         continue;
 

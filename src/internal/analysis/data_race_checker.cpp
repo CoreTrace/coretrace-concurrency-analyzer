@@ -287,6 +287,9 @@ namespace ctrace::concurrency::internal::analysis
                     if (lhs.kind != AccessKind::Write && rhs.kind != AccessKind::Write)
                         continue;
 
+                    if (!lhs.region.mayOverlap(rhs.region))
+                        continue;
+
                     const EntrySet& lhsEntries = reachableEntriesByFunction.at(lhs.functionId);
                     const EntrySet& rhsEntries = reachableEntriesByFunction.at(rhs.functionId);
                     if (!mayRunConcurrently(lhsEntries, rhsEntries, facts))

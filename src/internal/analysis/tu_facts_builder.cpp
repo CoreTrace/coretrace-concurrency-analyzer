@@ -52,15 +52,16 @@ namespace ctrace::concurrency::internal::analysis
         std::string rootBindingKey(const RootBinding& binding)
         {
             if (binding.kind == RootBindingKind::Global)
-                return "global:" + binding.symbol;
+                return "global:" + binding.symbol + binding.region.suffix();
 
-            return "argument:" + std::to_string(binding.argumentIndex);
+            return "argument:" + std::to_string(binding.argumentIndex) + binding.region.suffix();
         }
 
         std::string accessFactKey(const AccessFact& fact)
         {
             std::ostringstream stream;
-            stream << fact.symbol << "|" << fact.functionId << "|" << toString(fact.kind) << "|"
+            stream << fact.symbol << fact.region.suffix() << "|" << fact.functionId << "|"
+                   << toString(fact.kind) << "|"
                    << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.file << "|"
                    << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
                    << fact.loweredLocation.function;
@@ -112,9 +113,10 @@ namespace ctrace::concurrency::internal::analysis
         std::string projectedAccessPreferenceKey(const AccessFact& fact)
         {
             std::ostringstream stream;
-            stream << fact.symbol << "|" << toString(fact.kind) << "|" << fact.loweredLocation.file
-                   << "|" << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.line
-                   << "|" << fact.loweredLocation.column << "|" << fact.loweredLocation.function;
+            stream << fact.symbol << fact.region.suffix() << "|" << toString(fact.kind) << "|"
+                   << fact.loweredLocation.file << "|" << toString(fact.aliasProvenance) << "|"
+                   << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
+                   << fact.loweredLocation.function;
 
             for (const std::string& lock : fact.heldLocks)
                 stream << "|lock:" << lock;
@@ -448,12 +450,14 @@ namespace ctrace::concurrency::internal::analysis
             if (pendingAccess.root.kind == RootBindingKind::Global)
             {
                 pendingAccess.fact.symbol = pendingAccess.root.symbol;
+                pendingAccess.fact.region = pendingAccess.root.region;
                 addConcreteAccess(concreteAccesses, concreteAccessKeys,
                                   std::move(pendingAccess.fact));
                 continue;
             }
 
             const std::string functionKey = pendingAccess.fact.functionId;
+            pendingAccess.fact.region = pendingAccess.root.region;
             pendingAccess.fact.allowCallsiteProjection = true;
             addParameterizedAccess(summariesByFunction, summaryKeysByFunction, functionKey,
                                    ParameterizedAccess{
@@ -492,6 +496,9 @@ namespace ctrace::concurrency::internal::analysis
                         AccessFact concrete = access.fact;
                         concrete.functionId = callBinding.callerFunctionId;
                         concrete.symbol = bindingIt->second.symbol;
+                        // The callee's region is relative to the argument, which the call site
+                        // itself may already have indexed into.
+                        concrete.region = access.fact.region.rebasedOn(bindingIt->second.region);
                         concrete.heldLocks =
                             mergeHeldLocks(concrete.heldLocks, callBinding.callsiteHeldLocks);
                         concrete.allowCallsiteProjection = true;
@@ -509,7 +516,10 @@ namespace ctrace::concurrency::internal::analysis
                         .root = bindingIt->second,
                         .fact = access.fact,
                     };
+                    propagatedAccess.root.region =
+                        access.fact.region.rebasedOn(bindingIt->second.region);
                     propagatedAccess.fact.functionId = callBinding.callerFunctionId;
+                    propagatedAccess.fact.region = propagatedAccess.root.region;
                     propagatedAccess.fact.heldLocks = mergeHeldLocks(
                         propagatedAccess.fact.heldLocks, callBinding.callsiteHeldLocks);
                     if (shouldRemapAccessToCallsite(propagatedAccess.fact,

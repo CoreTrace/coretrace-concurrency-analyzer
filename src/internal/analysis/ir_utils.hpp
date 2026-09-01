@@ -3,6 +3,7 @@
 
 #include "facts.hpp"
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <vector>
@@ -12,6 +13,7 @@ namespace llvm
     class GlobalVariable;
     class Function;
     class Argument;
+    class DataLayout;
     class Instruction;
     class Value;
     class AAResults;
@@ -41,7 +43,18 @@ namespace ctrace::concurrency::internal::analysis
 
     [[nodiscard]] const llvm::GlobalVariable* resolveBaseGlobal(const llvm::Value& value);
     [[nodiscard]] std::optional<std::string> canonicalGlobalId(const llvm::Value& value);
+    /// Canonical identity of a lock object, field-sensitive so that two mutexes stored in the same
+    /// global aggregate are not conflated. Without a data layout the offset cannot be folded and
+    /// every member of an aggregate shares the base identity, as before.
+    [[nodiscard]] std::optional<std::string> canonicalLockId(const llvm::Value& value,
+                                                             const llvm::DataLayout* layout);
     [[nodiscard]] std::optional<std::string> canonicalStorageGroupId(const llvm::Value& value);
+    /// Resolves the tracked root of a pointer, together with the byte range it designates.
+    /// `byteSize` is the extent of the access; zero means unknown and conservatively covers the
+    /// whole object.
+    [[nodiscard]] std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
+                                                                const llvm::DataLayout* layout,
+                                                                std::uint64_t byteSize);
     [[nodiscard]] std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value);
     [[nodiscard]] std::optional<AliasResolvedGlobal>
     resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
