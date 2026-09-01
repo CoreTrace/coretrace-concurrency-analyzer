@@ -43,6 +43,11 @@ namespace ctrace::concurrency::internal::analysis
         /// RAII guard constructor with a `defer_lock` tag, which does not acquire.
         StdLockGuardDeferredCtor,
         StdLockGuardDtor,
+        /// A condition-variable wait that checks nothing on wake-up. The standard permits a
+        /// spurious wake-up, so the caller alone decides whether the condition really holds.
+        CondWaitWithoutPredicate,
+        /// The predicate overload, which rechecks the condition itself and cannot wake early.
+        CondWaitWithPredicate,
     };
 
     class ConcurrencySymbolClassifier

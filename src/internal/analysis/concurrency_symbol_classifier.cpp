@@ -6,6 +6,7 @@
 #include <llvm/IR/Value.h>
 
 #include <cctype>
+#include <optional>
 #include <string>
 
 namespace ctrace::concurrency::internal::analysis
@@ -172,6 +173,33 @@ namespace ctrace::concurrency::internal::analysis
             return name.contains("8try_lockEv") || name.contains("15try_lock_sharedEv");
         }
 
+        /// Whether a condition-variable wait rechecks the condition itself, or leaves that to
+        /// its caller. Nothing but the callee's own signature can answer it.
+        ///
+        /// Counting arguments does not work: the usual predicate is a captureless lambda, an
+        /// empty class that clang drops from the lowered signature, so both overloads arrive
+        /// with the same arity. The mangled name keeps what the lowering discards.
+        std::optional<bool> conditionWaitRechecksItself(llvm::StringRef name)
+        {
+            if (!isStdNamespaceSymbol(name) || !name.contains("condition_variable"))
+                return std::nullopt;
+
+            // `wait` comes in two shapes: the bare one is an ordinary member, the predicate one
+            // is a template, and the mangling marks the difference with `I` against `E`.
+            if (name.contains("4waitE"))
+                return false;
+            if (name.contains("4waitI"))
+                return true;
+
+            // `wait_for` and `wait_until` are both templates, so template arguments separate
+            // nothing. Their return type does: the bare form yields `cv_status`, the predicate
+            // form yields `bool`.
+            if (name.contains("wait_for") || name.contains("wait_until"))
+                return !name.contains("9cv_status");
+
+            return std::nullopt;
+        }
+
         bool isStdThreadJoin(llvm::StringRef name)
         {
             return isStdNamespaceSymbol(name) && name.contains("thread") &&
@@ -229,6 +257,11 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::PThreadJoin;
         if (matchesPlainSymbol(name, "pthread_detach"))
             return CallKind::PThreadDetach;
+        if (matchesPlainSymbol(name, "pthread_cond_wait") ||
+            matchesPlainSymbol(name, "pthread_cond_timedwait"))
+        {
+            return CallKind::CondWaitWithoutPredicate;
+        }
         if (matchesPlainSymbol(name, "pthread_mutex_lock"))
             return CallKind::PThreadMutexLock;
         if (matchesPlainSymbol(name, "pthread_mutex_unlock"))
@@ -274,6 +307,11 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::StdMutexLock;
         if (isStdMutexUnlock(name))
             return CallKind::StdMutexUnlock;
+        if (const std::optional<bool> rechecks = conditionWaitRechecksItself(name);
+            rechecks.has_value())
+        {
+            return *rechecks ? CallKind::CondWaitWithPredicate : CallKind::CondWaitWithoutPredicate;
+        }
         if (isStdLockGuardDtor(name))
             return CallKind::StdLockGuardDtor;
         if (isStdLockGuardCtor(name))
@@ -330,6 +368,10 @@ namespace ctrace::concurrency::internal::analysis
             return "std_lock_guard_deferred_ctor";
         case CallKind::StdLockGuardDtor:
             return "std_lock_guard_dtor";
+        case CallKind::CondWaitWithoutPredicate:
+            return "cond_wait_without_predicate";
+        case CallKind::CondWaitWithPredicate:
+            return "cond_wait_with_predicate";
         case CallKind::StdThreadCtor:
             return "std_thread_ctor";
         case CallKind::StdThreadMove:
