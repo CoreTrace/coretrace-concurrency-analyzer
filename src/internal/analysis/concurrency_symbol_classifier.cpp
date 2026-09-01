@@ -3,6 +3,7 @@
 
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Value.h>
 
 #include <cctype>
@@ -241,6 +242,131 @@ namespace ctrace::concurrency::internal::analysis
         const std::string canonical = canonicalName(*callee);
         return llvm::StringRef(canonical).contains("recursive_mutex") ||
                llvm::StringRef(canonical).contains("recursive_timed_mutex");
+    }
+
+    namespace
+    {
+        /// The function a value denotes, once casts are stripped. Kept local so the classifier
+        /// stays free of the IR-walking layer that depends on it.
+        const llvm::Function* functionBehind(const llvm::Value& value)
+        {
+            return llvm::dyn_cast<llvm::Function>(value.stripPointerCastsAndAliases());
+        }
+    } // namespace
+
+    bool ConcurrencySymbolClassifier::isAsyncSignalUnsafe(const llvm::CallBase& call) const
+    {
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr)
+            return false;
+
+        const std::string canonical = canonicalName(*callee);
+        const llvm::StringRef name = canonical;
+
+        // Deliberately short: only calls whose unsafety is not a matter of interpretation. A
+        // handler that allocates can deadlock against an interrupted allocation, one that prints
+        // can corrupt a stream mid-write, and one that locks can wait on a mutex its own thread
+        // already holds.
+        static constexpr std::string_view kUnsafe[] = {
+            "malloc",  "calloc",  "realloc",  "free",    "exit",     "printf",
+            "fprintf", "sprintf", "snprintf", "vprintf", "vfprintf", "puts",
+            "fputs",   "putchar", "fopen",    "fclose",  "fwrite",   "fread",
+        };
+        for (const std::string_view unsafe : kUnsafe)
+        {
+            if (matchesPlainSymbol(name, unsafe))
+                return true;
+        }
+
+        // Operator new and delete, in every spelling the ABI gives them.
+        if (name.starts_with("_Znw") || name.starts_with("_Zna") || name.starts_with("_ZdlPv") ||
+            name.starts_with("_ZdaPv"))
+        {
+            return true;
+        }
+
+        switch (classify(call))
+        {
+        case CallKind::PThreadMutexLock:
+        case CallKind::PThreadMutexUnlock:
+        case CallKind::PThreadMutexTryLock:
+        case CallKind::PThreadRwLockAcquire:
+        case CallKind::PThreadRwLockTryAcquire:
+        case CallKind::PThreadRwLockUnlock:
+        case CallKind::StdMutexLock:
+        case CallKind::StdMutexUnlock:
+        case CallKind::StdMutexTryLock:
+        case CallKind::StdLockGuardCtor:
+        case CallKind::StdLockGuardDtor:
+        case CallKind::CondWaitWithoutPredicate:
+        case CallKind::CondWaitWithPredicate:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    const llvm::Function*
+    ConcurrencySymbolClassifier::installedSignalHandler(const llvm::CallBase& call) const
+    {
+        constexpr unsigned kSignalHandlerOperandIndex = 1;
+        constexpr unsigned kSigactionStructOperandIndex = 1;
+
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr)
+            return nullptr;
+
+        const std::string canonical = canonicalName(*callee);
+        const llvm::StringRef name = canonical;
+
+        if (matchesPlainSymbol(name, "signal") || matchesPlainSymbol(name, "bsd_signal") ||
+            matchesPlainSymbol(name, "sigset"))
+        {
+            if (call.arg_size() <= kSignalHandlerOperandIndex)
+                return nullptr;
+
+            return functionBehind(*call.getArgOperand(kSignalHandlerOperandIndex));
+        }
+
+        if (!matchesPlainSymbol(name, "sigaction") ||
+            call.arg_size() <= kSigactionStructOperandIndex)
+            return nullptr;
+
+        // `sigaction` takes the handler inside a struct the caller filled in, so the function
+        // appears as a store into that storage rather than as an operand.
+        const llvm::Value* action =
+            call.getArgOperand(kSigactionStructOperandIndex)->stripPointerCastsAndAliases();
+        const auto* storage = llvm::dyn_cast<llvm::AllocaInst>(action);
+        if (storage == nullptr)
+            return nullptr;
+
+        for (const llvm::User* user : storage->users())
+        {
+            const llvm::Value* candidate = user;
+            if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(user))
+            {
+                for (const llvm::User* nested : gep->users())
+                {
+                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(nested))
+                    {
+                        if (const llvm::Function* handler =
+                                functionBehind(*store->getValueOperand()))
+                        {
+                            return handler;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(candidate))
+            {
+                if (const llvm::Function* handler = functionBehind(*store->getValueOperand()))
+                    return handler;
+            }
+        }
+
+        return nullptr;
     }
 
     CallKind ConcurrencySymbolClassifier::classify(const llvm::CallBase& call) const

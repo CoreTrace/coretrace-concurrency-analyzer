@@ -66,6 +66,14 @@ namespace ctrace::concurrency::internal::analysis
         /// callee symbol because a standard library may lower the lock to an unnamed struct,
         /// leaving the type name visible only in the mangled member function.
         [[nodiscard]] bool targetsRecursiveLock(const llvm::CallBase& call) const;
+        /// True for a call a signal handler may not make. POSIX allows only async-signal-safe
+        /// functions there: a handler interrupts its own thread mid-operation, so allocating,
+        /// printing or locking can re-enter a structure the interrupted code left inconsistent.
+        [[nodiscard]] bool isAsyncSignalUnsafe(const llvm::CallBase& call) const;
+        /// The function a `signal` or `sigaction` call installs, when it can be read from the
+        /// call site. Null for any other call, or an installation this analysis cannot follow.
+        [[nodiscard]] const llvm::Function*
+        installedSignalHandler(const llvm::CallBase& call) const;
         [[nodiscard]] static std::string_view toString(CallKind kind);
     };
 } // namespace ctrace::concurrency::internal::analysis
