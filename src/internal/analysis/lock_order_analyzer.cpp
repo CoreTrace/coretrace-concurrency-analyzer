@@ -57,6 +57,13 @@ namespace ctrace::concurrency::internal::analysis
             return it != facts.reachableThreadEntriesByFunction.end() ? it->second : emptyEntries;
         }
 
+        /// Only an acquisition some task can execute may take part in a deadlock.
+        bool participatesInConcurrency(const LockOrderFact& fact, const TUFacts& facts)
+        {
+            return facts.reachableThreadEntriesByFunction.contains(fact.functionId) ||
+                   fact.inRootTask;
+        }
+
         std::vector<std::string> contextLabel(const LockOrderFact& fact, const TUFacts& facts)
         {
             std::vector<std::string> entries = sortedThreadEntries(entriesFor(fact, facts));
@@ -210,12 +217,6 @@ namespace ctrace::concurrency::internal::analysis
         DiagnosticReport report;
         std::unordered_set<std::string> emittedCycleKeys;
 
-        auto participatesInConcurrency = [&](const LockOrderFact& fact)
-        {
-            return facts.reachableThreadEntriesByFunction.contains(fact.functionId) ||
-                   fact.inRootTask;
-        };
-
         for (const LockOrderFact& fact : facts.lockOrders)
         {
             if (fact.firstLockId != fact.secondLockId)
@@ -233,7 +234,7 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_map<std::string, std::vector<const LockOrderFact*>> edgesByFirstLock;
         for (const LockOrderFact& fact : facts.lockOrders)
         {
-            if (fact.firstLockId == fact.secondLockId || !participatesInConcurrency(fact))
+            if (fact.firstLockId == fact.secondLockId || !participatesInConcurrency(fact, facts))
                 continue;
 
             edgesByFirstLock[fact.firstLockId].push_back(&fact);

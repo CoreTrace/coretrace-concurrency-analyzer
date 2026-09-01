@@ -203,12 +203,13 @@ namespace ctrace::concurrency::internal::analysis
                                     });
             };
 
-            return std::any_of(resolutionSites.begin(), resolutionSites.end(),
-                               [&](const ResolutionSite& site)
-                               {
-                                   return site.handleGroupId == handleGroupId &&
-                                          coversEveryReturn(*site.instruction);
-                               });
+            for (const ResolutionSite& site : resolutionSites)
+            {
+                if (site.handleGroupId == handleGroupId && coversEveryReturn(*site.instruction))
+                    return true;
+            }
+
+            return false;
         }
 
         /// A creation inside a loop yields one handle per iteration. Unless the resolution happens
