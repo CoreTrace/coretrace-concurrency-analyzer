@@ -63,4 +63,11 @@ int main() {
 // 	     ↳ handle kind: pthread
 // 	     ↳ lifecycle summary: creates=1, joins=0, detaches=0
 // 	     ↳ outstanding joinable handles: 1
+//
+// Function: main
+// 	severity: ERROR
+// 	ruleId: ThreadArgumentEscapesFrame
+// 	cwe: CWE-562
+// 	at line 23, column 9
+// 	[!!!Error] thread is given a pointer into the frame that created it
 // EXPECT-HUMAN-DIAGNOSTICS-END

@@ -710,6 +710,7 @@ namespace
         std::size_t conditionWait = 0;
         std::size_t forkAfterThread = 0;
         std::size_t unreapedChild = 0;
+        std::size_t threadArgumentEscape = 0;
         /// Symbol the data-race diagnostics must name; empty when not asserted.
         std::string_view racingSymbol;
         bool requiresCxx20 = false;
@@ -873,8 +874,9 @@ namespace
              .intent = "only the handle that is neither joined nor detached is reported",
              .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/missing_join_multiple.c",
-             .intent = "loop-created handles joined once; array-element insensitivity is known",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "loop-created handles joined once; the ids they read are main's own "
+                       "locals, which the unjoined threads outlive",
+             .dataRace = 1, .missingJoin = 1, .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_join_mix_reports_only_unresolved_handle.c",
              .intent = "only the unresolved handle of the pair is reported",
@@ -921,6 +923,16 @@ namespace
             {.path = "tests/fixtures/concurrency-cxx20/cpp_jthread_auto_join_no_missing_join.cpp",
              .intent = "std::jthread joins in its destructor",
              .requiresCxx20 = true},
+
+            // --- thread arguments ----------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_stack_escape.c",
+             .intent = "a detached thread keeps reading a frame that is already gone",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_joined_no_fp.c",
+             .intent = "the join keeps the frame alive at least as long as the thread"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_static_storage_no_fp.c",
+             .intent = "the argument outlives every frame, so detaching is fine"},
 
             // --- process lifecycle ---------------------------------------------------------
             {.path = "tests/fixtures/concurrency/process/fork_after_thread_creation.c",
@@ -1017,6 +1029,8 @@ namespace
             {RuleId::ConditionWaitWithoutPredicate, expectation.conditionWait, "condition-wait"},
             {RuleId::ForkAfterThreadCreation, expectation.forkAfterThread, "fork-after-thread"},
             {RuleId::UnreapedChildProcess, expectation.unreapedChild, "unreaped-child"},
+            {RuleId::ThreadArgumentEscapesFrame, expectation.threadArgumentEscape,
+             "thread-arg-escape"},
         };
 
         bool ok = true;
