@@ -20,6 +20,11 @@ systematically missing from it, and they are the two the project mode carries ac
 - **A global defined elsewhere.** A unit alone cannot tell `extern int g;` backed by real storage
   from an unresolved symbol, so it drops both, and every access to a project-wide global
   disappears with them.
+- **What a lock helper does to the lock it is handed.** A `void take(pthread_mutex_t*)` defined in
+  another unit is opaque here, so an inversion expressed through it is invisible and an access it
+  protects looks unguarded.
+- **Where a thread handle is joined.** A thread started in one unit and joined in another was
+  reported as leaked. This is the one place the project mode *removes* a finding.
 
 Nothing else is shared. In particular, each unit still computes its own lock state, its own
 may-happen-in-parallel relation and its own diagnostics: those are answerable locally, and making
@@ -33,8 +38,9 @@ them global would cost precision without buying anything.
    facts, not recounted from its calls, because those facts already carry the correction that
    rules out two spawns sitting on mutually exclusive branches.
 3. **Only the contradicted units are re-analysed.** A unit is re-run when the program says one of
-   its functions is a thread entry it did not know about, or when an `extern` it dropped turns out
-   to name real storage. On this repository that is 3 units out of 40.
+   its functions is a thread entry it did not know about, when an `extern` it dropped turns out to
+   name real storage, when a helper it only sees declared takes a lock for its caller, or when a
+   handle it creates is joined elsewhere. On this repository that is 3 units out of 40.
 
 ### Symbol identity
 
@@ -75,10 +81,11 @@ touched.
   form first.
 - **Compilation is serial.** The clang backend relies on process-wide state; a race inside a race
   detector would be a poor trade for the wall-clock it would save.
-- **Lock effects do not cross units.** A helper that locks a mutex passed as an argument is
-  summarised within its unit only, so a caller in another unit sees an unlocked path. This is the
-  same gap that exists for parameterised locks inside a unit.
-- **Thread handle lifetimes do not cross units.** A thread created in one unit and joined in
-  another is reported as unjoined.
+- **Lock helper summaries describe one parameter at a time, unconditionally.** A helper that takes
+  the lock on one branch only, or that touches the same parameter twice, is left opaque. Crediting
+  it with protection it does not always provide would silence a real race, which is the worse
+  failure of the two.
+- **Handles are matched only through globals.** A handle passed between units by pointer, or held
+  in a heap structure, is not matched.
 - **The cache is never pruned.** It grows with the number of distinct build configurations; it is
   removed with the build directory it sits in.
