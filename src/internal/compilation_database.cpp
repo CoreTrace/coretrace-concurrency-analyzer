@@ -9,6 +9,7 @@
 #include <llvm/Support/StringSaver.h>
 
 #include <algorithm>
+#include <cctype>
 #include <array>
 #include <map>
 #include <string_view>
@@ -68,6 +69,29 @@ namespace ctrace::concurrency::internal
             return resolved.lexically_normal();
         }
 
+        /// True for an option that asks the compiler to optimize.
+        ///
+        /// The analysis reasons about the program as written: which accesses exist, which locks
+        /// are held around them, which wait rechecks its condition. An optimizer is free to
+        /// merge, inline and delete exactly those, and at -O3 a lock helper disappears into its
+        /// caller and a `wait_for` collapses into an internal primitive. Replaying the build's
+        /// optimization level would therefore report on a program the user never wrote.
+        bool isOptimizationOption(std::string_view argument)
+        {
+            if (argument == "-flto" || argument.starts_with("-flto="))
+                return true;
+
+            if (!argument.starts_with("-O"))
+                return false;
+
+            // `-O`, `-O0`..`-O3`, `-Os`, `-Oz`, `-Og`, `-Ofast`. Anything longer is another
+            // option that merely starts the same way, and must be kept.
+            const std::string_view level = argument.substr(2);
+            return level.empty() || level == "fast" ||
+                   (level.size() == 1 && (std::isdigit(static_cast<unsigned char>(level[0])) != 0 ||
+                                          level[0] == 's' || level[0] == 'z' || level[0] == 'g'));
+        }
+
         /// Drops the compiler, the source and output selection, keeping what describes how the
         /// source is interpreted.
         std::vector<std::string> replayableArguments(const std::vector<std::string>& raw,
@@ -89,6 +113,9 @@ namespace ctrace::concurrency::internal
                 }
 
                 if (argument.starts_with("-o") && argument.size() > 2)
+                    continue;
+
+                if (isOptimizationOption(argument))
                     continue;
 
                 if (absolutePath(argument, directory) == file)
