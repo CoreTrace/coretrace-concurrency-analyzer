@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analysis.hpp"
 
+#include "internal/analysis/condition_wait_checker.hpp"
 #include "internal/analysis/cross_tu/inter_tu_coordinator.hpp"
 #include "internal/analysis/data_race_checker.hpp"
 #include "internal/analysis/lock_order_analyzer.hpp"
@@ -64,6 +65,12 @@ namespace ctrace::concurrency
         {
             internal::analysis::MissingJoinDetector missingJoinDetector;
             appendDiagnostics(report, missingJoinDetector.run(facts));
+        }
+
+        if (options_.isEnabled(RuleId::ConditionWaitWithoutPredicate))
+        {
+            internal::analysis::ConditionWaitChecker conditionWaitChecker;
+            appendDiagnostics(report, conditionWaitChecker.run(facts));
         }
 
         internal::analysis::finalizeReport(report, facts);

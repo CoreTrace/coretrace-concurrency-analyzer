@@ -54,6 +54,21 @@ namespace ctrace::concurrency::internal::diagnostics
                 },
         };
 
+        static const RuleMetadata kConditionWaitWithoutPredicate{
+            .ruleId = RuleId::ConditionWaitWithoutPredicate,
+            .title = "Condition-variable wait rechecks nothing on wake-up",
+            .shortDescription =
+                "Detects a condition-variable wait with neither a predicate nor a loop around "
+                "it, which treats any wake-up as proof that the condition holds.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "662",
+                    .title = "Improper Synchronization",
+                },
+        };
+
         switch (ruleId)
         {
         case RuleId::CompilerDiagnostic:
@@ -64,6 +79,8 @@ namespace ctrace::concurrency::internal::diagnostics
             return kMissingJoin;
         case RuleId::DeadlockLockOrder:
             return kDeadlockLockOrder;
+        case RuleId::ConditionWaitWithoutPredicate:
+            return kConditionWaitWithoutPredicate;
         }
 
         return kCompilerDiagnostic;

@@ -43,6 +43,7 @@ namespace ctrace::concurrency
         DataRaceGlobal,
         MissingJoin,
         DeadlockLockOrder,
+        ConditionWaitWithoutPredicate,
     };
 
     enum class ConfidenceLevel
@@ -135,7 +136,8 @@ namespace ctrace::concurrency
     struct AnalysisOptions
     {
         std::vector<RuleId> enabledRules{RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                         RuleId::DeadlockLockOrder};
+                                         RuleId::DeadlockLockOrder,
+                                         RuleId::ConditionWaitWithoutPredicate};
 
         [[nodiscard]] bool isEnabled(RuleId ruleId) const
         {
@@ -150,7 +152,8 @@ namespace ctrace::concurrency
         [[nodiscard]] static AnalysisOptions allAvailable()
         {
             return AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                                    RuleId::DeadlockLockOrder}};
+                                                    RuleId::DeadlockLockOrder,
+                                                    RuleId::ConditionWaitWithoutPredicate}};
         }
     };
 
@@ -241,6 +244,8 @@ namespace ctrace::concurrency
             return "MissingJoin";
         case RuleId::DeadlockLockOrder:
             return "DeadlockLockOrder";
+        case RuleId::ConditionWaitWithoutPredicate:
+            return "ConditionWaitWithoutPredicate";
         }
         return "UnknownRule";
     }

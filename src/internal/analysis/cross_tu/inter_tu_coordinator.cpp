@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "inter_tu_coordinator.hpp"
 
+#include "internal/analysis/condition_wait_checker.hpp"
 #include "internal/analysis/data_race_checker.hpp"
 #include "internal/analysis/facts.hpp"
 #include "internal/analysis/ir_utils.hpp"
@@ -197,6 +198,9 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
 
             if (options_.isEnabled(RuleId::MissingJoin))
                 append(MissingJoinDetector().run(facts));
+
+            if (options_.isEnabled(RuleId::ConditionWaitWithoutPredicate))
+                append(ConditionWaitChecker().run(facts));
 
             finalizeReport(moduleReport, facts);
 

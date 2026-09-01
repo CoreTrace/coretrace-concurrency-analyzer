@@ -2,6 +2,7 @@
 #include "tu_facts_builder.hpp"
 
 #include "concurrency_symbol_classifier.hpp"
+#include "condition_wait_collector.hpp"
 #include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
 #include "lock_order_collector.hpp"
@@ -26,6 +27,8 @@
 
 #include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <tuple>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
@@ -596,6 +599,78 @@ namespace ctrace::concurrency::internal::analysis
                         lifecycleChanged;
                 }
             }
+        }
+
+        // A helper cannot recheck a condition it does not know, so the obligation to loop around
+        // a bare wait belongs to whoever called it — and keeps travelling outwards until some
+        // caller does loop. Only the outermost function still carrying it is worth reporting:
+        // that is where the missing loop has to be written.
+        {
+            std::unordered_map<std::string, ConditionWaitFact> unguardedByFunction;
+            const ConditionWaitCollector conditionWaitCollector(classifier);
+            for (const ConditionWaitFact& fact : conditionWaitCollector.collect(module))
+            {
+                if (!fact.guardedByLoop)
+                    unguardedByFunction.emplace(fact.functionId, fact);
+            }
+
+            bool waitsChanged = true;
+            while (waitsChanged)
+            {
+                waitsChanged = false;
+
+                for (const DirectCallSite& site : directCallSites)
+                {
+                    if (site.insideLoop || unguardedByFunction.contains(site.callerFunctionId))
+                        continue;
+
+                    const auto calleeIt = unguardedByFunction.find(site.calleeFunctionId);
+                    if (calleeIt == unguardedByFunction.end())
+                        continue;
+
+                    ConditionWaitFact inherited = calleeIt->second;
+                    inherited.functionId = site.callerFunctionId;
+                    inherited.location = site.userLocation;
+                    inherited.viaHelper = true;
+                    unguardedByFunction.emplace(site.callerFunctionId, std::move(inherited));
+                    waitsChanged = true;
+                }
+            }
+
+            std::unordered_set<std::string> answeredByACaller;
+            for (const DirectCallSite& site : directCallSites)
+            {
+                if (!site.insideLoop && unguardedByFunction.contains(site.calleeFunctionId) &&
+                    unguardedByFunction.contains(site.callerFunctionId))
+                {
+                    answeredByACaller.insert(site.calleeFunctionId);
+                }
+            }
+
+            // Filtering happens only here, after propagation: a standard library's own bare
+            // wait is a necessary link in the chain, and dropping it at collection time would
+            // cut the obligation before it ever reached the code that must loop.
+            const std::optional<std::filesystem::path> sourceRoot = primarySourceRoot(module);
+            for (auto& [waitFunctionId, fact] : unguardedByFunction)
+            {
+                if (answeredByACaller.contains(waitFunctionId))
+                    continue;
+
+                if (!isLikelyUserLocation(fact.location, sourceRoot))
+                    continue;
+
+                facts.conditionWaits.push_back(std::move(fact));
+            }
+
+            // The map order is an implementation detail; the report must not inherit it.
+            std::sort(facts.conditionWaits.begin(), facts.conditionWaits.end(),
+                      [](const ConditionWaitFact& lhs, const ConditionWaitFact& rhs)
+                      {
+                          return std::tie(lhs.location.file, lhs.location.line, lhs.location.column,
+                                          lhs.functionId) <
+                                 std::tie(rhs.location.file, rhs.location.line, rhs.location.column,
+                                          rhs.functionId);
+                      });
         }
 
         // Published so another unit's creation of the same global handle knows it is resolved.

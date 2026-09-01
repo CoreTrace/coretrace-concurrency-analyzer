@@ -77,6 +77,8 @@ namespace
                     return "data-race";
                 case ctrace::concurrency::RuleId::MissingJoin:
                     return "missing-join";
+                case ctrace::concurrency::RuleId::ConditionWaitWithoutPredicate:
+                    return "condition-wait";
                 case ctrace::concurrency::RuleId::DeadlockLockOrder:
                     return "deadlock-lock-order";
                 case ctrace::concurrency::RuleId::CompilerDiagnostic:
@@ -158,6 +160,8 @@ namespace
             return "missing-join";
         case RuleId::DeadlockLockOrder:
             return "deadlock-lock-order";
+        case RuleId::ConditionWaitWithoutPredicate:
+            return "condition-wait";
         case RuleId::CompilerDiagnostic:
             return "compiler-diagnostic";
         }
@@ -183,6 +187,12 @@ namespace
         if (value == "deadlock-lock-order")
         {
             out = RuleId::DeadlockLockOrder;
+            return true;
+        }
+
+        if (value == "condition-wait")
+        {
+            out = RuleId::ConditionWaitWithoutPredicate;
             return true;
         }
 

@@ -237,12 +237,30 @@ namespace ctrace::concurrency::internal::analysis
         return EntryPair{std::move(lhs), std::move(rhs)};
     }
 
+    /// A condition-variable wait that rechecks nothing on wake-up, and whether anything around
+    /// it makes that safe.
+    struct ConditionWaitFact
+    {
+        std::string functionId;
+        SourceLocation location;
+        /// Where the wait itself sits, which for a wait reached through a helper is not where
+        /// the missing loop belongs.
+        SourceLocation loweredLocation;
+        /// A loop around the wait is the caller's way of saying "recheck": with one, a wake-up
+        /// that proves nothing simply waits again.
+        bool guardedByLoop = false;
+        /// The wait is reached through a helper rather than written here. The obligation to loop
+        /// travels to the caller, because a helper cannot recheck a condition it does not know.
+        bool viaHelper = false;
+    };
+
     struct TUFacts
     {
         std::vector<SpawnFact> spawns;
         std::vector<AccessFact> accesses;
         std::vector<LockOrderFact> lockOrders;
         std::vector<ThreadLifecycleFact> threadLifecycles;
+        std::vector<ConditionWaitFact> conditionWaits;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;
         /// What each function of this unit does to the locks its callers hand it. Published so a
         /// caller in another unit can see a helper defined here.
