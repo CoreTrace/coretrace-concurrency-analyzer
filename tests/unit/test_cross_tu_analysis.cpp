@@ -270,6 +270,50 @@ namespace
                           "opaque helpers must not produce a lock-order finding");
     }
 
+    std::size_t countMissingJoins(const DiagnosticReport& report)
+    {
+        std::size_t count = 0;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+        {
+            if (diagnostic.ruleId == RuleId::MissingJoin)
+                ++count;
+        }
+
+        return count;
+    }
+
+    /// A thread started in one unit and joined in another is not leaked. Only the program sees
+    /// both halves, so this is a finding the project mode must remove rather than add.
+    bool testHandleJoinedInAnotherUnitIsNotOutstanding()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-handle-lifecycle/start.c") ||
+            !project.add("cross-tu-handle-lifecycle/stop.c") ||
+            !project.add("cross-tu-handle-lifecycle/main.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(project.modules());
+
+        return assertTrue(countMissingJoins(analysis.report) == 0,
+                          "a handle joined in another unit must not be reported as outstanding");
+    }
+
+    /// The creating unit alone must still report it: it genuinely cannot know.
+    bool testCreatingUnitAloneStillReportsTheHandle()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-handle-lifecycle/start.c"))
+            return false;
+
+        const DiagnosticReport report = SingleTUConcurrencyAnalyzer().analyze(project.moduleAt(0));
+
+        return assertTrue(countMissingJoins(report) == 1,
+                          "the creating unit alone has no evidence the handle is ever joined");
+    }
+
     /// Existing single-unit fixtures, analysed as one-unit projects. The project mode adds
     /// knowledge; it must never subtract any. This is what catches a cross-unit change quietly
     /// losing a finding the single-unit path still makes.
@@ -345,6 +389,8 @@ int main()
     ok = testRepeatedUnitIsNotReportedTwice() && ok;
     ok = testExternGlobalDefinedInAnotherUnitIsTracked() && ok;
     ok = testUnresolvedExternIsNotTracked() && ok;
+    ok = testHandleJoinedInAnotherUnitIsNotOutstanding() && ok;
+    ok = testCreatingUnitAloneStillReportsTheHandle() && ok;
     ok = testLockWrapperDefinedInAnotherUnitClosesTheCycle() && ok;
     ok = testWorkerUnitWithoutTheHelpersReportsNoCycle() && ok;
     ok = testProjectModeKeepsEverySingleUnitFinding() && ok;
