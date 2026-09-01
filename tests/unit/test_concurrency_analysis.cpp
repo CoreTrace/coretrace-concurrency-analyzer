@@ -1028,6 +1028,50 @@ namespace
         return ok;
     }
 
+    /// The optimization level a caller asks for must not change what is reported.
+    ///
+    /// This is a regression, not a hypothetical: a project whose compilation database said -O3
+    /// reported nothing, because a lock helper had been inlined into its caller and a wait
+    /// reached through a helper had collapsed into a library primitive. Nothing signalled the
+    /// loss — the analysis simply described a program the user never wrote.
+    bool testOptimizationRequestDoesNotChangeFindings()
+    {
+        constexpr std::string_view kStructuralFixtures[] = {
+            "tests/fixtures/concurrency/condition-variable/cpp_condition_wait_through_helper.cpp",
+            "tests/fixtures/concurrency/deadlock/deadlock_through_lock_wrappers.c",
+            "tests/fixtures/concurrency/data-race/data_race_lock_wrapper_protected_no_fp.c",
+        };
+
+        bool ok = true;
+        for (const std::string_view fixture : kStructuralFixtures)
+        {
+            std::vector<std::string> unoptimized;
+            std::vector<std::string> optimized{"-O2"};
+            if (fixture.ends_with(".cpp"))
+            {
+                unoptimized.emplace_back(kCxx20Standard);
+                optimized.emplace_back(kCxx20Standard);
+            }
+
+            const std::optional<DiagnosticReport> plain =
+                analyzeFixture(fixture, AnalysisOptions::allAvailable(), std::move(unoptimized));
+            const std::optional<DiagnosticReport> requested =
+                analyzeFixture(fixture, AnalysisOptions::allAvailable(), std::move(optimized));
+            if (!plain.has_value() || !requested.has_value())
+            {
+                ok = false;
+                continue;
+            }
+
+            ok = assertTrue(plain->diagnostics.size() == requested->diagnostics.size(),
+                            std::string("asking for -O2 must not change what ") +
+                                std::string(fixture) + " reports") &&
+                 ok;
+        }
+
+        return ok;
+    }
+
     bool testFixtureExpectationTable()
     {
         bool ok = true;
@@ -1131,6 +1175,7 @@ int main()
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
+    ok = testOptimizationRequestDoesNotChangeFindings() && ok;
     ok = testFixtureExpectationTable() && ok;
     ok = testEveryConcurrencyFixtureIsCovered() && ok;
 
