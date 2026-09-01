@@ -20,12 +20,25 @@ namespace ctrace::concurrency::internal::analysis
         PThreadDetach,
         PThreadMutexLock,
         PThreadMutexUnlock,
+        PThreadMutexTryLock,
+        PThreadRwLockAcquire,
+        PThreadRwLockTryAcquire,
+        PThreadRwLockUnlock,
+        PThreadSpinLock,
+        PThreadSpinUnlock,
+        PThreadSpinTryLock,
         StdThreadCtor,
         StdThreadMove,
         StdThreadJoin,
         StdThreadDetach,
         StdMutexLock,
         StdMutexUnlock,
+        StdMutexTryLock,
+        /// RAII guard constructor (`lock_guard`, `unique_lock`, `scoped_lock`, `shared_lock`).
+        StdLockGuardCtor,
+        /// RAII guard constructor with a `defer_lock` tag, which does not acquire.
+        StdLockGuardDeferredCtor,
+        StdLockGuardDtor,
     };
 
     class ConcurrencySymbolClassifier

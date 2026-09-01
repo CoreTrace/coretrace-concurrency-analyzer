@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
+#include "lock_effect_application.hpp"
 
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
@@ -22,39 +23,6 @@ namespace ctrace::concurrency::internal::analysis
     {
         using LockSet = std::set<std::string>;
         using StateMap = std::unordered_map<const llvm::BasicBlock*, std::optional<LockSet>>;
-
-        struct LockOperation
-        {
-            bool isAcquire = false;
-            std::string lockId;
-        };
-
-        std::optional<LockOperation> lockOperation(const llvm::Instruction& instruction,
-                                                   const ConcurrencySymbolClassifier& classifier,
-                                                   const llvm::DataLayout& layout)
-        {
-            const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-            if (call == nullptr || call->arg_size() == 0)
-                return std::nullopt;
-
-            const CallKind kind = classifier.classify(*call);
-            const bool isAcquire =
-                kind == CallKind::PThreadMutexLock || kind == CallKind::StdMutexLock;
-            const bool isRelease =
-                kind == CallKind::PThreadMutexUnlock || kind == CallKind::StdMutexUnlock;
-            if (!isAcquire && !isRelease)
-                return std::nullopt;
-
-            const std::optional<std::string> lockId =
-                canonicalLockId(*call->getArgOperand(0), &layout);
-            if (!lockId.has_value())
-                return std::nullopt;
-
-            return LockOperation{
-                .isAcquire = isAcquire,
-                .lockId = *lockId,
-            };
-        }
 
         LockSet intersectLockSets(const LockSet& lhs, const LockSet& rhs)
         {
@@ -106,6 +74,11 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<LockOrderFact> facts;
         std::unordered_set<std::string> factKeys;
 
+        const SynchronizationEffectResolver effectResolver(classifier_,
+                                                           function.getParent()->getDataLayout());
+        const FunctionLockEffects lockEffects =
+            collectFunctionLockEffects(function, effectResolver);
+
         llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
         llvm::DominatorTree dominatorTree(mutableFunction);
 
@@ -144,38 +117,41 @@ namespace ctrace::concurrency::internal::analysis
                 LockSet currentLocks = *newInState;
                 for (const llvm::Instruction& instruction : *block)
                 {
-                    const std::optional<LockOperation> operation =
-                        lockOperation(instruction, classifier_,
-                                      function.getParent()->getDataLayout());
-                    if (!operation.has_value())
+                    const LockStateChange change = lockStateChangeFor(instruction, lockEffects);
+                    if (change.empty())
                         continue;
 
-                    if (operation->isAcquire)
+                    for (const std::string& lockId : change.released)
+                        currentLocks.erase(lockId);
+
+                    if (!change.orderedAcquired.empty() && !currentLocks.empty())
                     {
                         const SourceLocation location =
                             resolveSourceLocations(instruction).userLocation;
-                        for (const std::string& heldLock : currentLocks)
+
+                        for (const std::string& acquiredLock : change.orderedAcquired)
                         {
-                            const std::string key = functionId(function) + "|" + heldLock + "|" +
-                                                    operation->lockId + "|" + location.file + "|" +
-                                                    std::to_string(location.line) + "|" +
-                                                    std::to_string(location.column);
-                            if (!factKeys.insert(key).second)
-                                continue;
+                            for (const std::string& heldLock : currentLocks)
+                            {
+                                const std::string key = functionId(function) + "|" + heldLock +
+                                                        "|" + acquiredLock + "|" + location.file +
+                                                        "|" + std::to_string(location.line) + "|" +
+                                                        std::to_string(location.column);
+                                if (!factKeys.insert(key).second)
+                                    continue;
 
-                            facts.push_back(LockOrderFact{
-                                .functionId = functionId(function),
-                                .firstLockId = heldLock,
-                                .secondLockId = operation->lockId,
-                                .location = location,
-                            });
+                                facts.push_back(LockOrderFact{
+                                    .functionId = functionId(function),
+                                    .firstLockId = heldLock,
+                                    .secondLockId = acquiredLock,
+                                    .location = location,
+                                });
+                            }
                         }
-
-                        currentLocks.insert(operation->lockId);
-                        continue;
                     }
 
-                    currentLocks.erase(operation->lockId);
+                    for (const std::string& lockId : change.acquired)
+                        currentLocks.insert(lockId);
                 }
 
                 if (inStates[block] != newInState)

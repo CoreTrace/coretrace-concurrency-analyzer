@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
+#include "lock_effect_application.hpp"
 
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
@@ -21,34 +22,6 @@ namespace ctrace::concurrency::internal::analysis
     {
         using LockSet = std::set<std::string>;
         using StateMap = std::unordered_map<const llvm::BasicBlock*, std::optional<LockSet>>;
-
-        std::optional<std::pair<bool, std::string>>
-        lockOperation(const llvm::Instruction& instruction,
-                      const ConcurrencySymbolClassifier& classifier,
-                      const llvm::DataLayout& layout)
-        {
-            const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-            if (call == nullptr)
-                return std::nullopt;
-
-            const CallKind kind = classifier.classify(*call);
-            const bool isAcquire =
-                kind == CallKind::PThreadMutexLock || kind == CallKind::StdMutexLock;
-            const bool isRelease =
-                kind == CallKind::PThreadMutexUnlock || kind == CallKind::StdMutexUnlock;
-            if (!isAcquire && !isRelease)
-                return std::nullopt;
-
-            if (call->arg_size() == 0)
-                return std::nullopt;
-
-            const std::optional<std::string> lockId =
-                canonicalLockId(*call->getArgOperand(0), &layout);
-            if (!lockId.has_value())
-                return std::nullopt;
-
-            return std::make_pair(isAcquire, *lockId);
-        }
 
         LockSet intersectLockSets(const LockSet& lhs, const LockSet& rhs)
         {
@@ -102,6 +75,11 @@ namespace ctrace::concurrency::internal::analysis
         if (trackedAccesses.empty())
             return heldLocksByAccess;
 
+        const SynchronizationEffectResolver effectResolver(classifier_,
+                                                           function.getParent()->getDataLayout());
+        const FunctionLockEffects lockEffects =
+            collectFunctionLockEffects(function, effectResolver);
+
         llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
         llvm::DominatorTree dominatorTree(mutableFunction);
 
@@ -143,16 +121,11 @@ namespace ctrace::concurrency::internal::analysis
                     if (trackedAccesses.contains(&instruction))
                         heldLocksByAccess[&instruction] = currentLocks;
 
-                    const std::optional<std::pair<bool, std::string>> operation =
-                        lockOperation(instruction, classifier_,
-                                      function.getParent()->getDataLayout());
-                    if (!operation.has_value())
-                        continue;
-
-                    if (operation->first)
-                        currentLocks.insert(operation->second);
-                    else
-                        currentLocks.erase(operation->second);
+                    const LockStateChange change = lockStateChangeFor(instruction, lockEffects);
+                    for (const std::string& lockId : change.released)
+                        currentLocks.erase(lockId);
+                    for (const std::string& lockId : change.acquired)
+                        currentLocks.insert(lockId);
                 }
 
                 if (inStates[block] != newInState)

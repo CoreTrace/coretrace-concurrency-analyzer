@@ -109,6 +109,30 @@ namespace ctrace::concurrency::internal::analysis
             return isMoveCtor || isMoveAssignment;
         }
 
+        bool isLockGuardTemplate(llvm::StringRef name)
+        {
+            return name.contains("lock_guard") || name.contains("unique_lock") ||
+                   name.contains("scoped_lock") || name.contains("shared_lock");
+        }
+
+        bool isStdLockGuardCtor(llvm::StringRef name)
+        {
+            return isStdNamespaceSymbol(name) && isLockGuardTemplate(name) &&
+                   (name.contains("C1E") || name.contains("C2E"));
+        }
+
+        /// `unique_lock(m, std::defer_lock)` stores the mutex without locking it.
+        bool isDeferredLockGuardCtor(llvm::StringRef name)
+        {
+            return name.contains("defer_lock");
+        }
+
+        bool isStdLockGuardDtor(llvm::StringRef name)
+        {
+            return isStdNamespaceSymbol(name) && isLockGuardTemplate(name) &&
+                   (name.contains("D1Ev") || name.contains("D2Ev"));
+        }
+
         bool matchesPlainSymbol(llvm::StringRef actual, llvm::StringRef expected)
         {
             return actual == expected ||
@@ -120,7 +144,7 @@ namespace ctrace::concurrency::internal::analysis
             if (!isStdNamespaceSymbol(name) || !name.contains("mutex"))
                 return false;
 
-            return name.contains("4lockEv");
+            return name.contains("4lockEv") || name.contains("11lock_sharedEv");
         }
 
         bool isStdMutexUnlock(llvm::StringRef name)
@@ -128,7 +152,15 @@ namespace ctrace::concurrency::internal::analysis
             if (!isStdNamespaceSymbol(name) || !name.contains("mutex"))
                 return false;
 
-            return name.contains("6unlockEv");
+            return name.contains("6unlockEv") || name.contains("13unlock_sharedEv");
+        }
+
+        bool isStdMutexTryLock(llvm::StringRef name)
+        {
+            if (!isStdNamespaceSymbol(name) || !name.contains("mutex"))
+                return false;
+
+            return name.contains("8try_lockEv") || name.contains("15try_lock_sharedEv");
         }
 
         bool isStdThreadJoin(llvm::StringRef name)
@@ -173,6 +205,25 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::PThreadMutexLock;
         if (matchesPlainSymbol(name, "pthread_mutex_unlock"))
             return CallKind::PThreadMutexUnlock;
+        if (matchesPlainSymbol(name, "pthread_mutex_trylock") ||
+            matchesPlainSymbol(name, "pthread_mutex_timedlock"))
+            return CallKind::PThreadMutexTryLock;
+        if (matchesPlainSymbol(name, "pthread_rwlock_rdlock") ||
+            matchesPlainSymbol(name, "pthread_rwlock_wrlock"))
+            return CallKind::PThreadRwLockAcquire;
+        if (matchesPlainSymbol(name, "pthread_rwlock_tryrdlock") ||
+            matchesPlainSymbol(name, "pthread_rwlock_trywrlock") ||
+            matchesPlainSymbol(name, "pthread_rwlock_timedrdlock") ||
+            matchesPlainSymbol(name, "pthread_rwlock_timedwrlock"))
+            return CallKind::PThreadRwLockTryAcquire;
+        if (matchesPlainSymbol(name, "pthread_rwlock_unlock"))
+            return CallKind::PThreadRwLockUnlock;
+        if (matchesPlainSymbol(name, "pthread_spin_lock"))
+            return CallKind::PThreadSpinLock;
+        if (matchesPlainSymbol(name, "pthread_spin_unlock"))
+            return CallKind::PThreadSpinUnlock;
+        if (matchesPlainSymbol(name, "pthread_spin_trylock"))
+            return CallKind::PThreadSpinTryLock;
         if (isStdThreadMove(name))
             return CallKind::StdThreadMove;
         if (isStdThreadCtor(name))
@@ -181,10 +232,19 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::StdThreadJoin;
         if (isStdThreadDetach(name))
             return CallKind::StdThreadDetach;
+        if (isStdMutexTryLock(name))
+            return CallKind::StdMutexTryLock;
         if (isStdMutexLock(name))
             return CallKind::StdMutexLock;
         if (isStdMutexUnlock(name))
             return CallKind::StdMutexUnlock;
+        if (isStdLockGuardDtor(name))
+            return CallKind::StdLockGuardDtor;
+        if (isStdLockGuardCtor(name))
+        {
+            return isDeferredLockGuardCtor(name) ? CallKind::StdLockGuardDeferredCtor
+                                                 : CallKind::StdLockGuardCtor;
+        }
         return CallKind::Unknown;
     }
 
@@ -204,6 +264,28 @@ namespace ctrace::concurrency::internal::analysis
             return "pthread_mutex_lock";
         case CallKind::PThreadMutexUnlock:
             return "pthread_mutex_unlock";
+        case CallKind::PThreadMutexTryLock:
+            return "pthread_mutex_trylock";
+        case CallKind::PThreadRwLockAcquire:
+            return "pthread_rwlock_acquire";
+        case CallKind::PThreadRwLockTryAcquire:
+            return "pthread_rwlock_tryacquire";
+        case CallKind::PThreadRwLockUnlock:
+            return "pthread_rwlock_unlock";
+        case CallKind::PThreadSpinLock:
+            return "pthread_spin_lock";
+        case CallKind::PThreadSpinUnlock:
+            return "pthread_spin_unlock";
+        case CallKind::PThreadSpinTryLock:
+            return "pthread_spin_trylock";
+        case CallKind::StdMutexTryLock:
+            return "std_mutex_try_lock";
+        case CallKind::StdLockGuardCtor:
+            return "std_lock_guard_ctor";
+        case CallKind::StdLockGuardDeferredCtor:
+            return "std_lock_guard_deferred_ctor";
+        case CallKind::StdLockGuardDtor:
+            return "std_lock_guard_dtor";
         case CallKind::StdThreadCtor:
             return "std_thread_ctor";
         case CallKind::StdThreadMove:
