@@ -270,6 +270,91 @@ namespace ctrace::concurrency::internal::analysis
             return merged;
         }
 
+        /// Locks that may legally be reacquired by their owner: `std::recursive_mutex` and friends,
+        /// recognized by type, plus any `pthread_mutex_t` initialized with a non-default type
+        /// attribute. `PTHREAD_MUTEX_NORMAL` is zero on every supported platform, so a non-zero
+        /// setting selects either recursive or error-checking behaviour, neither of which
+        /// deadlocks on reacquisition.
+        std::unordered_set<std::string>
+        collectRecursiveLockIds(const llvm::Module& module,
+                                const ConcurrencySymbolClassifier& classifier)
+        {
+            constexpr unsigned kAttrOperandIndex = 0;
+            constexpr unsigned kAttrTypeOperandIndex = 1;
+            constexpr unsigned kMutexOperandIndex = 0;
+            constexpr unsigned kInitAttrOperandIndex = 1;
+
+            const SynchronizationEffectResolver effectResolver(classifier, module.getDataLayout());
+            std::unordered_set<std::string> recursiveLockIds;
+            std::unordered_set<std::string> nonDefaultAttributeGroups;
+            std::vector<const llvm::CallBase*> mutexInitCalls;
+
+            for (const llvm::Function& function : module)
+            {
+                if (function.isDeclaration())
+                    continue;
+
+                for (const llvm::BasicBlock& block : function)
+                {
+                    for (const llvm::Instruction& instruction : block)
+                    {
+                        const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                        if (call == nullptr || call->arg_size() == 0)
+                            continue;
+
+                        for (const LockEffect& effect : effectResolver.resolve(*call))
+                        {
+                            if (!effect.recursiveLock)
+                                continue;
+
+                            recursiveLockIds.insert(effect.lockIds.begin(), effect.lockIds.end());
+                        }
+
+                        const CallKind kind = classifier.classify(*call);
+                        if (kind == CallKind::PThreadMutexAttrSetType &&
+                            call->arg_size() > kAttrTypeOperandIndex)
+                        {
+                            const auto* attributeType = llvm::dyn_cast<llvm::ConstantInt>(
+                                call->getArgOperand(kAttrTypeOperandIndex));
+                            if (attributeType == nullptr || attributeType->isZero())
+                                continue;
+
+                            if (const auto attrGroup = canonicalStorageGroupId(
+                                    *call->getArgOperand(kAttrOperandIndex));
+                                attrGroup.has_value())
+                            {
+                                nonDefaultAttributeGroups.insert(*attrGroup);
+                            }
+                            continue;
+                        }
+
+                        if (kind == CallKind::PThreadMutexInit &&
+                            call->arg_size() > kInitAttrOperandIndex)
+                        {
+                            mutexInitCalls.push_back(call);
+                        }
+                    }
+                }
+            }
+
+            for (const llvm::CallBase* call : mutexInitCalls)
+            {
+                const auto attrGroup =
+                    canonicalStorageGroupId(*call->getArgOperand(kInitAttrOperandIndex));
+                if (!attrGroup.has_value() || !nonDefaultAttributeGroups.contains(*attrGroup))
+                    continue;
+
+                if (const auto lockId = canonicalLockId(*call->getArgOperand(kMutexOperandIndex),
+                                                        &module.getDataLayout());
+                    lockId.has_value())
+                {
+                    recursiveLockIds.insert(*lockId);
+                }
+            }
+
+            return recursiveLockIds;
+        }
+
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
@@ -475,6 +560,8 @@ namespace ctrace::concurrency::internal::analysis
             facts.lockOrders.insert(facts.lockOrders.end(), functionLockOrders.begin(),
                                     functionLockOrders.end());
         }
+
+        facts.recursiveLockIds = collectRecursiveLockIds(module, classifier);
 
         for (PendingAccess& pendingAccess : pendingAccesses)
         {
