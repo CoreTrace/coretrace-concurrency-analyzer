@@ -712,6 +712,12 @@ namespace
         bool requiresCxx20 = false;
         /// The fixture is kept to exercise the compiler error path and is never analyzed.
         bool expectCompileFailure = false;
+        /// Counts are lower bounds rather than exact values. Reserved for fixtures whose
+        /// diagnostics depend on how a standard library lowers its own templates: libc++ and
+        /// libstdc++ expose a different number of intermediate accesses for the same source, and
+        /// pinning one of them would fail the other. What must not regress is that the race is
+        /// still found at all.
+        bool countsAreMinimums = false;
     };
 
     // clang-format off
@@ -754,7 +760,8 @@ namespace
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/cpp_move_semantics_race.cpp",
              .intent = "producer and consumer race on the moved-from resource",
-             .dataRace = 2},
+             .dataRace = 1,
+             .countsAreMinimums = true},
 
             // --- data race: regressions fixed, must stay silent ---------------------------
             {.path = "tests/fixtures/concurrency/data-race/data_race_mutex_protected.c",
@@ -970,11 +977,14 @@ namespace
         for (const RuleColumn& column : columns)
         {
             const std::size_t actual = countDiagnosticsForRule(*report, column.rule);
-            if (actual == column.expected)
+            const bool satisfied = expectation.countsAreMinimums ? actual >= column.expected
+                                                                 : actual == column.expected;
+            if (satisfied)
                 continue;
 
             std::cerr << "[FAIL] " << expectation.path << " (" << expectation.intent
-                      << "): " << column.name << " expected " << column.expected
+                      << "): " << column.name << " expected "
+                      << (expectation.countsAreMinimums ? "at least " : "") << column.expected
                       << " diagnostic(s), got " << actual << "\n";
             ok = false;
         }
