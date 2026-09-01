@@ -96,6 +96,15 @@ namespace ctrace::concurrency::internal::analysis
             return true;
         }
 
+        /// `std::jthread` joins in its destructor, so its construction must not be reported as an
+        /// unjoined handle. Its mangling contains "threadC1"/"threadC2" and would otherwise be
+        /// classified as a plain `std::thread` constructor.
+        bool isStdJThreadCtor(llvm::StringRef name)
+        {
+            return isStdNamespaceSymbol(name) && name.contains("jthread") &&
+                   (name.contains("threadC1") || name.contains("threadC2"));
+        }
+
         bool isStdThreadMove(llvm::StringRef name)
         {
             if (!isStdNamespaceSymbol(name) || !name.contains("thread") ||
@@ -169,6 +178,14 @@ namespace ctrace::concurrency::internal::analysis
                    name.contains("4joinEv");
         }
 
+        /// `~thread()` neither joins nor detaches; it terminates when the handle is still
+        /// joinable. It is recognized only so that it is not mistaken for an ownership transfer.
+        bool isStdThreadDtor(llvm::StringRef name)
+        {
+            return isStdNamespaceSymbol(name) && name.contains("thread") &&
+                   (name.contains("threadD1") || name.contains("threadD2"));
+        }
+
         bool isStdThreadDetach(llvm::StringRef name)
         {
             return isStdNamespaceSymbol(name) && name.contains("thread") &&
@@ -224,6 +241,12 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::PThreadSpinUnlock;
         if (matchesPlainSymbol(name, "pthread_spin_trylock"))
             return CallKind::PThreadSpinTryLock;
+        if (matchesPlainSymbol(name, "pthread_mutex_init"))
+            return CallKind::PThreadMutexInit;
+        if (matchesPlainSymbol(name, "pthread_mutexattr_settype"))
+            return CallKind::PThreadMutexAttrSetType;
+        if (isStdJThreadCtor(name))
+            return CallKind::StdJThreadCtor;
         if (isStdThreadMove(name))
             return CallKind::StdThreadMove;
         if (isStdThreadCtor(name))
@@ -232,6 +255,8 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::StdThreadJoin;
         if (isStdThreadDetach(name))
             return CallKind::StdThreadDetach;
+        if (isStdThreadDtor(name))
+            return CallKind::StdThreadDtor;
         if (isStdMutexTryLock(name))
             return CallKind::StdMutexTryLock;
         if (isStdMutexLock(name))
@@ -278,6 +303,14 @@ namespace ctrace::concurrency::internal::analysis
             return "pthread_spin_unlock";
         case CallKind::PThreadSpinTryLock:
             return "pthread_spin_trylock";
+        case CallKind::PThreadMutexInit:
+            return "pthread_mutex_init";
+        case CallKind::PThreadMutexAttrSetType:
+            return "pthread_mutexattr_settype";
+        case CallKind::StdThreadDtor:
+            return "std_thread_dtor";
+        case CallKind::StdJThreadCtor:
+            return "std_jthread_ctor";
         case CallKind::StdMutexTryLock:
             return "std_mutex_try_lock";
         case CallKind::StdLockGuardCtor:

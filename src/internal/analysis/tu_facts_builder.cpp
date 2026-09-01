@@ -8,10 +8,14 @@
 #include "lock_scope_tracker.hpp"
 #include "lock_state_propagator.hpp"
 #include "shared_access_collector.hpp"
+#include "task_concurrency_analyzer.hpp"
 #include "thread_lifecycle_collector.hpp"
 #include "thread_spawn_detector.hpp"
 #include "thread_context_propagator.hpp"
 
+#include "synchronization_effects.hpp"
+
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/Instructions.h>
@@ -41,7 +45,16 @@ namespace ctrace::concurrency::internal::analysis
             std::unordered_map<unsigned, RootBinding> argumentBindings;
             SourceLocation callsiteLocation;
             std::set<std::string> callsiteHeldLocks;
+            bool callerInRootTask = false;
+            ThreadEntrySet callsiteLiveEntries;
         };
+
+        ThreadEntrySet mergeLiveEntries(const ThreadEntrySet& lhs, const ThreadEntrySet& rhs)
+        {
+            ThreadEntrySet merged = lhs;
+            merged.insert(rhs.begin(), rhs.end());
+            return merged;
+        }
 
         struct LifecycleArgumentBinding
         {
@@ -259,7 +272,8 @@ namespace ctrace::concurrency::internal::analysis
 
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
-            const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall)
+            const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
+            const TaskConcurrencyResult& taskConcurrency)
         {
             std::vector<DirectCallBinding> bindings;
 
@@ -273,6 +287,13 @@ namespace ctrace::concurrency::internal::analysis
                 binding.callerFunctionId = site.callerFunctionId;
                 binding.calleeFunctionId = site.calleeFunctionId;
                 binding.callsiteLocation = site.userLocation;
+                binding.callerInRootTask =
+                    taskConcurrency.rootTaskFunctions.contains(site.callerFunctionId);
+                if (const auto liveIt = taskConcurrency.liveEntriesAtInstruction.find(site.call);
+                    liveIt != taskConcurrency.liveEntriesAtInstruction.end())
+                {
+                    binding.callsiteLiveEntries = liveIt->second;
+                }
                 if (const auto heldLocksIt = heldLocksByCall.find(site.call);
                     heldLocksIt != heldLocksByCall.end())
                 {
@@ -333,10 +354,27 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         ThreadContextPropagator threadContextPropagator(classifier);
+        const TaskConcurrencyAnalyzer taskConcurrencyAnalyzer(classifier);
+        const TaskConcurrencyResult taskConcurrency =
+            taskConcurrencyAnalyzer.analyze(module, directCallSites);
 
         TUFacts facts;
         facts.spawns = std::move(spawnFacts.spawns);
         facts.entryConcurrency = std::move(spawnFacts.entryConcurrency);
+        facts.sequencedEntryPairs = taskConcurrency.sequencedEntryPairs;
+
+        // Replace the raw spawn-site count by the number of instances that can actually be alive at
+        // once: two spawn sites on mutually exclusive branches, or a spawn/join pair repeated
+        // sequentially, never yield two concurrent instances.
+        for (auto& [entryId, concurrency] : facts.entryConcurrency)
+        {
+            if (concurrency.staticSpawnCount >= 2 &&
+                !taskConcurrency.overlappingSpawnEntries.contains(entryId))
+            {
+                concurrency.staticSpawnCount = 1;
+            }
+        }
+
         facts.reachableThreadEntriesByFunction =
             threadContextPropagator.collect(module, facts.entryConcurrency);
 
@@ -427,8 +465,13 @@ namespace ctrace::concurrency::internal::analysis
                 functionEntryLocks = entryLocksIt->second;
             }
 
-            std::vector<LockOrderFact> functionLockOrders =
-                lockOrderCollector.collect(function, functionEntryLocks);
+            const bool inRootTask =
+                taskConcurrency.rootTaskFunctions.contains(functionId(function));
+            std::vector<LockOrderFact> functionLockOrders = lockOrderCollector.collect(
+                function, functionEntryLocks, taskConcurrency.liveEntriesAtInstruction);
+            for (LockOrderFact& lockOrder : functionLockOrders)
+                lockOrder.inRootTask = inRootTask;
+
             facts.lockOrders.insert(facts.lockOrders.end(), functionLockOrders.begin(),
                                     functionLockOrders.end());
         }
@@ -446,6 +489,15 @@ namespace ctrace::concurrency::internal::analysis
                 pendingAccess.fact.heldLocks =
                     mergeHeldLocks(pendingAccess.fact.heldLocks, entryLocksIt->second);
             }
+
+            if (const auto liveIt =
+                    taskConcurrency.liveEntriesAtInstruction.find(pendingAccess.instruction);
+                liveIt != taskConcurrency.liveEntriesAtInstruction.end())
+            {
+                pendingAccess.fact.liveEntries = liveIt->second;
+            }
+            pendingAccess.fact.inRootTask =
+                taskConcurrency.rootTaskFunctions.contains(pendingAccess.fact.functionId);
 
             if (pendingAccess.root.kind == RootBindingKind::Global)
             {
@@ -466,8 +518,8 @@ namespace ctrace::concurrency::internal::analysis
                                    });
         }
 
-        const std::vector<DirectCallBinding> directCallBindings =
-            buildDirectCallBindings(directCallSites, lockPropagation.effectiveHeldLocksByCall);
+        const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
+            directCallSites, lockPropagation.effectiveHeldLocksByCall, taskConcurrency);
 
         bool changed = true;
         while (changed)
@@ -501,6 +553,9 @@ namespace ctrace::concurrency::internal::analysis
                         concrete.region = access.fact.region.rebasedOn(bindingIt->second.region);
                         concrete.heldLocks =
                             mergeHeldLocks(concrete.heldLocks, callBinding.callsiteHeldLocks);
+                        concrete.inRootTask = callBinding.callerInRootTask;
+                        concrete.liveEntries =
+                            mergeLiveEntries(concrete.liveEntries, callBinding.callsiteLiveEntries);
                         concrete.allowCallsiteProjection = true;
                         if (shouldRemapAccessToCallsite(concrete, callBinding.callsiteLocation))
                         {
@@ -522,6 +577,9 @@ namespace ctrace::concurrency::internal::analysis
                     propagatedAccess.fact.region = propagatedAccess.root.region;
                     propagatedAccess.fact.heldLocks = mergeHeldLocks(
                         propagatedAccess.fact.heldLocks, callBinding.callsiteHeldLocks);
+                    propagatedAccess.fact.inRootTask = callBinding.callerInRootTask;
+                    propagatedAccess.fact.liveEntries = mergeLiveEntries(
+                        propagatedAccess.fact.liveEntries, callBinding.callsiteLiveEntries);
                     if (shouldRemapAccessToCallsite(propagatedAccess.fact,
                                                     callBinding.callsiteLocation))
                     {
@@ -557,6 +615,9 @@ namespace ctrace::concurrency::internal::analysis
                     remapped.functionId = callBinding.callerFunctionId;
                     remapped.heldLocks =
                         mergeHeldLocks(remapped.heldLocks, callBinding.callsiteHeldLocks);
+                    remapped.inRootTask = callBinding.callerInRootTask;
+                    remapped.liveEntries =
+                        mergeLiveEntries(remapped.liveEntries, callBinding.callsiteLiveEntries);
                     remapped.userLocation = callBinding.callsiteLocation;
                     if (remapped.userLocation.file != remapped.loweredLocation.file)
                         remapped.allowCallsiteProjection = false;

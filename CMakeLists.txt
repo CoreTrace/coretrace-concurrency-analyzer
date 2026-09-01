@@ -47,6 +47,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/lock_effect_application.cpp
     src/internal/analysis/lock_scope_tracker.cpp
     src/internal/analysis/synchronization_effects.cpp
+    src/internal/analysis/task_concurrency_analyzer.cpp
     src/internal/reporting/report_renderer.cpp
     src/internal/analysis/shared_access_collector.cpp
     src/internal/analysis/thread_context_propagator.cpp

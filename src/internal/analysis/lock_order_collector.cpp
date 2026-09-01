@@ -69,7 +69,8 @@ namespace ctrace::concurrency::internal::analysis
 
     std::vector<LockOrderFact>
     LockOrderCollector::collect(const llvm::Function& function,
-                                const std::set<std::string>& initialHeldLocks) const
+                                const std::set<std::string>& initialHeldLocks,
+                                const LiveEntriesByInstruction& liveEntriesByInstruction) const
     {
         std::vector<LockOrderFact> facts;
         std::unordered_set<std::string> factKeys;
@@ -128,6 +129,12 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         const SourceLocation location =
                             resolveSourceLocations(instruction).userLocation;
+                        ThreadEntrySet liveEntries;
+                        if (const auto liveIt = liveEntriesByInstruction.find(&instruction);
+                            liveIt != liveEntriesByInstruction.end())
+                        {
+                            liveEntries = liveIt->second;
+                        }
 
                         for (const std::string& acquiredLock : change.orderedAcquired)
                         {
@@ -145,6 +152,8 @@ namespace ctrace::concurrency::internal::analysis
                                     .firstLockId = heldLock,
                                     .secondLockId = acquiredLock,
                                     .location = location,
+                                    .heldLocks = currentLocks,
+                                    .liveEntries = liveEntries,
                                 });
                             }
                         }
