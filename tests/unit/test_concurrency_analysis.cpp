@@ -728,6 +728,10 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/data_race_basic.c",
              .intent = "two workers increment the same global",
              .dataRace = 1, .racingSymbol = "shared_counter"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_conditional_lock_wrapper.c",
+             .intent = "a helper that locks on one branch only cannot protect its caller",
+             .dataRace = 1, .racingSymbol = "shared_total"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_split_symbols.c",
              .intent = "only the unprotected global of the pair races",
              .dataRace = 1, .racingSymbol = "racy_counter"},
@@ -766,6 +770,9 @@ namespace
             // --- data race: regressions fixed, must stay silent ---------------------------
             {.path = "tests/fixtures/concurrency/data-race/data_race_mutex_protected.c",
              .intent = "a common mutex protects both accesses"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_lock_wrapper_protected_no_fp.c",
+             .intent = "a lock taken through a helper still protects the access"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_callsite_lock_protected.c",
              .intent = "the lock held at the call site protects the helper"},
             {.path = "tests/fixtures/concurrency/data-race/"
@@ -813,6 +820,9 @@ namespace
              .dataRace = 1, .racingSymbol = "buffer_index"},
 
             // --- deadlock -----------------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_through_lock_wrappers.c",
+             .intent = "an inversion expressed only through lock helpers is still a cycle",
+             .deadlock = 1},
             {.path = "tests/fixtures/concurrency/deadlock/deadlock_basic.c",
              .intent = "two workers take the same pair of locks in opposite orders",
              .deadlock = 1},
