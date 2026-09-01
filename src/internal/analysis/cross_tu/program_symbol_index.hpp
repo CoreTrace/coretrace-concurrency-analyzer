@@ -6,6 +6,7 @@
 
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace llvm
 {
@@ -60,6 +61,9 @@ namespace ctrace::concurrency::internal::analysis
         [[nodiscard]] const std::vector<ParameterLockEffect>*
         lockSummaryFor(const llvm::Function& function) const;
 
+        /// True when some unit joins or detaches the thread handle held in this global.
+        [[nodiscard]] bool resolvesHandleElsewhere(const llvm::GlobalVariable& handle) const;
+
         [[nodiscard]] const ProgramDefinedGlobals& definedGlobals() const noexcept
         {
             return definedGlobals_;
@@ -81,5 +85,6 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_map<std::string, EntrySpawns> spawnSitesByEntry_;
         ProgramDefinedGlobals definedGlobals_;
         std::unordered_map<std::string, std::vector<ParameterLockEffect>> lockSummariesBySymbol_;
+        std::unordered_set<std::string> resolvedHandleSymbols_;
     };
 } // namespace ctrace::concurrency::internal::analysis

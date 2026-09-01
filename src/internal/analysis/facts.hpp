@@ -247,6 +247,9 @@ namespace ctrace::concurrency::internal::analysis
         /// What each function of this unit does to the locks its callers hand it. Published so a
         /// caller in another unit can see a helper defined here.
         LockWrapperSummaries lockWrapperSummaries;
+        /// Handle group ids naming a global that this unit joins or detaches. A thread created
+        /// in one unit and joined in another is resolved, and only the whole program sees it.
+        std::unordered_set<std::string> resolvedGlobalHandleIds;
         std::unordered_map<std::string, ThreadEntrySet> reachableThreadEntriesByFunction;
         /// Locks whose runtime type or attributes allow recursive acquisition.
         std::unordered_set<std::string> recursiveLockIds;

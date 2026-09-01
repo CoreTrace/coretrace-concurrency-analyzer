@@ -503,6 +503,26 @@ namespace ctrace::concurrency::internal::analysis
         return normalizeValueName(global->getName());
     }
 
+    const llvm::GlobalVariable* globalOfStorageGroupId(const llvm::Module& module,
+                                                       std::string_view handleGroupId)
+    {
+        constexpr std::string_view kGlobalPrefix = "global:";
+        if (!handleGroupId.starts_with(kGlobalPrefix))
+            return nullptr;
+
+        // The id may carry an access path after the name; the object is the part before it.
+        std::string_view name = handleGroupId.substr(kGlobalPrefix.size());
+        const std::size_t end = name.find_first_not_of(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.$");
+        if (end != std::string_view::npos)
+            name = name.substr(0, end);
+
+        if (name.empty())
+            return nullptr;
+
+        return module.getGlobalVariable(name, /*AllowInternal=*/true);
+    }
+
     std::optional<std::string> parameterLockId(const llvm::Value& value)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;

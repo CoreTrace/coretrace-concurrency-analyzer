@@ -80,6 +80,11 @@ namespace ctrace::concurrency::internal::analysis
                                                              const llvm::DataLayout* layout);
     [[nodiscard]] std::optional<std::string> canonicalStorageGroupId(const llvm::Value& value);
 
+    /// The module-level global a handle group id designates, or null when the id names a stack
+    /// slot or a parameter. Only a global can be the same object in two translation units.
+    [[nodiscard]] const llvm::GlobalVariable*
+    globalOfStorageGroupId(const llvm::Module& module, std::string_view handleGroupId);
+
     /// Identity of a lock a function receives as a parameter, as seen from inside that function.
     /// It stands for whatever the caller passed, and is only meaningful while summarising the
     /// callee: every consumer sees it substituted by the caller's own lock.

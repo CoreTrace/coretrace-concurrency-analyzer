@@ -598,6 +598,31 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        // Published so another unit's creation of the same global handle knows it is resolved.
+        for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
+        {
+            const bool resolves = fact.action == ThreadLifecycleAction::Join ||
+                                  fact.action == ThreadLifecycleAction::Detach;
+            if (resolves && globalOfStorageGroupId(module, fact.handleGroupId) != nullptr)
+                facts.resolvedGlobalHandleIds.insert(fact.handleGroupId);
+        }
+
+        // A handle this unit creates on a global that another unit joins is not outstanding: the
+        // program resolves it, and only the program can see that.
+        if (crossTU)
+        {
+            std::erase_if(facts.threadLifecycles,
+                          [&](const ThreadLifecycleFact& fact)
+                          {
+                              if (fact.action != ThreadLifecycleAction::Create)
+                                  return false;
+
+                              const llvm::GlobalVariable* handle =
+                                  globalOfStorageGroupId(module, fact.handleGroupId);
+                              return handle != nullptr && program->resolvesHandleElsewhere(*handle);
+                          });
+        }
+
         std::vector<AccessFact> concreteAccesses;
         std::unordered_set<std::string> concreteAccessKeys;
         std::unordered_map<std::string, std::vector<ParameterizedAccess>> summariesByFunction;

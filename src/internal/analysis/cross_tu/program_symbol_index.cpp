@@ -26,6 +26,15 @@ namespace ctrace::concurrency::internal::analysis
         // `entryConcurrency` is already corrected by this module's own may-happen-in-parallel
         // analysis: two spawns on mutually exclusive branches count as one instance. Re-counting
         // spawn calls here would discard that verdict and report races the unit had ruled out.
+        for (const std::string& handleGroupId : facts.resolvedGlobalHandleIds)
+        {
+            if (const llvm::GlobalVariable* handle = globalOfStorageGroupId(module, handleGroupId);
+                handle != nullptr)
+            {
+                resolvedHandleSymbols_.insert(programSymbol(*handle));
+            }
+        }
+
         for (const auto& [helperFunctionId, parameterEffects] : facts.lockWrapperSummaries)
         {
             const llvm::Function* helper = module.getFunction(helperFunctionId);
@@ -52,6 +61,11 @@ namespace ctrace::concurrency::internal::analysis
     {
         const auto it = lockSummariesBySymbol_.find(programSymbol(function));
         return it == lockSummariesBySymbol_.end() ? nullptr : &it->second;
+    }
+
+    bool ProgramSymbolIndex::resolvesHandleElsewhere(const llvm::GlobalVariable& handle) const
+    {
+        return resolvedHandleSymbols_.contains(programSymbol(handle));
     }
 
     bool ProgramSymbolIndex::isThreadEntry(const llvm::Function& function) const
