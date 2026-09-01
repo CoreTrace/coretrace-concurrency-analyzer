@@ -47,6 +47,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/diagnostics/diagnostic_catalog.cpp
     src/internal/analysis/ir_utils.cpp
     src/internal/analysis/lock_effect_application.cpp
+    src/internal/analysis/lock_wrapper_summaries.cpp
     src/internal/analysis/lock_scope_tracker.cpp
     src/internal/analysis/synchronization_effects.cpp
     src/internal/analysis/task_concurrency_analyzer.cpp

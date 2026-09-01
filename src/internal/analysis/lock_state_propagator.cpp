@@ -34,8 +34,9 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    LockStatePropagator::LockStatePropagator(const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+    LockStatePropagator::LockStatePropagator(const ConcurrencySymbolClassifier& classifier,
+                                             const LockWrapperSummaries* summaries)
+        : classifier_(classifier), summaries_(summaries)
     {
     }
 
@@ -69,7 +70,7 @@ namespace ctrace::concurrency::internal::analysis
             incomingCallsByCallee[callSite.calleeFunctionId].push_back(&callSite);
         }
 
-        LockScopeTracker lockScopeTracker(classifier_);
+        LockScopeTracker lockScopeTracker(classifier_, summaries_);
         std::unordered_map<const llvm::CallBase*, std::set<std::string>> localHeldLocksByCall;
         for (const llvm::Function& function : module)
         {

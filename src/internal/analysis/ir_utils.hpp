@@ -79,6 +79,11 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] std::optional<std::string> canonicalLockId(const llvm::Value& value,
                                                              const llvm::DataLayout* layout);
     [[nodiscard]] std::optional<std::string> canonicalStorageGroupId(const llvm::Value& value);
+
+    /// Identity of a lock a function receives as a parameter, as seen from inside that function.
+    /// It stands for whatever the caller passed, and is only meaningful while summarising the
+    /// callee: every consumer sees it substituted by the caller's own lock.
+    [[nodiscard]] std::optional<std::string> parameterLockId(const llvm::Value& value);
     /// Resolves the tracked root of a pointer, together with the byte range it designates.
     /// `byteSize` is the extent of the access; zero means unknown and conservatively covers the
     /// whole object.

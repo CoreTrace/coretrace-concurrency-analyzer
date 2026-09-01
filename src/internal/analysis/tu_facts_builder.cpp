@@ -7,6 +7,7 @@
 #include "lock_order_collector.hpp"
 #include "lock_scope_tracker.hpp"
 #include "lock_state_propagator.hpp"
+#include "lock_wrapper_summaries.hpp"
 #include "shared_access_collector.hpp"
 #include "cross_tu/program_symbol_index.hpp"
 #include "task_concurrency_analyzer.hpp"
@@ -438,6 +439,11 @@ namespace ctrace::concurrency::internal::analysis
         const ProgramDefinedGlobals* programDefined =
             crossTU ? &program->definedGlobals() : nullptr;
 
+        // Resolved once for the whole unit: a wrapper's effect on the lock it is handed does not
+        // depend on which caller is being looked at.
+        const LockWrapperSummaries lockWrapperSummaries =
+            collectLockWrapperSummaries(module, classifier, module.getDataLayout());
+
         SharedAccessCollector accessCollector;
         std::vector<PendingAccess> pendingAccesses =
             accessCollector.collect(module, programDefined);
@@ -452,7 +458,7 @@ namespace ctrace::concurrency::internal::analysis
             functionsById[pendingAccess.fact.functionId] = pendingAccess.function;
         }
 
-        LockScopeTracker lockScopeTracker(classifier);
+        LockScopeTracker lockScopeTracker(classifier, &lockWrapperSummaries);
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;
         for (const auto& [functionKey, trackedAccesses] : trackedAccessesByFunction)
         {
@@ -578,11 +584,11 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_map<std::string, std::vector<ParameterizedAccess>> summariesByFunction;
         std::unordered_map<std::string, std::unordered_set<std::string>> summaryKeysByFunction;
 
-        LockStatePropagator lockStatePropagator(classifier);
+        LockStatePropagator lockStatePropagator(classifier, &lockWrapperSummaries);
         const LockPropagationResult lockPropagation =
             lockStatePropagator.collect(module, directCallSites);
 
-        LockOrderCollector lockOrderCollector(classifier);
+        LockOrderCollector lockOrderCollector(classifier, &lockWrapperSummaries);
         for (const llvm::Function& function : module)
         {
             if (function.isDeclaration())

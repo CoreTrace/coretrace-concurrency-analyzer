@@ -4,6 +4,7 @@
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
 
+#include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Value.h>
 
@@ -46,9 +47,60 @@ namespace ctrace::concurrency::internal::analysis
     } // namespace
 
     SynchronizationEffectResolver::SynchronizationEffectResolver(
-        const ConcurrencySymbolClassifier& classifier, const llvm::DataLayout& layout)
-        : classifier_(classifier), layout_(layout)
+        const ConcurrencySymbolClassifier& classifier, const llvm::DataLayout& layout,
+        const LockWrapperSummaries* summaries, bool nameParameterLocks)
+        : classifier_(classifier), layout_(layout), summaries_(summaries),
+          nameParameterLocks_(nameParameterLocks)
     {
+    }
+
+    std::optional<std::string>
+    SynchronizationEffectResolver::lockIdOf(const llvm::Value& value) const
+    {
+        if (std::optional<std::string> lockId = canonicalLockId(value, &layout_);
+            lockId.has_value())
+        {
+            return lockId;
+        }
+
+        return nameParameterLocks_ ? parameterLockId(value) : std::nullopt;
+    }
+
+    std::vector<LockEffect>
+    SynchronizationEffectResolver::summarizedEffects(const llvm::CallBase& call) const
+    {
+        if (summaries_ == nullptr)
+            return {};
+
+        const llvm::Function* callee = call.getCalledFunction();
+        if (callee == nullptr)
+            return {};
+
+        const auto summaryIt = summaries_->find(functionId(*callee));
+        if (summaryIt == summaries_->end())
+            return {};
+
+        std::vector<LockEffect> effects;
+        for (const ParameterLockEffect& parameter : summaryIt->second)
+        {
+            if (parameter.argumentIndex >= call.arg_size())
+                continue;
+
+            // The placeholder the callee was summarised against becomes the lock this caller
+            // actually passed.
+            const llvm::Value& operand = *call.getArgOperand(parameter.argumentIndex);
+            const std::optional<std::string> lockId = lockIdOf(operand);
+            if (!lockId.has_value())
+                continue;
+
+            effects.push_back(LockEffect{
+                .kind = parameter.acquires ? LockEffectKind::Acquire : LockEffectKind::Release,
+                .lockIds = {*lockId},
+                .recursiveLock = parameter.recursiveLock || designatesRecursiveLockType(operand),
+            });
+        }
+
+        return effects;
     }
 
     std::vector<LockEffect> SynchronizationEffectResolver::resolve(const llvm::CallBase& call) const
@@ -57,11 +109,14 @@ namespace ctrace::concurrency::internal::analysis
         if (call.arg_size() == 0)
             return {};
 
+        if (kind == CallKind::Unknown)
+            return summarizedEffects(call);
+
         if (const std::optional<LockEffectKind> plainEffect = plainLockEffect(kind);
             plainEffect.has_value())
         {
             const llvm::Value& lockOperand = *call.getArgOperand(kLockOperandIndex);
-            const std::optional<std::string> lockId = canonicalLockId(lockOperand, &layout_);
+            const std::optional<std::string> lockId = lockIdOf(lockOperand);
             if (!lockId.has_value())
                 return {};
 
@@ -108,8 +163,7 @@ namespace ctrace::concurrency::internal::analysis
             if (!operand.getType()->isPointerTy())
                 continue;
 
-            if (const std::optional<std::string> lockId = canonicalLockId(operand, &layout_);
-                lockId.has_value())
+            if (const std::optional<std::string> lockId = lockIdOf(operand); lockId.has_value())
             {
                 effect.lockIds.push_back(*lockId);
                 effect.recursiveLock = effect.recursiveLock ||

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "lock_wrapper_summaries.hpp"
+
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -19,7 +21,11 @@ namespace ctrace::concurrency::internal::analysis
     class LockScopeTracker
     {
       public:
-        explicit LockScopeTracker(const ConcurrencySymbolClassifier& classifier);
+        /// `summaries` carries the lock effects user-written wrappers have on the arguments
+        /// they are given, so a lock taken inside a helper still protects the code after the
+        /// call. Null leaves those calls opaque, as before.
+        explicit LockScopeTracker(const ConcurrencySymbolClassifier& classifier,
+                                  const LockWrapperSummaries* summaries = nullptr);
 
         [[nodiscard]] std::unordered_map<const llvm::Instruction*, std::set<std::string>>
         collectHeldLocks(const llvm::Function& function,
@@ -27,5 +33,6 @@ namespace ctrace::concurrency::internal::analysis
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        const LockWrapperSummaries* summaries_ = nullptr;
     };
 } // namespace ctrace::concurrency::internal::analysis

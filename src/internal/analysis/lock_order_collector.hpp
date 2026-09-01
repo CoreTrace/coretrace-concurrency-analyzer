@@ -2,6 +2,7 @@
 #pragma once
 
 #include "facts.hpp"
+#include "lock_wrapper_summaries.hpp"
 
 #include <unordered_map>
 #include <vector>
@@ -22,7 +23,11 @@ namespace ctrace::concurrency::internal::analysis
         using LiveEntriesByInstruction =
             std::unordered_map<const llvm::Instruction*, ThreadEntrySet>;
 
-        explicit LockOrderCollector(const ConcurrencySymbolClassifier& classifier);
+        /// `summaries` carries the lock effects user-written wrappers have on the arguments
+        /// they are given, so a lock taken inside a helper still protects the code after the
+        /// call. Null leaves those calls opaque, as before.
+        explicit LockOrderCollector(const ConcurrencySymbolClassifier& classifier,
+                                    const LockWrapperSummaries* summaries = nullptr);
 
         [[nodiscard]] std::vector<LockOrderFact>
         collect(const llvm::Function& function, const std::set<std::string>& initialHeldLocks = {},
@@ -30,5 +35,6 @@ namespace ctrace::concurrency::internal::analysis
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        const LockWrapperSummaries* summaries_ = nullptr;
     };
 } // namespace ctrace::concurrency::internal::analysis

@@ -503,6 +503,17 @@ namespace ctrace::concurrency::internal::analysis
         return normalizeValueName(global->getName());
     }
 
+    std::optional<std::string> parameterLockId(const llvm::Value& value)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        const auto* argument =
+            llvm::dyn_cast_or_null<llvm::Argument>(resolveCopiedValue(value, seen, nullptr));
+        if (argument == nullptr)
+            return std::nullopt;
+
+        return "%arg" + std::to_string(argument->getArgNo());
+    }
+
     std::optional<std::string> canonicalLockId(const llvm::Value& value,
                                                const llvm::DataLayout* layout)
     {

@@ -61,8 +61,9 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    LockScopeTracker::LockScopeTracker(const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+    LockScopeTracker::LockScopeTracker(const ConcurrencySymbolClassifier& classifier,
+                                       const LockWrapperSummaries* summaries)
+        : classifier_(classifier), summaries_(summaries)
     {
     }
 
@@ -75,8 +76,8 @@ namespace ctrace::concurrency::internal::analysis
         if (trackedAccesses.empty())
             return heldLocksByAccess;
 
-        const SynchronizationEffectResolver effectResolver(classifier_,
-                                                           function.getParent()->getDataLayout());
+        const SynchronizationEffectResolver effectResolver(
+            classifier_, function.getParent()->getDataLayout(), summaries_);
         const FunctionLockEffects lockEffects =
             collectFunctionLockEffects(function, effectResolver);
 
