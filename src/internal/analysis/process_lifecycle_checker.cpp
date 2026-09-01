@@ -31,6 +31,8 @@ namespace ctrace::concurrency::internal::analysis
                     .note("POSIX limits the child to async-signal-safe calls until it execs, "
                           "which excludes locking, allocating and starting threads")
                     .note("either exec in the child, or fork before any thread is created")
+                    .note("the program creates threads and this fork reaches no exec; that the "
+                          "creation runs first is not proven here")
                     .taxonomy("CERT", "POS33-C", "Do not use vfork()")
                     .property("function", fork.functionId)
                     .emit();
@@ -45,6 +47,8 @@ namespace ctrace::concurrency::internal::analysis
                           "terminated child stays in the process table as a zombie")
                     .note("keep the pid the fork returns and wait on it, or arrange for the "
                           "system to reap children")
+                    .note("no wait and no SIGCHLD=SIG_IGN appears anywhere in the program; "
+                          "which pid a given wait collects is not tracked")
                     .property("function", fork.functionId)
                     .emit();
             }

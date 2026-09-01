@@ -53,6 +53,11 @@ namespace ctrace::concurrency::internal::analysis
                         collection.reapsChildren = true;
                         break;
                     default:
+                        // Handing child termination to the system reaps just as effectively as
+                        // waiting, and is the usual way a program that never needs an exit
+                        // status avoids zombies.
+                        if (classifier_.ignoresChildTermination(*call))
+                            collection.reapsChildren = true;
                         break;
                     }
                 }

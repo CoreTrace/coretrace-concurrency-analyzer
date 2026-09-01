@@ -3,9 +3,11 @@
 
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Value.h>
 
+#include <algorithm>
 #include <cctype>
 #include <optional>
 #include <string>
@@ -304,6 +306,49 @@ namespace ctrace::concurrency::internal::analysis
         default:
             return false;
         }
+    }
+
+    bool ConcurrencySymbolClassifier::ignoresChildTermination(const llvm::CallBase& call) const
+    {
+        constexpr unsigned kSignalNumberOperandIndex = 0;
+        constexpr unsigned kSignalHandlerOperandIndex = 1;
+        // SIGCHLD is not the same number everywhere: 17 on Linux, 20 on the BSDs and Darwin.
+        // Both are accepted rather than derived from the target, which would tie this rule to a
+        // triple it has no other reason to read.
+        constexpr std::int64_t kSigChldNumbers[] = {17, 20};
+        // SIG_IGN is the integer 1 given a function-pointer type.
+        constexpr std::int64_t kSigIgn = 1;
+
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr || call.arg_size() <= kSignalHandlerOperandIndex)
+            return false;
+
+        const std::string canonical = canonicalName(*callee);
+        const llvm::StringRef name = canonical;
+        if (!matchesPlainSymbol(name, "signal") && !matchesPlainSymbol(name, "bsd_signal") &&
+            !matchesPlainSymbol(name, "sigset"))
+        {
+            return false;
+        }
+
+        const auto* signalNumber =
+            llvm::dyn_cast<llvm::ConstantInt>(call.getArgOperand(kSignalNumberOperandIndex));
+        if (signalNumber == nullptr)
+            return false;
+
+        const bool targetsChildTermination =
+            std::find(std::begin(kSigChldNumbers), std::end(kSigChldNumbers),
+                      signalNumber->getSExtValue()) != std::end(kSigChldNumbers);
+        if (!targetsChildTermination)
+            return false;
+
+        const auto* handler =
+            llvm::dyn_cast<llvm::ConstantExpr>(call.getArgOperand(kSignalHandlerOperandIndex));
+        if (handler == nullptr || handler->getOpcode() != llvm::Instruction::IntToPtr)
+            return false;
+
+        const auto* handlerValue = llvm::dyn_cast<llvm::ConstantInt>(handler->getOperand(0));
+        return handlerValue != nullptr && handlerValue->getSExtValue() == kSigIgn;
     }
 
     const llvm::Function*

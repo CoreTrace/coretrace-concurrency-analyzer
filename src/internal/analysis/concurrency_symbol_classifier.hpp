@@ -70,6 +70,9 @@ namespace ctrace::concurrency::internal::analysis
         /// functions there: a handler interrupts its own thread mid-operation, so allocating,
         /// printing or locking can re-enter a structure the interrupted code left inconsistent.
         [[nodiscard]] bool isAsyncSignalUnsafe(const llvm::CallBase& call) const;
+        /// True when the call hands child termination to the system, which reaps the children
+        /// itself. A program that does this leaves no zombie behind and owes no wait.
+        [[nodiscard]] bool ignoresChildTermination(const llvm::CallBase& call) const;
         /// The function a `signal` or `sigaction` call installs, when it can be read from the
         /// call site. Null for any other call, or an installation this analysis cannot follow.
         [[nodiscard]] const llvm::Function*
