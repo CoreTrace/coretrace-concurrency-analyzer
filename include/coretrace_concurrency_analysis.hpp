@@ -159,6 +159,8 @@ namespace ctrace::concurrency
         DiagnosticReport report;
         /// Modules left out because their target ABI differs from the rest of the project.
         std::vector<std::string> skippedIncompatibleModules;
+        /// Units the whole-program view forced through a second analysis.
+        std::size_t reanalyzedUnitCount = 0;
     };
 
     /// Analyses a whole program, so that a thread spawned in one translation unit is related to

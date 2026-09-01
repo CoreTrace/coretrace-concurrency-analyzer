@@ -26,6 +26,7 @@ namespace ctrace::concurrency
         return ProjectAnalysisReport{
             .report = std::move(analysis.report),
             .skippedIncompatibleModules = std::move(analysis.skippedIncompatibleModules),
+            .reanalyzedUnitCount = analysis.reanalyzedUnitCount,
         };
     }
 

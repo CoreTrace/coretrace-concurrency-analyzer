@@ -3,6 +3,7 @@
 
 #include "coretrace_concurrency_analysis.hpp"
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,9 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
         /// lock identities are computed against a DataLayout; comparing them across ABIs would
         /// relate addresses that have no common meaning.
         std::vector<std::string> skippedIncompatibleModules;
+        /// Units the program-wide view forced through a second analysis. Reported because it is
+        /// the cost of the project mode over a run of independent units.
+        std::size_t reanalyzedUnitCount = 0;
     };
 
     /// Runs the per-unit analysis over a whole project, letting each unit see the facts the

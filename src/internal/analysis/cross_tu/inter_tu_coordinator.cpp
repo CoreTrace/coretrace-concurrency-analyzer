@@ -144,6 +144,8 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 if (!crossTUChangesFacts(*compatible[index], factsByModule[index], programIndex))
                     continue;
 
+                ++analysis.reanalyzedUnitCount;
+
                 pool.async(
                     [&, index]
                     {

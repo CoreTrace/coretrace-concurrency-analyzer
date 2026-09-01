@@ -2,6 +2,8 @@
 #include "coretrace_concurrency_analyzer.hpp"
 #include "coretrace_concurrency_analysis.hpp"
 #include "internal/compilation_database.hpp"
+#include "internal/ir_cache.hpp"
+#include "internal/ir_loader.hpp"
 #include "internal/diagnostics/compiler_diagnostic_parser.hpp"
 #include "internal/reporting/report_renderer.hpp"
 
@@ -34,6 +36,7 @@ namespace
             << "  --instrument             Enable compilerlib instrumentation mode\n"
             << "  --compile-commands=PATH  Analyse a whole project from a compile_commands.json\n"
             << "                           instead of a single file (implies --analyze)\n"
+            << "  --no-cache               Recompile every unit instead of reusing cached IR\n"
             << "  --analyze                Run selected single-TU concurrency checks on the IR "
                "module\n"
             << "  --rules=data-race|missing-join|deadlock-lock-order|all\n"
@@ -313,7 +316,7 @@ namespace
 
     int analyzeProject(const std::string& databasePath,
                        const ctrace::concurrency::AnalysisOptions& analysisOptions,
-                       ctrace::concurrency::OutputFormat outputFormat, bool verbose)
+                       ctrace::concurrency::OutputFormat outputFormat, bool verbose, bool useCache)
     {
         namespace internal = ctrace::concurrency::internal;
 
@@ -340,19 +343,62 @@ namespace
         // a race inside a race detector would be a poor trade for the wall-clock it would save.
         // The analysis itself, which dominates once the IR exists, runs in parallel.
         const auto startedAt = std::chrono::steady_clock::now();
+
+        // The cache lives beside the database, with the build it describes, so that discarding
+        // the build discards it too.
+        std::optional<internal::IRCache> cache;
+        if (useCache)
+        {
+            cache = internal::IRCache::open(std::filesystem::path(databasePath).parent_path() /
+                                            ".coretrace-ir-cache");
+        }
+
         ctrace::concurrency::InMemoryIRCompiler compiler;
+        internal::LLVMIRLoader irLoader;
         std::vector<CompiledUnit> units;
         std::vector<std::string> failedSources;
+        std::size_t cacheHits = 0;
 
         for (const internal::CompileCommand& command : commands)
         {
+            CompiledUnit unit;
+            unit.context = std::make_unique<llvm::LLVMContext>();
+
+            if (cache.has_value())
+            {
+                if (std::optional<std::string> cached = cache->lookup(command))
+                {
+                    ctrace::concurrency::CompileError parseError;
+                    unit.bitcode = std::move(*cached);
+                    unit.module = irLoader.parseBC(unit.bitcode, *unit.context, parseError);
+                    if (unit.module != nullptr)
+                    {
+                        ++cacheHits;
+                        units.push_back(std::move(unit));
+                        continue;
+                    }
+
+                    // Unreadable bitcode means the entry is unusable, not that the unit is
+                    // broken: fall through and compile it.
+                    unit.bitcode.clear();
+                    unit.context = std::make_unique<llvm::LLVMContext>();
+                }
+            }
+
             ctrace::concurrency::CompileRequest request;
             request.inputFile = command.file;
             request.extraCompileArgs = command.arguments;
             request.format = ctrace::concurrency::IRFormat::BC;
 
-            CompiledUnit unit;
-            unit.context = std::make_unique<llvm::LLVMContext>();
+            std::filesystem::path depfile;
+            if (cache.has_value())
+            {
+                depfile = cache->depfilePathFor(command);
+                request.extraCompileArgs.emplace_back("-MD");
+                request.extraCompileArgs.emplace_back("-MF");
+                request.extraCompileArgs.push_back(depfile.string());
+            }
+
             ctrace::concurrency::CompileResult result = compiler.compile(request, *unit.context);
             if (!result.success || result.module == nullptr)
             {
@@ -360,6 +406,15 @@ namespace
                 if (verbose && !result.diagnostics.empty())
                     llvm::errs() << result.diagnostics;
                 continue;
+            }
+
+            if (cache.has_value())
+            {
+                // Stored against the command as the database states it, without the flags added
+                // to obtain the dependency list.
+                cache->store(command, result.llvmBitcode, depfile);
+                std::error_code removeError;
+                std::filesystem::remove(depfile, removeError);
             }
 
             // parseBC keeps a non-owning view over the bitcode buffer.
@@ -379,9 +434,23 @@ namespace
         for (const CompiledUnit& unit : units)
             modules.push_back(unit.module.get());
 
+        const auto compiledAt = std::chrono::steady_clock::now();
         const ctrace::concurrency::ProjectAnalysisReport analysis =
             ctrace::concurrency::ProjectConcurrencyAnalyzer(analysisOptions).analyze(modules);
         const auto finishedAt = std::chrono::steady_clock::now();
+
+        if (verbose)
+        {
+            const auto milliseconds = [](auto from, auto to)
+            { return std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count(); };
+
+            llvm::errs() << "units: " << units.size() << " compiled, " << failedSources.size()
+                         << " failed\n"
+                         << "compile-ms: " << milliseconds(startedAt, compiledAt) << "\n"
+                         << "analysis-ms: " << milliseconds(compiledAt, finishedAt) << "\n"
+                         << "reanalyzed-units: " << analysis.reanalyzedUnitCount << "\n"
+                         << "cache-hits: " << cacheHits << "\n";
+        }
 
         // A partial project yields partial conclusions; saying so is part of the result.
         for (const std::string& source : failedSources)
@@ -408,6 +477,7 @@ int main(int argc, char** argv)
     bool outputFormatExplicit = false;
     bool rulesExplicit = false;
     std::string compileCommandsPath;
+    bool useCache = true;
     ctrace::concurrency::OutputFormat outputFormat = ctrace::concurrency::OutputFormat::Human;
     ctrace::concurrency::AnalysisOptions analysisOptions;
 
@@ -480,6 +550,12 @@ int main(int argc, char** argv)
             continue;
         }
 
+        if (arg == "--no-cache")
+        {
+            useCache = false;
+            continue;
+        }
+
         constexpr std::string_view compileCommandsPrefix = "--compile-commands=";
         if (arg.starts_with(compileCommandsPrefix))
         {
@@ -539,7 +615,8 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        return analyzeProject(compileCommandsPath, analysisOptions, outputFormat, verbose);
+        return analyzeProject(compileCommandsPath, analysisOptions, outputFormat, verbose,
+                              useCache);
     }
 
     if (request.inputFile.empty())
