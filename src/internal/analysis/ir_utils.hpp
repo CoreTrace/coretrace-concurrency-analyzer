@@ -41,6 +41,9 @@ namespace ctrace::concurrency::internal::analysis
     struct AliasResolvedGlobal
     {
         std::string symbol;
+        /// The global the access was attributed to, so callers can weigh how much the answer is
+        /// a resolution and how much it is a guess.
+        const llvm::GlobalVariable* global = nullptr;
         AliasProvenance aliasProvenance = AliasProvenance::Direct;
     };
 

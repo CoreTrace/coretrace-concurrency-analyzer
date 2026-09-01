@@ -17,6 +17,7 @@
 #include <llvm/IR/DataLayout.h>
 #include <llvm/Support/ModRef.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -351,9 +352,6 @@ namespace ctrace::concurrency::internal::analysis
                         if (!aliasResolvedGlobal.has_value())
                             continue;
 
-                        // The global identity is a guess here, not a resolution. Made inside a
-                        // standard library header, about an object the user never named, it
-                        // attributes the library's own bookkeeping to their data.
                         root = RootBinding::global(aliasResolvedGlobal->symbol);
                         aliasProvenance = aliasResolvedGlobal->aliasProvenance;
                     }

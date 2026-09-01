@@ -632,6 +632,8 @@ namespace ctrace::concurrency::internal::analysis
 
         std::optional<std::string> mustAliasSymbol;
         std::optional<std::string> mayAliasSymbol;
+        const llvm::GlobalVariable* mustAliasGlobal = nullptr;
+        const llvm::GlobalVariable* mayAliasGlobal = nullptr;
         bool hasConflictingMustAlias = false;
         bool hasAmbiguousMayAlias = false;
 
@@ -651,7 +653,10 @@ namespace ctrace::concurrency::internal::analysis
             if (*aliasProvenance == AliasProvenance::MustAlias)
             {
                 if (!mustAliasSymbol.has_value())
+                {
                     mustAliasSymbol = symbol;
+                    mustAliasGlobal = global;
+                }
                 else if (*mustAliasSymbol != symbol)
                     hasConflictingMustAlias = true;
 
@@ -659,7 +664,10 @@ namespace ctrace::concurrency::internal::analysis
             }
 
             if (!mayAliasSymbol.has_value())
+            {
                 mayAliasSymbol = symbol;
+                mayAliasGlobal = global;
+            }
             else if (*mayAliasSymbol != symbol)
                 hasAmbiguousMayAlias = true;
         }
@@ -668,6 +676,7 @@ namespace ctrace::concurrency::internal::analysis
         {
             return AliasResolvedGlobal{
                 .symbol = *mustAliasSymbol,
+                .global = mustAliasGlobal,
                 .aliasProvenance = AliasProvenance::MustAlias,
             };
         }
@@ -676,6 +685,7 @@ namespace ctrace::concurrency::internal::analysis
         {
             return AliasResolvedGlobal{
                 .symbol = *mayAliasSymbol,
+                .global = mayAliasGlobal,
                 .aliasProvenance = AliasProvenance::MayAlias,
             };
         }
