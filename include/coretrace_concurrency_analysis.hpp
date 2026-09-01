@@ -154,6 +154,28 @@ namespace ctrace::concurrency
         }
     };
 
+    struct ProjectAnalysisReport
+    {
+        DiagnosticReport report;
+        /// Modules left out because their target ABI differs from the rest of the project.
+        std::vector<std::string> skippedIncompatibleModules;
+    };
+
+    /// Analyses a whole program, so that a thread spawned in one translation unit is related to
+    /// the worker body defined in another. Each unit is still analysed on its own terms; what
+    /// crosses the boundary is the set of facts a unit cannot observe by itself.
+    class ProjectConcurrencyAnalyzer
+    {
+      public:
+        explicit ProjectConcurrencyAnalyzer(AnalysisOptions options = {});
+
+        [[nodiscard]] ProjectAnalysisReport
+        analyze(const std::vector<const llvm::Module*>& modules) const;
+
+      private:
+        AnalysisOptions options_;
+    };
+
     class SingleTUConcurrencyAnalyzer
     {
       public:

@@ -33,6 +33,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/coretrace_concurrency_analysis.cpp
     src/coretrace_concurrency_error.cpp
     src/internal/analysis/concurrency_symbol_classifier.cpp
+    src/internal/analysis/cross_tu/inter_tu_coordinator.cpp
     src/internal/analysis/cross_tu/program_symbol_index.cpp
     src/internal/analysis/data_race_checker.cpp
     src/internal/analysis/interprocedural_bindings.cpp

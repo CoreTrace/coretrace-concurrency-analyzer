@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analysis.hpp"
 
+#include "internal/analysis/cross_tu/inter_tu_coordinator.hpp"
 #include "internal/analysis/data_race_checker.hpp"
 #include "internal/analysis/lock_order_analyzer.hpp"
 #include "internal/analysis/missing_join_detector.hpp"
@@ -11,6 +12,23 @@
 
 namespace ctrace::concurrency
 {
+    ProjectConcurrencyAnalyzer::ProjectConcurrencyAnalyzer(AnalysisOptions options)
+        : options_(std::move(options))
+    {
+    }
+
+    ProjectAnalysisReport
+    ProjectConcurrencyAnalyzer::analyze(const std::vector<const llvm::Module*>& modules) const
+    {
+        internal::analysis::cross_tu::InterTUCoordinator coordinator(options_);
+        internal::analysis::cross_tu::ProjectAnalysis analysis = coordinator.analyze(modules);
+
+        return ProjectAnalysisReport{
+            .report = std::move(analysis.report),
+            .skippedIncompatibleModules = std::move(analysis.skippedIncompatibleModules),
+        };
+    }
+
     SingleTUConcurrencyAnalyzer::SingleTUConcurrencyAnalyzer(AnalysisOptions options)
         : options_(std::move(options))
     {
