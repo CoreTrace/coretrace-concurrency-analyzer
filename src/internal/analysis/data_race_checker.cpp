@@ -2,6 +2,7 @@
 #include "data_race_checker.hpp"
 
 #include "fact_queries.hpp"
+#include "ir_utils.hpp"
 #include "report_builder.hpp"
 #include "internal/diagnostics/diagnostic_builder.hpp"
 
@@ -9,12 +10,15 @@
 #include <llvm/IR/Module.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <map>
 #include <sstream>
 #include <set>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace ctrace::concurrency::internal::analysis
 {
@@ -22,6 +26,10 @@ namespace ctrace::concurrency::internal::analysis
     {
         using internal::diagnostics::DiagnosticBuilder;
         using EntrySet = ThreadEntrySet;
+
+        /// Number of distinct conflicting sites listed alongside the representative pair before the
+        /// diagnostic stops enumerating them.
+        constexpr std::size_t kMaxRelatedConflictSites = 6;
 
         bool shareRecognizedLock(const AccessFact& lhs, const AccessFact& rhs)
         {
@@ -35,7 +43,7 @@ namespace ctrace::concurrency::internal::analysis
 
         /// Two atomic operations on the same location are ordered by the memory model and never
         /// form a data race. A mix of atomic and plain access still does, and is worth reporting
-        /// because the bug is the unsynchronized side.
+        /// with its own wording because the bug is the unsynchronized side.
         bool isRaceFreeAtomicPair(const AccessFact& lhs, const AccessFact& rhs)
         {
             return lhs.isAtomic && rhs.isAtomic;
@@ -44,6 +52,11 @@ namespace ctrace::concurrency::internal::analysis
         bool isMixedAtomicPair(const AccessFact& lhs, const AccessFact& rhs)
         {
             return lhs.isAtomic != rhs.isAtomic;
+        }
+
+        std::string describeSymbol(const AccessFact& access)
+        {
+            return access.symbol;
         }
 
         std::vector<std::string> sortedLocks(const AccessFact& access)
@@ -76,6 +89,30 @@ namespace ctrace::concurrency::internal::analysis
 
             if (!location.function.empty())
                 stream << " in " << location.function;
+            return stream.str();
+        }
+
+        /// One diagnostic per memory location *and* concurrency context, rather than one per pair
+        /// of conflicting instructions. Two threads racing over twenty statements is a single
+        /// finding; the same location raced by a different pair of tasks is a separate one.
+        std::string conflictLocationKey(const AccessFact& lhs, const AccessFact& rhs,
+                                        const EntrySet& lhsEntries, const EntrySet& rhsEntries)
+        {
+            std::ostringstream stream;
+            stream << lhs.symbol;
+            if (!lhs.region.hasKnownOffset || !rhs.region.hasKnownOffset)
+                stream << "[*]";
+            else
+                stream << "+" << std::min(lhs.region.byteOffset, rhs.region.byteOffset);
+
+            std::vector<std::string> contexts{
+                joinValues(sortedThreadEntries(lhsEntries)),
+                joinValues(sortedThreadEntries(rhsEntries)),
+            };
+            std::sort(contexts.begin(), contexts.end());
+            for (const std::string& context : contexts)
+                stream << "|" << context;
+
             return stream.str();
         }
 
@@ -187,6 +224,8 @@ namespace ctrace::concurrency::internal::analysis
 
             if (!entries.empty())
                 stream << " (thread entries: " << joinValues(entries) << ")";
+            else if (access.inRootTask)
+                stream << " (initial thread)";
 
             if (!access.heldLocks.empty())
                 stream << " under recognized lock(s): " << joinValues(sortedLocks(access));
@@ -194,12 +233,22 @@ namespace ctrace::concurrency::internal::analysis
             return stream.str();
         }
 
-        void emitPairDiagnostic(DiagnosticReport& report, const AccessFact& lhs,
-                                const AccessFact& rhs, const EntrySet& lhsEntries,
-                                const EntrySet& rhsEntries, const TUFacts& facts)
+        std::vector<std::string> describeContext(const AccessFact& access, const EntrySet& entries)
         {
-            const std::vector<std::string> orderedLhsEntries = sortedThreadEntries(lhsEntries);
-            const std::vector<std::string> orderedRhsEntries = sortedThreadEntries(rhsEntries);
+            std::vector<std::string> ordered = sortedThreadEntries(entries);
+            if (ordered.empty() && access.inRootTask)
+                ordered.push_back(rootTaskId());
+            return ordered;
+        }
+
+        void emitPairDiagnostic(
+            DiagnosticReport& report, const AccessFact& lhs, const AccessFact& rhs,
+            const EntrySet& lhsEntries, const EntrySet& rhsEntries, const TUFacts& facts,
+            std::size_t additionalConflictingPairs,
+            const std::vector<std::pair<std::string, SourceLocation>>& relatedConflictSites)
+        {
+            const std::vector<std::string> orderedLhsEntries = describeContext(lhs, lhsEntries);
+            const std::vector<std::string> orderedRhsEntries = describeContext(rhs, rhsEntries);
             const std::vector<std::string> conflictKinds =
                 collectConflictKinds(lhs, rhs, lhsEntries, rhsEntries, facts);
             const std::vector<std::string> variableAliasing = collectAliasProvenances(lhs, rhs);
@@ -208,12 +257,26 @@ namespace ctrace::concurrency::internal::analysis
             builder.confidence(inferConfidence(lhs, rhs))
                 .primaryLocation(lhs.userLocation)
                 .relatedLocation("Conflicting access", rhs.userLocation)
-                .message("unsynchronized concurrent access to global '" + lhs.symbol + "'")
+                .message("unsynchronized concurrent access to global '" + describeSymbol(lhs) + "'")
                 .note("first access: " + describeAccess(lhs, orderedLhsEntries))
                 .note("conflicting access: " + describeAccess(rhs, orderedRhsEntries))
-                .note("possible conflict kinds: " + joinValues(conflictKinds))
-                .note("no common recognized lock protects the conflicting accesses")
-                .property("symbol", lhs.symbol)
+                .note("possible conflict kinds: " + joinValues(conflictKinds));
+
+            if (isMixedAtomicPair(lhs, rhs))
+            {
+                builder.note("one side is atomic while the other is a plain access: atomicity on "
+                             "only one side does not order the pair");
+            }
+
+            builder.note("no common recognized lock protects the conflicting accesses");
+
+            if (additionalConflictingPairs != 0)
+            {
+                builder.note("additional conflicting access pairs on this location: " +
+                             std::to_string(additionalConflictingPairs));
+            }
+
+            builder.property("symbol", describeSymbol(lhs))
                 .property("firstAccessKind", std::string(toString(lhs.kind)))
                 .property("secondAccessKind", std::string(toString(rhs.kind)))
                 .property("firstAliasProvenance", std::string(toString(lhs.aliasProvenance)))
@@ -225,18 +288,17 @@ namespace ctrace::concurrency::internal::analysis
                 .property("conflictKinds", conflictKinds)
                 .property("variableAliasing", variableAliasing)
                 .property("firstAtomic", lhs.isAtomic)
-                .property("secondAtomic", rhs.isAtomic);
-
-            if (isMixedAtomicPair(lhs, rhs))
-            {
-                builder.note("one side is atomic while the other is a plain access: atomicity on "
-                             "only one side does not order the pair");
-            }
+                .property("secondAtomic", rhs.isAtomic)
+                .property("additionalConflictingPairs",
+                          static_cast<std::int64_t>(additionalConflictingPairs));
 
             if (hasDistinctLoweredLocation(lhs))
                 builder.relatedLocation("Lowered first access", lhs.loweredLocation);
             if (hasDistinctLoweredLocation(rhs))
                 builder.relatedLocation("Lowered conflicting access", rhs.loweredLocation);
+
+            for (const auto& [label, location] : relatedConflictSites)
+                builder.relatedLocation(label, location);
 
             builder.emit();
         }
@@ -244,7 +306,7 @@ namespace ctrace::concurrency::internal::analysis
         void emitSelfConcurrentDiagnostic(DiagnosticReport& report, const AccessFact& access,
                                           const EntrySet& entries)
         {
-            const std::vector<std::string> orderedEntries = sortedThreadEntries(entries);
+            const std::vector<std::string> orderedEntries = describeContext(access, entries);
             const std::string entryLabel =
                 orderedEntries.empty() ? access.functionId : joinValues(orderedEntries);
             const std::vector<std::string> conflictKinds = {"write/write"};
@@ -254,14 +316,15 @@ namespace ctrace::concurrency::internal::analysis
             builder.confidence(inferConfidence(access))
                 .primaryLocation(access.userLocation)
                 .relatedLocation("Concurrent invocation", access.userLocation)
-                .message("unsynchronized concurrent access to global '" + access.symbol + "'")
+                .message("unsynchronized concurrent access to global '" + describeSymbol(access) +
+                         "'")
                 .note("access: " + describeAccess(access, orderedEntries))
                 .note("conflicts with another concurrent invocation reachable from thread entry "
                       "'" +
                       entryLabel + "'")
                 .note("possible conflict kinds: " + joinValues(conflictKinds))
                 .note("no common recognized lock protects the conflicting accesses")
-                .property("symbol", access.symbol)
+                .property("symbol", describeSymbol(access))
                 .property("firstAccessKind", std::string(toString(access.kind)))
                 .property("secondAccessKind", std::string(toString(access.kind)))
                 .property("firstAliasProvenance", std::string(toString(access.aliasProvenance)))
@@ -286,20 +349,43 @@ namespace ctrace::concurrency::internal::analysis
         (void)module;
         const std::unordered_map<std::string, ThreadEntrySet>& reachableEntriesByFunction =
             facts.reachableThreadEntriesByFunction;
+        static const EntrySet emptyEntries;
+
+        auto entriesOf = [&](const AccessFact& access) -> const EntrySet&
+        {
+            const auto it = reachableEntriesByFunction.find(access.functionId);
+            return it != reachableEntriesByFunction.end() ? it->second : emptyEntries;
+        };
 
         std::map<std::string, std::vector<const AccessFact*>> accessesBySymbol;
         for (const AccessFact& access : facts.accesses)
         {
-            if (!reachableEntriesByFunction.contains(access.functionId))
+            // Code on the initial thread is analyzed too: it is a task like any other, bounded by
+            // the spawns and joins surrounding it.
+            if (!reachableEntriesByFunction.contains(access.functionId) && !access.inRootTask)
                 continue;
+
             accessesBySymbol[access.symbol].push_back(&access);
         }
+
+        /// One reported race per memory location, with the remaining conflicting pairs summarized.
+        struct LocationConflict
+        {
+            const AccessFact* lhs = nullptr;
+            const AccessFact* rhs = nullptr;
+            ConfidenceLevel confidence = ConfidenceLevel::Low;
+            bool isWriteWrite = false;
+            std::size_t additionalPairs = 0;
+            std::vector<std::pair<std::string, SourceLocation>> relatedSites;
+            std::set<std::string> seenSiteKeys;
+        };
 
         DiagnosticReport report;
         for (const auto& [symbol, accesses] : accessesBySymbol)
         {
             (void)symbol;
-            bool foundPairDiagnostic = false;
+            std::map<std::string, LocationConflict> conflictsByLocation;
+
             for (std::size_t lhsIndex = 0; lhsIndex < accesses.size(); ++lhsIndex)
             {
                 for (std::size_t rhsIndex = lhsIndex + 1; rhsIndex < accesses.size(); ++rhsIndex)
@@ -316,20 +402,69 @@ namespace ctrace::concurrency::internal::analysis
                     if (isRaceFreeAtomicPair(lhs, rhs))
                         continue;
 
-                    const EntrySet& lhsEntries = reachableEntriesByFunction.at(lhs.functionId);
-                    const EntrySet& rhsEntries = reachableEntriesByFunction.at(rhs.functionId);
-                    if (!mayRunConcurrently(lhsEntries, rhsEntries, facts))
+                    const EntrySet& lhsEntries = entriesOf(lhs);
+                    const EntrySet& rhsEntries = entriesOf(rhs);
+                    if (!mayHappenInParallel(lhs, lhsEntries, rhs, rhsEntries, facts))
                         continue;
 
                     if (shareRecognizedLock(lhs, rhs))
                         continue;
 
-                    emitPairDiagnostic(report, lhs, rhs, lhsEntries, rhsEntries, facts);
-                    foundPairDiagnostic = true;
+                    LocationConflict& conflict =
+                        conflictsByLocation[conflictLocationKey(lhs, rhs, lhsEntries, rhsEntries)];
+                    const ConfidenceLevel confidence = inferConfidence(lhs, rhs);
+                    const bool isWriteWrite =
+                        lhs.kind == AccessKind::Write && rhs.kind == AccessKind::Write;
+
+                    if (conflict.lhs == nullptr ||
+                        std::make_pair(confidence, isWriteWrite) >
+                            std::make_pair(conflict.confidence, conflict.isWriteWrite))
+                    {
+                        if (conflict.lhs != nullptr)
+                            ++conflict.additionalPairs;
+
+                        conflict.lhs = &lhs;
+                        conflict.rhs = &rhs;
+                        conflict.confidence = confidence;
+                        conflict.isWriteWrite = isWriteWrite;
+                    }
+                    else
+                    {
+                        ++conflict.additionalPairs;
+                    }
+
+                    for (const AccessFact* site : {&lhs, &rhs})
+                    {
+                        if (conflict.relatedSites.size() >= kMaxRelatedConflictSites)
+                            break;
+
+                        const std::string siteKey = formatLocation(site->userLocation);
+                        if (!conflict.seenSiteKeys.insert(siteKey).second)
+                            continue;
+
+                        conflict.relatedSites.emplace_back("Conflicting site", site->userLocation);
+                    }
                 }
             }
 
-            if (foundPairDiagnostic)
+            for (auto& [locationKey, conflict] : conflictsByLocation)
+            {
+                (void)locationKey;
+                // The representative pair already carries both of its own locations.
+                std::erase_if(
+                    conflict.relatedSites,
+                    [&](const std::pair<std::string, SourceLocation>& site)
+                    {
+                        return sameSourceLocation(site.second, conflict.lhs->userLocation) ||
+                               sameSourceLocation(site.second, conflict.rhs->userLocation);
+                    });
+
+                emitPairDiagnostic(report, *conflict.lhs, *conflict.rhs, entriesOf(*conflict.lhs),
+                                   entriesOf(*conflict.rhs), facts, conflict.additionalPairs,
+                                   conflict.relatedSites);
+            }
+
+            if (!conflictsByLocation.empty())
                 continue;
 
             for (const AccessFact* access : accesses)
@@ -337,7 +472,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (access->kind != AccessKind::Write || access->isAtomic)
                     continue;
 
-                const EntrySet& entries = reachableEntriesByFunction.at(access->functionId);
+                const EntrySet& entries = entriesOf(*access);
                 if (!isSelfConcurrent(entries, facts))
                     continue;
 
