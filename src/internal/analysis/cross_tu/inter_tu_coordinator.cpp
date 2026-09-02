@@ -55,6 +55,13 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                     return true;
             }
 
+            // This unit forks, and the threads that make the fork unsafe are started elsewhere.
+            if (!facts.processForks.empty() && !facts.programCreatesThreads &&
+                index.programCreatesThreads())
+            {
+                return true;
+            }
+
             // A handle this unit creates is joined by another.
             for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
             {

@@ -11,7 +11,7 @@ namespace ctrace::concurrency::internal::analysis
         using internal::diagnostics::DiagnosticBuilder;
 
         DiagnosticReport report;
-        const bool createsThreads = !facts.spawns.empty();
+        const bool createsThreads = facts.programCreatesThreads;
 
         for (const ProcessForkFact& fork : facts.processForks)
         {

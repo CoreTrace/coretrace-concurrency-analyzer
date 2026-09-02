@@ -631,6 +631,9 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
 
+            facts.programCreatesThreads =
+                !facts.spawns.empty() || (crossTU && program->programCreatesThreads());
+
             for (ProcessForkFact& fork : processes.forks)
             {
                 fork.execReachable = processes.functionsReachingExec.contains(fork.functionId);

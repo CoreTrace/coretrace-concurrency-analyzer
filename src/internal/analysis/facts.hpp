@@ -297,6 +297,9 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<SignalHandlerFact> signalHandlers;
         /// Some part of the program collects its terminated children.
         bool reapsChildProcesses = false;
+        /// Some part of the program starts a thread. Equal to `!spawns.empty()` when a single
+        /// unit is under analysis, and wider once the whole program is known.
+        bool programCreatesThreads = false;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;
         /// What each function of this unit does to the locks its callers hand it. Published so a
         /// caller in another unit can see a helper defined here.

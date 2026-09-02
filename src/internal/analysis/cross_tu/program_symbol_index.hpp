@@ -52,6 +52,14 @@ namespace ctrace::concurrency::internal::analysis
         [[nodiscard]] std::size_t spawnCount(const llvm::Function& function) const;
         [[nodiscard]] bool spawnedInLoop(const llvm::Function& function) const;
 
+        /// True when some unit of the program starts a thread. A `fork` is judged against the
+        /// whole program, not against the unit it happens to sit in: the unit that forks and the
+        /// unit that spawns are routinely different files.
+        [[nodiscard]] bool programCreatesThreads() const noexcept
+        {
+            return !spawnSitesByEntry_.empty();
+        }
+
         /// True when a global declared here has a definition in another unit, so accesses to it
         /// describe real shared state rather than an unresolved symbol.
         [[nodiscard]] bool isDefinedSomewhere(const llvm::GlobalVariable& global) const;
