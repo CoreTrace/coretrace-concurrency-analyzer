@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "ir_utils.hpp"
 
+#include <llvm/Analysis/ValueTracking.h>
+
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/IR/DebugInfoMetadata.h>
@@ -736,18 +738,71 @@ namespace ctrace::concurrency::internal::analysis
         return std::nullopt;
     }
 
+    namespace
+    {
+        /// The function a pointer-to-member denotes, when it denotes one at all.
+        ///
+        /// The Itanium ABI represents `&Service::run` as a pair: the function address and the
+        /// adjustment to apply to `this`. It is a struct, not a pointer, so the copy walk that
+        /// resolves ordinary callables never reaches it — which is why a thread started from a
+        /// member function had no entry at all.
+        ///
+        /// Only the plain case is accepted. A non-zero adjustment means multiple inheritance and
+        /// the callee still depends on which base the object is viewed as; an odd first field
+        /// encodes a vtable offset, and the target is then whatever the object turns out to be.
+        /// Neither is a single function this analysis could name.
+        const llvm::Function* memberFunctionBehind(const llvm::Value& value)
+        {
+            const auto* storage =
+                llvm::dyn_cast<llvm::AllocaInst>(llvm::getUnderlyingObject(&value));
+            if (storage == nullptr)
+                return nullptr;
+
+            for (const llvm::User* user : storage->users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store == nullptr || store->getPointerOperand() != storage)
+                    continue;
+
+                const auto* pair = llvm::dyn_cast<llvm::ConstantStruct>(store->getValueOperand());
+                if (pair == nullptr || pair->getNumOperands() != 2)
+                    continue;
+
+                const auto* adjustment = llvm::dyn_cast<llvm::ConstantInt>(pair->getOperand(1));
+                if (adjustment == nullptr || !adjustment->isZero())
+                    continue;
+
+                const auto* address = llvm::dyn_cast<llvm::ConstantExpr>(pair->getOperand(0));
+                if (address == nullptr || address->getOpcode() != llvm::Instruction::PtrToInt)
+                    continue;
+
+                if (const auto* function =
+                        llvm::dyn_cast<llvm::Function>(address->getOperand(0)->stripPointerCasts()))
+                {
+                    return function;
+                }
+            }
+
+            return nullptr;
+        }
+    } // namespace
+
     std::optional<FunctionBinding> resolveFunctionBinding(const llvm::Value& value)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;
-        const llvm::Value* root = resolveCopiedValue(value, seen);
-        if (root == nullptr)
-            return std::nullopt;
+        if (const llvm::Value* root = resolveCopiedValue(value, seen); root != nullptr)
+        {
+            if (const auto* function = llvm::dyn_cast<llvm::Function>(root))
+                return FunctionBinding{.function = function};
 
-        if (const auto* function = llvm::dyn_cast<llvm::Function>(root))
-            return FunctionBinding{.function = function};
+            if (const auto* argument = llvm::dyn_cast<llvm::Argument>(root))
+                return FunctionBinding{.argumentIndex = argument->getArgNo()};
+        }
 
-        if (const auto* argument = llvm::dyn_cast<llvm::Argument>(root))
-            return FunctionBinding{.argumentIndex = argument->getArgNo()};
+        // The copy walk resolves pointers, and a pointer-to-member is a struct: it never
+        // reaches one, so this is tried after rather than instead.
+        if (const llvm::Function* member = memberFunctionBehind(value))
+            return FunctionBinding{.function = member};
 
         return std::nullopt;
     }
