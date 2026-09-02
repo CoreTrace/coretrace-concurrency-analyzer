@@ -730,6 +730,9 @@ namespace
     {
         static const std::vector<FixtureExpectation> expectations = {
             // --- data race: conflicts that must be reported -------------------------------
+            {.path = "tests/fixtures/concurrency/data-race/data_race_shared_heap_object.c",
+             .intent = "heap state has no name, but both threads were handed the same pointer",
+             .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_basic.c",
              .intent = "two workers increment the same global",
              .dataRace = 1, .racingSymbol = "shared_counter"},
@@ -775,6 +778,9 @@ namespace
             // --- data race: regressions fixed, must stay silent ---------------------------
             {.path = "tests/fixtures/concurrency/data-race/data_race_mutex_protected.c",
              .intent = "a common mutex protects both accesses"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_private_heap_object_no_fp.c",
+             .intent = "the same body on two allocations of its own shares nothing"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_lock_wrapper_protected_no_fp.c",
              .intent = "a lock taken through a helper still protects the access"},
