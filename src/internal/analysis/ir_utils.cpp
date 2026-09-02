@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "ir_utils.hpp"
 
+#include <llvm/Analysis/ValueTracking.h>
+
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/MemoryLocation.h>
 #include <llvm/IR/DebugInfoMetadata.h>
@@ -258,6 +260,28 @@ namespace ctrace::concurrency::internal::analysis
 
         /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
         /// which keeps the region conservatively overlapping every sibling.
+        /// Strips casts and aliases while leaving indexing steps in place.
+        ///
+        /// `stripPointerCastsAndAliases` also removes a GEP whose indices are all zero, because
+        /// it computes the same address. It does not describe the same thing: the first field of
+        /// an aggregate sits at offset zero, so that GEP is where its type and offset appear.
+        const llvm::Value* stripCastsKeepingIndexing(const llvm::Value* value)
+        {
+            while (value != nullptr)
+            {
+                if (llvm::isa<llvm::GEPOperator>(value))
+                    return value;
+
+                const llvm::Value* stripped = value->stripPointerCastsAndAliases();
+                if (stripped == value)
+                    return value;
+
+                value = stripped;
+            }
+
+            return value;
+        }
+
         void accumulateGepOffset(AccessPathWalk& walk, const llvm::GEPOperator& gep)
         {
             if (!walk.hasKnownOffset)
@@ -455,10 +479,19 @@ namespace ctrace::concurrency::internal::analysis
         return !relativePath.empty() && *relativePath.begin() != "..";
     }
 
-    bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global)
+    bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global,
+                                 const ProgramDefinedGlobals* programDefined)
     {
-        if (global.isDeclaration() || global.isConstant() || global.isThreadLocal())
+        if (global.isConstant() || global.isThreadLocal())
             return false;
+
+        // An `extern` with no definition in sight designates nothing this analysis can reason
+        // about. Once the whole program is known, the same declaration may name real storage.
+        if (global.isDeclaration() &&
+            (programDefined == nullptr || !programDefined->contains(global.getGlobalIdentifier())))
+        {
+            return false;
+        }
 
         return !isSynchronizationPrimitiveType(global.getValueType());
     }
@@ -492,6 +525,88 @@ namespace ctrace::concurrency::internal::analysis
             return std::nullopt;
 
         return normalizeValueName(global->getName());
+    }
+
+    const llvm::GlobalVariable* globalOfStorageGroupId(const llvm::Module& module,
+                                                       std::string_view handleGroupId)
+    {
+        constexpr std::string_view kGlobalPrefix = "global:";
+        if (!handleGroupId.starts_with(kGlobalPrefix))
+            return nullptr;
+
+        // The id may carry an access path after the name; the object is the part before it.
+        std::string_view name = handleGroupId.substr(kGlobalPrefix.size());
+        const std::size_t end = name.find_first_not_of(
+            "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.$");
+        if (end != std::string_view::npos)
+            name = name.substr(0, end);
+
+        if (name.empty())
+            return nullptr;
+
+        return module.getGlobalVariable(name, /*AllowInternal=*/true);
+    }
+
+    std::optional<RootBinding>
+    resolveSharedObjectRoot(const llvm::Value& value, const llvm::DataLayout* layout,
+                            std::uint64_t byteSize,
+                            const std::unordered_set<std::string>& sharedObjectIds)
+    {
+        if (sharedObjectIds.empty())
+            return std::nullopt;
+
+        AccessPathWalk walk;
+        walk.layout = layout;
+
+        const llvm::Value* current = stripCastsKeepingIndexing(&value);
+        while (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(current))
+        {
+            noteGepTypes(walk, *gep);
+            accumulateGepOffset(walk, *gep);
+            current = stripCastsKeepingIndexing(gep->getPointerOperand());
+        }
+
+        // The load is where the pointer was read, and its operand is the slot holding it. That
+        // slot is what the spawn site named, so the walk stops here rather than chasing the
+        // value to an allocation that has no name.
+        const auto* load = llvm::dyn_cast<llvm::LoadInst>(current);
+        if (load == nullptr || walk.touchesSyncPrimitive)
+            return std::nullopt;
+
+        const std::optional<std::string> slotId =
+            canonicalStorageGroupId(*load->getPointerOperand());
+        if (!slotId.has_value() || !sharedObjectIds.contains(*slotId))
+            return std::nullopt;
+
+        return RootBinding::global(*slotId,
+                                   walk.region(byteSize != 0 ? byteSize : walk.designatedSize));
+    }
+
+    std::optional<std::string> objectFieldLockId(const llvm::Value& value,
+                                                 const llvm::DataLayout* layout,
+                                                 unsigned argumentIndex,
+                                                 const std::string& objectId)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        walk.layout = layout;
+        const auto* argument =
+            llvm::dyn_cast_or_null<llvm::Argument>(resolveCopiedValue(value, seen, &walk));
+        if (argument == nullptr || argument->getArgNo() != argumentIndex)
+            return std::nullopt;
+
+        return objectId + walk.region().suffix();
+    }
+
+    std::optional<std::string> parameterLockId(const llvm::Value& value)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        const auto* argument =
+            llvm::dyn_cast_or_null<llvm::Argument>(resolveCopiedValue(value, seen, nullptr));
+        if (argument == nullptr)
+            return std::nullopt;
+
+        return "%arg" + std::to_string(argument->getArgNo());
     }
 
     std::optional<std::string> canonicalLockId(const llvm::Value& value,
@@ -587,7 +702,8 @@ namespace ctrace::concurrency::internal::analysis
 
     std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
                                                   const llvm::DataLayout* layout,
-                                                  std::uint64_t byteSize)
+                                                  std::uint64_t byteSize,
+                                                  const ProgramDefinedGlobals* programDefined)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;
         AccessPathWalk walk;
@@ -604,7 +720,7 @@ namespace ctrace::concurrency::internal::analysis
         const MemoryRegion region = walk.region(byteSize != 0 ? byteSize : walk.designatedSize);
         if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(root))
         {
-            if (!shouldTrackSharedGlobal(*global))
+            if (!shouldTrackSharedGlobal(*global, programDefined))
                 return std::nullopt;
 
             return RootBinding::global(normalizeValueName(global->getName()), region);
@@ -616,14 +732,16 @@ namespace ctrace::concurrency::internal::analysis
         return std::nullopt;
     }
 
-    std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value)
+    std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
+                                                  const ProgramDefinedGlobals* programDefined)
     {
-        return resolveTrackedRoot(value, nullptr, 0);
+        return resolveTrackedRoot(value, nullptr, 0, programDefined);
     }
 
     std::optional<AliasResolvedGlobal>
     resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
-                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals)
+                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals,
+                       const ProgramDefinedGlobals* programDefined)
     {
         const std::optional<llvm::MemoryLocation> accessLocation =
             llvm::MemoryLocation::getOrNone(&accessInstruction);
@@ -632,12 +750,14 @@ namespace ctrace::concurrency::internal::analysis
 
         std::optional<std::string> mustAliasSymbol;
         std::optional<std::string> mayAliasSymbol;
+        const llvm::GlobalVariable* mustAliasGlobal = nullptr;
+        const llvm::GlobalVariable* mayAliasGlobal = nullptr;
         bool hasConflictingMustAlias = false;
         bool hasAmbiguousMayAlias = false;
 
         for (const llvm::GlobalVariable* global : candidateGlobals)
         {
-            if (global == nullptr || !shouldTrackSharedGlobal(*global))
+            if (global == nullptr || !shouldTrackSharedGlobal(*global, programDefined))
                 continue;
 
             const llvm::AliasResult aliasResult =
@@ -651,7 +771,10 @@ namespace ctrace::concurrency::internal::analysis
             if (*aliasProvenance == AliasProvenance::MustAlias)
             {
                 if (!mustAliasSymbol.has_value())
+                {
                     mustAliasSymbol = symbol;
+                    mustAliasGlobal = global;
+                }
                 else if (*mustAliasSymbol != symbol)
                     hasConflictingMustAlias = true;
 
@@ -659,7 +782,10 @@ namespace ctrace::concurrency::internal::analysis
             }
 
             if (!mayAliasSymbol.has_value())
+            {
                 mayAliasSymbol = symbol;
+                mayAliasGlobal = global;
+            }
             else if (*mayAliasSymbol != symbol)
                 hasAmbiguousMayAlias = true;
         }
@@ -668,6 +794,7 @@ namespace ctrace::concurrency::internal::analysis
         {
             return AliasResolvedGlobal{
                 .symbol = *mustAliasSymbol,
+                .global = mustAliasGlobal,
                 .aliasProvenance = AliasProvenance::MustAlias,
             };
         }
@@ -676,6 +803,7 @@ namespace ctrace::concurrency::internal::analysis
         {
             return AliasResolvedGlobal{
                 .symbol = *mayAliasSymbol,
+                .global = mayAliasGlobal,
                 .aliasProvenance = AliasProvenance::MayAlias,
             };
         }
@@ -683,18 +811,71 @@ namespace ctrace::concurrency::internal::analysis
         return std::nullopt;
     }
 
+    namespace
+    {
+        /// The function a pointer-to-member denotes, when it denotes one at all.
+        ///
+        /// The Itanium ABI represents `&Service::run` as a pair: the function address and the
+        /// adjustment to apply to `this`. It is a struct, not a pointer, so the copy walk that
+        /// resolves ordinary callables never reaches it — which is why a thread started from a
+        /// member function had no entry at all.
+        ///
+        /// Only the plain case is accepted. A non-zero adjustment means multiple inheritance and
+        /// the callee still depends on which base the object is viewed as; an odd first field
+        /// encodes a vtable offset, and the target is then whatever the object turns out to be.
+        /// Neither is a single function this analysis could name.
+        const llvm::Function* memberFunctionBehind(const llvm::Value& value)
+        {
+            const auto* storage =
+                llvm::dyn_cast<llvm::AllocaInst>(llvm::getUnderlyingObject(&value));
+            if (storage == nullptr)
+                return nullptr;
+
+            for (const llvm::User* user : storage->users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store == nullptr || store->getPointerOperand() != storage)
+                    continue;
+
+                const auto* pair = llvm::dyn_cast<llvm::ConstantStruct>(store->getValueOperand());
+                if (pair == nullptr || pair->getNumOperands() != 2)
+                    continue;
+
+                const auto* adjustment = llvm::dyn_cast<llvm::ConstantInt>(pair->getOperand(1));
+                if (adjustment == nullptr || !adjustment->isZero())
+                    continue;
+
+                const auto* address = llvm::dyn_cast<llvm::ConstantExpr>(pair->getOperand(0));
+                if (address == nullptr || address->getOpcode() != llvm::Instruction::PtrToInt)
+                    continue;
+
+                if (const auto* function =
+                        llvm::dyn_cast<llvm::Function>(address->getOperand(0)->stripPointerCasts()))
+                {
+                    return function;
+                }
+            }
+
+            return nullptr;
+        }
+    } // namespace
+
     std::optional<FunctionBinding> resolveFunctionBinding(const llvm::Value& value)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;
-        const llvm::Value* root = resolveCopiedValue(value, seen);
-        if (root == nullptr)
-            return std::nullopt;
+        if (const llvm::Value* root = resolveCopiedValue(value, seen); root != nullptr)
+        {
+            if (const auto* function = llvm::dyn_cast<llvm::Function>(root))
+                return FunctionBinding{.function = function};
 
-        if (const auto* function = llvm::dyn_cast<llvm::Function>(root))
-            return FunctionBinding{.function = function};
+            if (const auto* argument = llvm::dyn_cast<llvm::Argument>(root))
+                return FunctionBinding{.argumentIndex = argument->getArgNo()};
+        }
 
-        if (const auto* argument = llvm::dyn_cast<llvm::Argument>(root))
-            return FunctionBinding{.argumentIndex = argument->getArgNo()};
+        // The copy walk resolves pointers, and a pointer-to-member is a struct: it never
+        // reaches one, so this is tried after rather than instead.
+        if (const llvm::Function* member = memberFunctionBehind(value))
+            return FunctionBinding{.function = member};
 
         return std::nullopt;
     }

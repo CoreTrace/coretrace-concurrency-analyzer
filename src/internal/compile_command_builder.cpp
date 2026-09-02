@@ -45,9 +45,22 @@ namespace ctrace::concurrency::internal
         args.resize(writeIndex);
     }
 
+    void CompileCommandBuilder::forceUnoptimizedCodegen(std::vector<std::string>& args)
+    {
+        // Appended after everything the caller supplied, because the last `-O` wins. The analysis
+        // reasons about the program as written, and an optimizer is free to inline, merge and
+        // delete exactly what the rules read: at -O2 a wait reached through a helper vanishes
+        // with the helper, and the finding disappears with no sign that anything was lost.
+        //
+        // Nothing further is added. At -O0 clang already marks every function `optnone` and
+        // `noinline`; what remains in the pipeline is lowering, which the analysis needs.
+        args.emplace_back("-O0");
+    }
+
     std::vector<std::string> CompileCommandBuilder::buildLL(const CompileRequest& request)
     {
         std::vector<std::string> args = request.extraCompileArgs;
+        forceUnoptimizedCodegen(args);
         removeOutputPathArgs(args);
         appendIfMissing(args, "-emit-llvm");
         appendIfMissing(args, "-S");
@@ -61,6 +74,7 @@ namespace ctrace::concurrency::internal
                                                             const std::filesystem::path& outputPath)
     {
         std::vector<std::string> args = request.extraCompileArgs;
+        forceUnoptimizedCodegen(args);
         args.erase(std::remove(args.begin(), args.end(), "-S"), args.end());
         removeOutputPathArgs(args);
         appendIfMissing(args, "-emit-llvm");

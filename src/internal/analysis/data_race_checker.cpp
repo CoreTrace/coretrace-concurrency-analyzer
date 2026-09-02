@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <filesystem>
 #include <map>
 #include <sstream>
 #include <set>
@@ -73,6 +72,19 @@ namespace ctrace::concurrency::internal::analysis
             return access.symbol;
         }
 
+        /// What the conflict is about, said the way the reader can act on it.
+        ///
+        /// An object handed to a thread has no name of its own: its identity is the storage the
+        /// pointer was read from, which is an internal label. Printing it as if it were a global
+        /// would name something the reader cannot find in the source.
+        std::string describeConflictSubject(const AccessFact& access)
+        {
+            if (access.sharedObject)
+                return "unsynchronized concurrent access to an object shared with a thread";
+
+            return "unsynchronized concurrent access to global '" + describeSymbol(access) + "'";
+        }
+
         std::vector<std::string> sortedLocks(const AccessFact& access)
         {
             return std::vector<std::string>(access.heldLocks.begin(), access.heldLocks.end());
@@ -127,22 +139,6 @@ namespace ctrace::concurrency::internal::analysis
             for (const std::string& context : contexts)
                 stream << "|" << context;
 
-            return stream.str();
-        }
-
-        /// Identifies the conflict independently of where inside the symbol it lands, so that a
-        /// coarse effect and the observed access it summarizes fall in the same bucket.
-        std::string conflictContextKey(const AccessFact& access, const EntrySet& lhsEntries,
-                                       const EntrySet& rhsEntries)
-        {
-            std::vector<std::string> contexts{joinValues(sortedThreadEntries(lhsEntries)),
-                                              joinValues(sortedThreadEntries(rhsEntries))};
-            std::sort(contexts.begin(), contexts.end());
-
-            std::ostringstream stream;
-            stream << access.symbol;
-            for (const std::string& context : contexts)
-                stream << "|" << context;
             return stream.str();
         }
 
@@ -287,7 +283,7 @@ namespace ctrace::concurrency::internal::analysis
             builder.confidence(inferConfidence(lhs, rhs))
                 .primaryLocation(lhs.userLocation)
                 .relatedLocation("Conflicting access", rhs.userLocation)
-                .message("unsynchronized concurrent access to global '" + describeSymbol(lhs) + "'")
+                .message(describeConflictSubject(lhs))
                 .note("first access: " + describeAccess(lhs, orderedLhsEntries))
                 .note("conflicting access: " + describeAccess(rhs, orderedRhsEntries))
                 .note("possible conflict kinds: " + joinValues(conflictKinds));
@@ -346,8 +342,7 @@ namespace ctrace::concurrency::internal::analysis
             builder.confidence(inferConfidence(access))
                 .primaryLocation(access.userLocation)
                 .relatedLocation("Concurrent invocation", access.userLocation)
-                .message("unsynchronized concurrent access to global '" + describeSymbol(access) +
-                         "'")
+                .message(describeConflictSubject(access))
                 .note("access: " + describeAccess(access, orderedEntries))
                 .note("conflicts with another concurrent invocation reachable from thread entry "
                       "'" +
@@ -376,6 +371,7 @@ namespace ctrace::concurrency::internal::analysis
 
     DiagnosticReport DataRaceChecker::run(const llvm::Module& module, const TUFacts& facts) const
     {
+        (void)module;
         const std::unordered_map<std::string, ThreadEntrySet>& reachableEntriesByFunction =
             facts.reachableThreadEntriesByFunction;
         static const EntrySet emptyEntries;
@@ -386,26 +382,9 @@ namespace ctrace::concurrency::internal::analysis
             return it != reachableEntriesByFunction.end() ? it->second : emptyEntries;
         };
 
-        const std::optional<std::filesystem::path> sourceRoot = primarySourceRoot(module);
-
-        // A coarse call effect and a guessed identity are both approximations. Once projected onto
-        // a call site the user wrote, they describe that line and are worth reporting; left inside
-        // a standard library header, they describe the library's own bookkeeping. The decision
-        // belongs here, after projection, not at collection time when the user location is not yet
-        // known.
-        auto describesUserCode = [&](const AccessFact& access)
-        {
-            if (!access.coarseCallEffect && !access.guessedIdentity)
-                return true;
-
-            return isLikelyUserLocation(access.userLocation, sourceRoot);
-        };
-
         std::map<std::string, std::vector<const AccessFact*>> accessesBySymbol;
         for (const AccessFact& access : facts.accesses)
         {
-            if (!describesUserCode(access))
-                continue;
 
             // Code on the initial thread is analyzed too: it is a task like any other, bounded by
             // the spawns and joins surrounding it.
@@ -434,7 +413,7 @@ namespace ctrace::concurrency::internal::analysis
         {
             (void)symbol;
             std::map<std::string, LocationConflict> conflictsByLocation;
-            std::set<std::string> preciseConflictBuckets;
+            std::set<std::string> preciseConflictSymbols;
 
             for (std::size_t lhsIndex = 0; lhsIndex < accesses.size(); ++lhsIndex)
             {
@@ -463,15 +442,16 @@ namespace ctrace::concurrency::internal::analysis
                     if (shareRecognizedLock(lhs, rhs))
                         continue;
 
-                    // An effect inferred for a call is weaker evidence than an observed access:
-                    // it names the call site, not the instruction that touches the memory. When
-                    // both describe the same conflict, the observed one must be reported.
-                    const bool isPrecise = !lhs.coarseCallEffect && !rhs.coarseCallEffect;
+                    // Approximations: an effect inferred for a call names the call site rather
+                    // than the instruction, and an alias-guessed identity names a global the
+                    // analysis merely suspects. Either is worth reporting when it is the only
+                    // evidence about a symbol — that is what the alias fallback exists for — and
+                    // is noise once an observed conflict on that same symbol is available.
+                    const bool isPrecise = !lhs.coarseCallEffect && !rhs.coarseCallEffect &&
+                                           !lhs.guessedIdentity && !rhs.guessedIdentity;
                     if (isPrecise)
-                        preciseConflictBuckets.insert(
-                            conflictContextKey(lhs, lhsEntries, rhsEntries));
-                    else if (preciseConflictBuckets.contains(
-                                 conflictContextKey(lhs, lhsEntries, rhsEntries)))
+                        preciseConflictSymbols.insert(lhs.symbol);
+                    else if (preciseConflictSymbols.contains(lhs.symbol))
                         continue;
 
                     LocationConflict& conflict =

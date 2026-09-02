@@ -17,6 +17,7 @@
 #include <llvm/IR/DataLayout.h>
 #include <llvm/Support/ModRef.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <sstream>
@@ -37,6 +38,14 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         /// Extent of a scalar access, so that writes to adjacent fields do not appear to overlap.
+        /// What a pointer designates depends on the target layout and on which globals the
+        /// program defines. The two questions travel together, so they travel as one value.
+        struct MemoryScope
+        {
+            const llvm::DataLayout& layout;
+            const ProgramDefinedGlobals* programDefined = nullptr;
+        };
+
         std::uint64_t accessByteSize(const llvm::DataLayout& layout, const llvm::Type* accessedType)
         {
             if (accessedType == nullptr || !accessedType->isSized())
@@ -152,11 +161,11 @@ namespace ctrace::concurrency::internal::analysis
         void appendAccess(std::vector<PendingAccess>& accesses, const llvm::Function& function,
                           const llvm::Instruction& instruction, const llvm::Value& pointerOperand,
                           AccessKind kind, AliasProvenance aliasProvenance,
-                          const llvm::DataLayout& layout, std::uint64_t byteSize = 0,
+                          const MemoryScope& scope, std::uint64_t byteSize = 0,
                           bool isAtomic = false, bool coarseCallEffect = false)
         {
             const std::optional<RootBinding> root =
-                resolveTrackedRoot(pointerOperand, &layout, byteSize);
+                resolveTrackedRoot(pointerOperand, &scope.layout, byteSize, scope.programDefined);
             if (!root.has_value())
                 return;
 
@@ -187,20 +196,20 @@ namespace ctrace::concurrency::internal::analysis
         void appendMemoryIntrinsicAccesses(std::vector<PendingAccess>& accesses,
                                            const llvm::Function& function,
                                            const llvm::MemIntrinsic& intrinsic,
-                                           const llvm::DataLayout& layout)
+                                           const MemoryScope& scope)
         {
             const std::uint64_t length = memoryIntrinsicLength(intrinsic);
             if (const auto* transfer = llvm::dyn_cast<llvm::MemTransferInst>(&intrinsic))
             {
                 appendAccess(accesses, function, intrinsic, *transfer->getRawDest(),
-                             AccessKind::Write, AliasProvenance::Direct, layout, length);
+                             AccessKind::Write, AliasProvenance::Direct, scope, length);
                 appendAccess(accesses, function, intrinsic, *transfer->getRawSource(),
-                             AccessKind::Read, AliasProvenance::Direct, layout, length);
+                             AccessKind::Read, AliasProvenance::Direct, scope, length);
                 return;
             }
 
             appendAccess(accesses, function, intrinsic, *intrinsic.getRawDest(), AccessKind::Write,
-                         AliasProvenance::Direct, layout, length);
+                         AliasProvenance::Direct, scope, length);
         }
 
         std::optional<AccessKind> accessKindFromModRef(llvm::ModRefInfo modRefInfo)
@@ -218,7 +227,7 @@ namespace ctrace::concurrency::internal::analysis
                                             const llvm::Function& function,
                                             const llvm::CallBase& call, llvm::AAResults& aaResults,
                                             const ConcurrencySymbolClassifier& classifier,
-                                            const llvm::DataLayout& layout,
+                                            const MemoryScope& scope,
                                             AtomicOnlyCache& atomicOnlyCache)
         {
             if (!shouldInferCallMemoryEffects(call, classifier))
@@ -237,7 +246,8 @@ namespace ctrace::concurrency::internal::analysis
                 if (value == nullptr || !value->getType()->isPointerTy())
                     continue;
 
-                const std::optional<RootBinding> root = resolveTrackedRoot(*value, &layout, 0);
+                const std::optional<RootBinding> root =
+                    resolveTrackedRoot(*value, &scope.layout, 0, scope.programDefined);
                 if (!root.has_value())
                     continue;
 
@@ -252,19 +262,22 @@ namespace ctrace::concurrency::internal::analysis
                     continue;
 
                 appendAccess(accesses, function, call, *value, *kind, AliasProvenance::Direct,
-                             layout, 0, atomicEffect, true);
+                             scope, 0, atomicEffect, true);
             }
         }
     } // namespace
 
-    std::vector<PendingAccess> SharedAccessCollector::collect(const llvm::Module& module) const
+    std::vector<PendingAccess>
+    SharedAccessCollector::collect(const llvm::Module& module,
+                                   const ProgramDefinedGlobals* programDefined,
+                                   const std::unordered_set<std::string>* sharedObjectIds) const
     {
         std::vector<PendingAccess> accesses;
         std::vector<const llvm::GlobalVariable*> trackedGlobals;
         trackedGlobals.reserve(module.global_size());
         for (const llvm::GlobalVariable& global : module.globals())
         {
-            if (shouldTrackSharedGlobal(global))
+            if (shouldTrackSharedGlobal(global, programDefined))
                 trackedGlobals.push_back(&global);
         }
 
@@ -272,6 +285,10 @@ namespace ctrace::concurrency::internal::analysis
         ConcurrencySymbolClassifier classifier;
         AtomicOnlyCache atomicOnlyCache;
         const llvm::DataLayout& layout = module.getDataLayout();
+        static const std::unordered_set<std::string> kNoSharedObjects;
+        const std::unordered_set<std::string>& sharedObjects =
+            sharedObjectIds != nullptr ? *sharedObjectIds : kNoSharedObjects;
+        const MemoryScope scope{.layout = layout, .programDefined = programDefined};
 
         for (const llvm::Function& function : module)
         {
@@ -292,14 +309,14 @@ namespace ctrace::concurrency::internal::analysis
 
                     if (const auto* intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(&instruction))
                     {
-                        appendMemoryIntrinsicAccesses(accesses, function, *intrinsic, layout);
+                        appendMemoryIntrinsicAccesses(accesses, function, *intrinsic, scope);
                         continue;
                     }
 
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                     {
                         appendCallMemoryEffectAccesses(accesses, function, *call, aaResults,
-                                                       classifier, layout, atomicOnlyCache);
+                                                       classifier, scope, atomicOnlyCache);
                         continue;
                     }
 
@@ -343,17 +360,21 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
 
                     std::optional<RootBinding> root =
-                        resolveTrackedRoot(*pointerOperand, &layout, byteSize);
+                        resolveTrackedRoot(*pointerOperand, &layout, byteSize, programDefined);
+                    if (!root.has_value())
+                    {
+                        root = resolveSharedObjectRoot(*pointerOperand, &layout, byteSize,
+                                                       sharedObjects);
+                    }
+
                     if (!root.has_value())
                     {
                         const std::optional<AliasResolvedGlobal> aliasResolvedGlobal =
-                            resolveAliasGlobal(instruction, aaResults, trackedGlobals);
+                            resolveAliasGlobal(instruction, aaResults, trackedGlobals,
+                                               programDefined);
                         if (!aliasResolvedGlobal.has_value())
                             continue;
 
-                        // The global identity is a guess here, not a resolution. Made inside a
-                        // standard library header, about an object the user never named, it
-                        // attributes the library's own bookkeeping to their data.
                         root = RootBinding::global(aliasResolvedGlobal->symbol);
                         aliasProvenance = aliasResolvedGlobal->aliasProvenance;
                     }

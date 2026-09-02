@@ -8,6 +8,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm
@@ -30,7 +31,13 @@ namespace ctrace::concurrency::internal::analysis
         SourceLocation userLocation;
     };
 
-    [[nodiscard]] bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global);
+    /// Global identifiers the program defines somewhere, or null when the analysis sees a
+    /// single unit. A unit alone cannot tell an `extern` backed by real storage from an
+    /// unresolved symbol, so it drops both; a whole-project run knows the difference.
+    using ProgramDefinedGlobals = std::unordered_set<std::string>;
+
+    [[nodiscard]] bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global,
+                                               const ProgramDefinedGlobals* programDefined);
 
     struct FunctionBinding
     {
@@ -41,6 +48,9 @@ namespace ctrace::concurrency::internal::analysis
     struct AliasResolvedGlobal
     {
         std::string symbol;
+        /// The global the access was attributed to, so callers can weigh how much the answer is
+        /// a resolution and how much it is a guess.
+        const llvm::GlobalVariable* global = nullptr;
         AliasProvenance aliasProvenance = AliasProvenance::Direct;
     };
 
@@ -69,16 +79,53 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] std::optional<std::string> canonicalLockId(const llvm::Value& value,
                                                              const llvm::DataLayout* layout);
     [[nodiscard]] std::optional<std::string> canonicalStorageGroupId(const llvm::Value& value);
+
+    /// The module-level global a handle group id designates, or null when the id names a stack
+    /// slot or a parameter. Only a global can be the same object in two translation units.
+    [[nodiscard]] const llvm::GlobalVariable*
+    globalOfStorageGroupId(const llvm::Module& module, std::string_view handleGroupId);
+
+    /// Identity of a lock a function receives as a parameter, as seen from inside that function.
+    /// It stands for whatever the caller passed, and is only meaningful while summarising the
+    /// callee: every consumer sees it substituted by the caller's own lock.
+    [[nodiscard]] std::optional<std::string> parameterLockId(const llvm::Value& value);
+
+    /// Identity of an access made through a pointer the program holds in a named slot, when
+    /// that slot is one the spawn sites identified as shared.
+    ///
+    /// The thread that hands an object over usually keeps using it, and its own accesses reach
+    /// the object by loading the same variable the spawn read. Following that load to the
+    /// allocation gives nothing nameable; stopping at the slot gives the identity both sides
+    /// already agree on.
+    [[nodiscard]] std::optional<RootBinding>
+    resolveSharedObjectRoot(const llvm::Value& value, const llvm::DataLayout* layout,
+                            std::uint64_t byteSize,
+                            const std::unordered_set<std::string>& sharedObjectIds);
+
+    /// Identity of a lock that is a field of the object a parameter points at.
+    ///
+    /// A thread-safe class keeps its mutex beside the data it guards, so once the object has an
+    /// identity the lock has one too: the same base, plus the offset of the field. Without this
+    /// the data would be identifiable and the lock protecting it would not, which reports every
+    /// correctly guarded access as a race.
+    [[nodiscard]] std::optional<std::string> objectFieldLockId(const llvm::Value& value,
+                                                               const llvm::DataLayout* layout,
+                                                               unsigned argumentIndex,
+                                                               const std::string& objectId);
     /// Resolves the tracked root of a pointer, together with the byte range it designates.
     /// `byteSize` is the extent of the access; zero means unknown and conservatively covers the
     /// whole object.
-    [[nodiscard]] std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
-                                                                const llvm::DataLayout* layout,
-                                                                std::uint64_t byteSize);
-    [[nodiscard]] std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value);
+    [[nodiscard]] std::optional<RootBinding>
+    resolveTrackedRoot(const llvm::Value& value, const llvm::DataLayout* layout,
+                       std::uint64_t byteSize,
+                       const ProgramDefinedGlobals* programDefined = nullptr);
+    [[nodiscard]] std::optional<RootBinding>
+    resolveTrackedRoot(const llvm::Value& value,
+                       const ProgramDefinedGlobals* programDefined = nullptr);
     [[nodiscard]] std::optional<AliasResolvedGlobal>
     resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
-                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals);
+                       const std::vector<const llvm::GlobalVariable*>& candidateGlobals,
+                       const ProgramDefinedGlobals* programDefined = nullptr);
     [[nodiscard]] std::optional<FunctionBinding> resolveFunctionBinding(const llvm::Value& value);
     [[nodiscard]] const llvm::Function* resolveFunctionValue(const llvm::Value& value);
     [[nodiscard]] std::string functionId(const llvm::Function& function);

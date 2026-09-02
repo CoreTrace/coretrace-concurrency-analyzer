@@ -39,3 +39,14 @@
 
 # debug information files
 *.dwo
+
+# Build trees
+build/
+build-*/
+
+# Tooling caches
+.claude/
+__pycache__/
+
+# Projects kept locally for trying the tool on real code
+tests/projects/

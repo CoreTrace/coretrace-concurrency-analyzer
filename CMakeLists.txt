@@ -33,6 +33,10 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/coretrace_concurrency_analysis.cpp
     src/coretrace_concurrency_error.cpp
     src/internal/analysis/concurrency_symbol_classifier.cpp
+    src/internal/analysis/condition_wait_checker.cpp
+    src/internal/analysis/condition_wait_collector.cpp
+    src/internal/analysis/cross_tu/inter_tu_coordinator.cpp
+    src/internal/analysis/cross_tu/program_symbol_index.cpp
     src/internal/analysis/data_race_checker.cpp
     src/internal/analysis/interprocedural_bindings.cpp
     src/internal/analysis/llvm_function_analysis_provider.cpp
@@ -45,15 +49,23 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/diagnostics/diagnostic_catalog.cpp
     src/internal/analysis/ir_utils.cpp
     src/internal/analysis/lock_effect_application.cpp
+    src/internal/analysis/lock_wrapper_summaries.cpp
     src/internal/analysis/lock_scope_tracker.cpp
     src/internal/analysis/synchronization_effects.cpp
     src/internal/analysis/task_concurrency_analyzer.cpp
     src/internal/reporting/report_renderer.cpp
+    src/internal/analysis/process_lifecycle_checker.cpp
+    src/internal/analysis/process_lifecycle_collector.cpp
     src/internal/analysis/shared_access_collector.cpp
+    src/internal/analysis/shared_object_binding_collector.cpp
+    src/internal/analysis/signal_handler_collector.cpp
+    src/internal/analysis/thread_argument_escape_collector.cpp
     src/internal/analysis/thread_context_propagator.cpp
     src/internal/analysis/thread_lifecycle_collector.cpp
     src/internal/analysis/thread_spawn_detector.cpp
     src/internal/analysis/tu_facts_builder.cpp
+    src/internal/compilation_database.cpp
+    src/internal/ir_cache.cpp
     src/internal/compile_command_builder.cpp
     src/internal/compilation_backend.cpp
     src/internal/ir_loader.cpp
@@ -160,6 +172,48 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     add_test(NAME coretrace_concurrency_arch_tests COMMAND coretrace_concurrency_arch_tests)
 
+    add_executable(coretrace_concurrency_compdb_tests
+      tests/unit/test_compilation_database.cpp
+    )
+
+    target_include_directories(coretrace_concurrency_compdb_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_compile_definitions(coretrace_concurrency_compdb_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    target_link_libraries(coretrace_concurrency_compdb_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_compdb_tests COMMAND coretrace_concurrency_compdb_tests)
+
+    add_executable(coretrace_concurrency_ir_cache_tests
+      tests/unit/test_ir_cache.cpp
+    )
+
+    target_include_directories(coretrace_concurrency_ir_cache_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
+    target_compile_definitions(coretrace_concurrency_ir_cache_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    target_link_libraries(coretrace_concurrency_ir_cache_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_ir_cache_tests COMMAND coretrace_concurrency_ir_cache_tests)
+
     add_executable(coretrace_concurrency_error_tests
       tests/unit/test_error_model.cpp
     )
@@ -191,6 +245,22 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
     )
 
     add_test(NAME coretrace_concurrency_analysis_tests COMMAND coretrace_concurrency_analysis_tests)
+
+    add_executable(coretrace_concurrency_cross_tu_tests
+      tests/unit/test_cross_tu_analysis.cpp
+    )
+
+    target_compile_definitions(coretrace_concurrency_cross_tu_tests
+      PRIVATE
+        ${CORETRACE_TEST_COMMON_DEFINITIONS}
+    )
+
+    target_link_libraries(coretrace_concurrency_cross_tu_tests
+      PRIVATE
+        coretrace_concurrency_analyzer_lib
+    )
+
+    add_test(NAME coretrace_concurrency_cross_tu_tests COMMAND coretrace_concurrency_cross_tu_tests)
 
     add_executable(coretrace_concurrency_cli_cpp_tests
       tests/integration/cli/test_cli_cpp.cpp

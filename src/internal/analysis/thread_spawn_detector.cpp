@@ -75,9 +75,9 @@ namespace ctrace::concurrency::internal::analysis
         bool addConcreteSpawn(ThreadSpawnCollection& collection,
                               std::unordered_set<std::string>& spawnKeys,
                               const llvm::Function& entry, const SourceLocation& location,
-                              bool insideLoop)
+                              bool insideLoop, bool includeExternalEntries)
         {
-            if (entry.isDeclaration())
+            if (entry.isDeclaration() && !includeExternalEntries)
                 return false;
 
             const std::string key = concreteSpawnKey(entry, location, insideLoop);
@@ -165,7 +165,8 @@ namespace ctrace::concurrency::internal::analysis
     {
     }
 
-    ThreadSpawnCollection ThreadSpawnDetector::collect(const llvm::Module& module) const
+    ThreadSpawnCollection ThreadSpawnDetector::collect(const llvm::Module& module,
+                                                       bool includeExternalEntries) const
     {
         ThreadSpawnCollection collection;
         std::unordered_set<std::string> concreteSpawnKeys;
@@ -206,7 +207,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (entryBinding->function != nullptr)
                     {
                         addConcreteSpawn(collection, concreteSpawnKeys, *entryBinding->function,
-                                         location, insideLoop);
+                                         location, insideLoop, includeExternalEntries);
                         continue;
                     }
 
@@ -249,7 +250,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (bindingIt->second.function != nullptr)
                     {
                         addConcreteSpawn(collection, concreteSpawnKeys, *bindingIt->second.function,
-                                         callBinding.location, insideLoop);
+                                         callBinding.location, insideLoop, includeExternalEntries);
                         continue;
                     }
 

@@ -14,20 +14,57 @@ The project follows the `coretrace-stack-analyzer` conventions:
 The repository no longer stops at IR compilation. It currently provides a single-translation-unit
 concurrency analysis pipeline on top of the generated `llvm::Module`.
 
-Supported analysis rules:
-- `DataRaceGlobal`: unsynchronized concurrent access detection for shared globals.
-- `MissingJoin`: joinable thread handles not joined or detached before scope exit.
-- `DeadlockLockOrder`: simple lock-order inversion and direct-call self-deadlock detection.
+Supported analysis rules. The name in the second column is what `--rules=` accepts.
+
+| Rule | `--rules=` | Reports |
+| --- | --- | --- |
+| `DataRaceGlobal` | `data-race` | shared globals accessed concurrently with no common lock |
+| `MissingJoin` | `missing-join` | joinable thread handles left neither joined nor detached |
+| `DeadlockLockOrder` | `deadlock-lock-order` | lock-order inversions and self-deadlock |
+| `ConditionWaitWithoutPredicate` | `condition-wait` | a condition-variable wait that rechecks nothing when it wakes |
+| `ForkAfterThreadCreation` | `fork-after-thread` | a `fork` in a threaded program with no `exec` in the child |
+| `UnreapedChildProcess` | `unreaped-child` | a `fork` whose children are never collected |
+| `ThreadArgumentEscapesFrame` | `thread-arg-escape` | a thread given a pointer into the frame that created it |
+| `UnsafeSignalHandler` | `unsafe-signal-handler` | a signal handler reaching a call it may not make |
+
+What each of the newer rules establishes, and what it deliberately does not:
+
+- **`condition-wait`** — a wait may return without the condition holding: the standard permits a
+  spurious wake-up, and a broadcast wakes every waiter while only one may proceed. A bare wait
+  with no loop around it therefore reads waking up as proof. A helper cannot recheck a condition
+  it does not know, so the obligation to loop travels to its caller and keeps travelling until
+  some caller does loop; only the outermost function still carrying it is reported. *Not covered:*
+  a wait inside a loop that rechecks the wrong condition.
+- **`fork-after-thread`** — only the calling thread survives a `fork`, while the whole address
+  space is inherited: a mutex another thread held is copied locked with nobody left to unlock it.
+  An `exec` reachable from the forking function settles the question and suppresses the report.
+  *Not proven:* that the thread creation actually runs before the fork.
+- **`unreaped-child`** — a `fork` whose pid is never waited on leaves every finished child in the
+  process table. Handing `SIGCHLD` to `SIG_IGN` counts as reaping. *Not tracked:* which pid a
+  given `wait` collects; `SA_NOCLDWAIT` through `sigaction` is unrecognized.
+- **`thread-arg-escape`** — a thread argument outlives the call that passed it unless the creator
+  waits, so a pointer to a local dangles as soon as that function returns. *Covers* `pthread`
+  creation only.
+- **`unsafe-signal-handler`** — a handler interrupts its own thread at an arbitrary instruction,
+  so allocating, printing or locking there re-enters a structure the interrupted code may have
+  left inconsistent. The unsafety travels back along direct calls to the handler. *Covers*
+  handlers installed through `signal` and `sigaction`.
 
 Current implementation boundaries:
-- Single TU only.
+- Whole-project analysis reads a `compile_commands.json`; four kinds of fact cross the unit
+  boundary and nothing else does.
 - Direct-call interprocedural propagation is supported for thread context, thread lifecycle, and
   lock state.
 - `MissingJoin` supports both `pthread` and `std::thread`.
 - `DeadlockLockOrder` is intentionally conservative and does not yet model arbitrary `3+` lock
   cycles across the whole program.
-- Multi-TU analysis, compile database ingestion, incremental cache, and full LLVM alias-analysis
-  coverage are not finished yet.
+- Shared state reached through a pointer — a field of an object on the heap or the stack — is not
+  tracked; only globals are. This is the single largest gap on idiomatic C++.
+- Thread entries reached through a pointer-to-member, as in `std::thread(&Class::method, obj)`,
+  are not resolved, so those methods are not seen as running in a thread.
+- Full LLVM alias-analysis coverage is not finished yet.
+- Sources are always compiled unoptimized: the analysis describes the program as written, and an
+  optimizer removes the very structure the rules read.
 
 ## High-Level Architecture
 
@@ -92,7 +129,16 @@ Select one or more rules explicitly:
 ./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=data-race
 ./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=missing-join
 ./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=data-race,missing-join
+./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=condition-wait
 ./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=all
+```
+
+Analyze a whole project instead of a single file, from the compilation database its build
+already produces. See [docs/cross-tu-mode.md](docs/cross-tu-mode.md) for what crosses the unit
+boundary and what does not:
+
+```bash
+./build-llvm20/coretrace_concurrency_analyzer --compile-commands=build/compile_commands.json
 ```
 
 Supported CLI options:

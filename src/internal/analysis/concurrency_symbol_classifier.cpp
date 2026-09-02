@@ -3,9 +3,13 @@
 
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/Value.h>
 
+#include <algorithm>
 #include <cctype>
+#include <optional>
 #include <string>
 
 namespace ctrace::concurrency::internal::analysis
@@ -172,6 +176,33 @@ namespace ctrace::concurrency::internal::analysis
             return name.contains("8try_lockEv") || name.contains("15try_lock_sharedEv");
         }
 
+        /// Whether a condition-variable wait rechecks the condition itself, or leaves that to
+        /// its caller. Nothing but the callee's own signature can answer it.
+        ///
+        /// Counting arguments does not work: the usual predicate is a captureless lambda, an
+        /// empty class that clang drops from the lowered signature, so both overloads arrive
+        /// with the same arity. The mangled name keeps what the lowering discards.
+        std::optional<bool> conditionWaitRechecksItself(llvm::StringRef name)
+        {
+            if (!isStdNamespaceSymbol(name) || !name.contains("condition_variable"))
+                return std::nullopt;
+
+            // `wait` comes in two shapes: the bare one is an ordinary member, the predicate one
+            // is a template, and the mangling marks the difference with `I` against `E`.
+            if (name.contains("4waitE"))
+                return false;
+            if (name.contains("4waitI"))
+                return true;
+
+            // `wait_for` and `wait_until` are both templates, so template arguments separate
+            // nothing. Their return type does: the bare form yields `cv_status`, the predicate
+            // form yields `bool`.
+            if (name.contains("wait_for") || name.contains("wait_until"))
+                return !name.contains("9cv_status");
+
+            return std::nullopt;
+        }
+
         bool isStdThreadJoin(llvm::StringRef name)
         {
             return isStdNamespaceSymbol(name) && name.contains("thread") &&
@@ -215,6 +246,174 @@ namespace ctrace::concurrency::internal::analysis
                llvm::StringRef(canonical).contains("recursive_timed_mutex");
     }
 
+    namespace
+    {
+        /// The function a value denotes, once casts are stripped. Kept local so the classifier
+        /// stays free of the IR-walking layer that depends on it.
+        const llvm::Function* functionBehind(const llvm::Value& value)
+        {
+            return llvm::dyn_cast<llvm::Function>(value.stripPointerCastsAndAliases());
+        }
+    } // namespace
+
+    bool ConcurrencySymbolClassifier::isAsyncSignalUnsafe(const llvm::CallBase& call) const
+    {
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr)
+            return false;
+
+        const std::string canonical = canonicalName(*callee);
+        const llvm::StringRef name = canonical;
+
+        // Deliberately short: only calls whose unsafety is not a matter of interpretation. A
+        // handler that allocates can deadlock against an interrupted allocation, one that prints
+        // can corrupt a stream mid-write, and one that locks can wait on a mutex its own thread
+        // already holds.
+        static constexpr std::string_view kUnsafe[] = {
+            "malloc",  "calloc",  "realloc",  "free",    "exit",     "printf",
+            "fprintf", "sprintf", "snprintf", "vprintf", "vfprintf", "puts",
+            "fputs",   "putchar", "fopen",    "fclose",  "fwrite",   "fread",
+        };
+        for (const std::string_view unsafe : kUnsafe)
+        {
+            if (matchesPlainSymbol(name, unsafe))
+                return true;
+        }
+
+        // Operator new and delete, in every spelling the ABI gives them.
+        if (name.starts_with("_Znw") || name.starts_with("_Zna") || name.starts_with("_ZdlPv") ||
+            name.starts_with("_ZdaPv"))
+        {
+            return true;
+        }
+
+        switch (classify(call))
+        {
+        case CallKind::PThreadMutexLock:
+        case CallKind::PThreadMutexUnlock:
+        case CallKind::PThreadMutexTryLock:
+        case CallKind::PThreadRwLockAcquire:
+        case CallKind::PThreadRwLockTryAcquire:
+        case CallKind::PThreadRwLockUnlock:
+        case CallKind::StdMutexLock:
+        case CallKind::StdMutexUnlock:
+        case CallKind::StdMutexTryLock:
+        case CallKind::StdLockGuardCtor:
+        case CallKind::StdLockGuardDtor:
+        case CallKind::CondWaitWithoutPredicate:
+        case CallKind::CondWaitWithPredicate:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool ConcurrencySymbolClassifier::ignoresChildTermination(const llvm::CallBase& call) const
+    {
+        constexpr unsigned kSignalNumberOperandIndex = 0;
+        constexpr unsigned kSignalHandlerOperandIndex = 1;
+        // SIGCHLD is not the same number everywhere: 17 on Linux, 20 on the BSDs and Darwin.
+        // Both are accepted rather than derived from the target, which would tie this rule to a
+        // triple it has no other reason to read.
+        constexpr std::int64_t kSigChldNumbers[] = {17, 20};
+        // SIG_IGN is the integer 1 given a function-pointer type.
+        constexpr std::int64_t kSigIgn = 1;
+
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr || call.arg_size() <= kSignalHandlerOperandIndex)
+            return false;
+
+        const std::string canonical = canonicalName(*callee);
+        const llvm::StringRef name = canonical;
+        if (!matchesPlainSymbol(name, "signal") && !matchesPlainSymbol(name, "bsd_signal") &&
+            !matchesPlainSymbol(name, "sigset"))
+        {
+            return false;
+        }
+
+        const auto* signalNumber =
+            llvm::dyn_cast<llvm::ConstantInt>(call.getArgOperand(kSignalNumberOperandIndex));
+        if (signalNumber == nullptr)
+            return false;
+
+        const bool targetsChildTermination =
+            std::find(std::begin(kSigChldNumbers), std::end(kSigChldNumbers),
+                      signalNumber->getSExtValue()) != std::end(kSigChldNumbers);
+        if (!targetsChildTermination)
+            return false;
+
+        const auto* handler =
+            llvm::dyn_cast<llvm::ConstantExpr>(call.getArgOperand(kSignalHandlerOperandIndex));
+        if (handler == nullptr || handler->getOpcode() != llvm::Instruction::IntToPtr)
+            return false;
+
+        const auto* handlerValue = llvm::dyn_cast<llvm::ConstantInt>(handler->getOperand(0));
+        return handlerValue != nullptr && handlerValue->getSExtValue() == kSigIgn;
+    }
+
+    const llvm::Function*
+    ConcurrencySymbolClassifier::installedSignalHandler(const llvm::CallBase& call) const
+    {
+        constexpr unsigned kSignalHandlerOperandIndex = 1;
+        constexpr unsigned kSigactionStructOperandIndex = 1;
+
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr)
+            return nullptr;
+
+        const std::string canonical = canonicalName(*callee);
+        const llvm::StringRef name = canonical;
+
+        if (matchesPlainSymbol(name, "signal") || matchesPlainSymbol(name, "bsd_signal") ||
+            matchesPlainSymbol(name, "sigset"))
+        {
+            if (call.arg_size() <= kSignalHandlerOperandIndex)
+                return nullptr;
+
+            return functionBehind(*call.getArgOperand(kSignalHandlerOperandIndex));
+        }
+
+        if (!matchesPlainSymbol(name, "sigaction") ||
+            call.arg_size() <= kSigactionStructOperandIndex)
+            return nullptr;
+
+        // `sigaction` takes the handler inside a struct the caller filled in, so the function
+        // appears as a store into that storage rather than as an operand.
+        const llvm::Value* action =
+            call.getArgOperand(kSigactionStructOperandIndex)->stripPointerCastsAndAliases();
+        const auto* storage = llvm::dyn_cast<llvm::AllocaInst>(action);
+        if (storage == nullptr)
+            return nullptr;
+
+        for (const llvm::User* user : storage->users())
+        {
+            const llvm::Value* candidate = user;
+            if (const auto* gep = llvm::dyn_cast<llvm::GetElementPtrInst>(user))
+            {
+                for (const llvm::User* nested : gep->users())
+                {
+                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(nested))
+                    {
+                        if (const llvm::Function* handler =
+                                functionBehind(*store->getValueOperand()))
+                        {
+                            return handler;
+                        }
+                    }
+                }
+                continue;
+            }
+
+            if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(candidate))
+            {
+                if (const llvm::Function* handler = functionBehind(*store->getValueOperand()))
+                    return handler;
+            }
+        }
+
+        return nullptr;
+    }
+
     CallKind ConcurrencySymbolClassifier::classify(const llvm::CallBase& call) const
     {
         const llvm::Function* callee = directCallee(call);
@@ -229,6 +428,27 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::PThreadJoin;
         if (matchesPlainSymbol(name, "pthread_detach"))
             return CallKind::PThreadDetach;
+        if (matchesPlainSymbol(name, "fork") || matchesPlainSymbol(name, "vfork"))
+            return CallKind::ProcessFork;
+        if (matchesPlainSymbol(name, "execl") || matchesPlainSymbol(name, "execlp") ||
+            matchesPlainSymbol(name, "execle") || matchesPlainSymbol(name, "execv") ||
+            matchesPlainSymbol(name, "execvp") || matchesPlainSymbol(name, "execvpe") ||
+            matchesPlainSymbol(name, "execve") || matchesPlainSymbol(name, "posix_spawn") ||
+            matchesPlainSymbol(name, "posix_spawnp"))
+        {
+            return CallKind::ProcessExec;
+        }
+        if (matchesPlainSymbol(name, "wait") || matchesPlainSymbol(name, "waitpid") ||
+            matchesPlainSymbol(name, "waitid") || matchesPlainSymbol(name, "wait3") ||
+            matchesPlainSymbol(name, "wait4"))
+        {
+            return CallKind::ProcessWait;
+        }
+        if (matchesPlainSymbol(name, "pthread_cond_wait") ||
+            matchesPlainSymbol(name, "pthread_cond_timedwait"))
+        {
+            return CallKind::CondWaitWithoutPredicate;
+        }
         if (matchesPlainSymbol(name, "pthread_mutex_lock"))
             return CallKind::PThreadMutexLock;
         if (matchesPlainSymbol(name, "pthread_mutex_unlock"))
@@ -274,6 +494,11 @@ namespace ctrace::concurrency::internal::analysis
             return CallKind::StdMutexLock;
         if (isStdMutexUnlock(name))
             return CallKind::StdMutexUnlock;
+        if (const std::optional<bool> rechecks = conditionWaitRechecksItself(name);
+            rechecks.has_value())
+        {
+            return *rechecks ? CallKind::CondWaitWithPredicate : CallKind::CondWaitWithoutPredicate;
+        }
         if (isStdLockGuardDtor(name))
             return CallKind::StdLockGuardDtor;
         if (isStdLockGuardCtor(name))
@@ -330,6 +555,16 @@ namespace ctrace::concurrency::internal::analysis
             return "std_lock_guard_deferred_ctor";
         case CallKind::StdLockGuardDtor:
             return "std_lock_guard_dtor";
+        case CallKind::CondWaitWithoutPredicate:
+            return "cond_wait_without_predicate";
+        case CallKind::CondWaitWithPredicate:
+            return "cond_wait_with_predicate";
+        case CallKind::ProcessFork:
+            return "fork";
+        case CallKind::ProcessExec:
+            return "exec";
+        case CallKind::ProcessWait:
+            return "wait";
         case CallKind::StdThreadCtor:
             return "std_thread_ctor";
         case CallKind::StdThreadMove:

@@ -707,6 +707,11 @@ namespace
         std::size_t dataRace = 0;
         std::size_t missingJoin = 0;
         std::size_t deadlock = 0;
+        std::size_t conditionWait = 0;
+        std::size_t forkAfterThread = 0;
+        std::size_t unreapedChild = 0;
+        std::size_t threadArgumentEscape = 0;
+        std::size_t unsafeSignalHandler = 0;
         /// Symbol the data-race diagnostics must name; empty when not asserted.
         std::string_view racingSymbol;
         bool requiresCxx20 = false;
@@ -725,9 +730,33 @@ namespace
     {
         static const std::vector<FixtureExpectation> expectations = {
             // --- data race: conflicts that must be reported -------------------------------
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_creator_and_thread_share_object.c",
+             .intent = "the thread that hands the object over keeps using it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_object_owns_its_thread_race.cpp",
+             .intent = "a constructor that starts a thread leaves it running for its caller; "
+                       "libstdc++ routes the member through one more accessor than libc++ and "
+                       "so reports the same race twice",
+             .dataRace = 1, .requiresCxx20 = true, .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_helper_joins_before_returning_no_fp.cpp",
+             .intent = "a helper that waits for its thread hands nothing back",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_shared_object_member_method_race.cpp",
+             .intent = "a method called on the object a thread holds reaches the same bytes",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_shared_heap_object.c",
+             .intent = "heap state has no name, but both threads were handed the same pointer",
+             .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_basic.c",
              .intent = "two workers increment the same global",
              .dataRace = 1, .racingSymbol = "shared_counter"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_conditional_lock_wrapper.c",
+             .intent = "a helper that locks on one branch only cannot protect its caller",
+             .dataRace = 1, .racingSymbol = "shared_total"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_split_symbols.c",
              .intent = "only the unprotected global of the pair races",
              .dataRace = 1, .racingSymbol = "racy_counter"},
@@ -766,6 +795,15 @@ namespace
             // --- data race: regressions fixed, must stay silent ---------------------------
             {.path = "tests/fixtures/concurrency/data-race/data_race_mutex_protected.c",
              .intent = "a common mutex protects both accesses"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_member_mutex_no_fp.c",
+             .intent = "the mutex guarding a shared object lives inside it and still counts"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_private_heap_object_no_fp.c",
+             .intent = "the same body on two allocations of its own shares nothing"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_lock_wrapper_protected_no_fp.c",
+             .intent = "a lock taken through a helper still protects the access"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_callsite_lock_protected.c",
              .intent = "the lock held at the call site protects the helper"},
             {.path = "tests/fixtures/concurrency/data-race/"
@@ -813,6 +851,9 @@ namespace
              .dataRace = 1, .racingSymbol = "buffer_index"},
 
             // --- deadlock -----------------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_through_lock_wrappers.c",
+             .intent = "an inversion expressed only through lock helpers is still a cycle",
+             .deadlock = 1},
             {.path = "tests/fixtures/concurrency/deadlock/deadlock_basic.c",
              .intent = "two workers take the same pair of locks in opposite orders",
              .deadlock = 1},
@@ -860,8 +901,9 @@ namespace
              .intent = "only the handle that is neither joined nor detached is reported",
              .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/missing_join_multiple.c",
-             .intent = "loop-created handles joined once; array-element insensitivity is known",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "loop-created handles joined once; the ids they read are main's own "
+                       "locals, which the unjoined threads outlive",
+             .dataRace = 1, .missingJoin = 1, .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_join_mix_reports_only_unresolved_handle.c",
              .intent = "only the unresolved handle of the pair is reported",
@@ -909,9 +951,46 @@ namespace
              .intent = "std::jthread joins in its destructor",
              .requiresCxx20 = true},
 
+            // --- signal handlers -----------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/signal/signal_handler_unsafe_call.c",
+             .intent = "the handler prints and allocates, both of which it may interrupt",
+             .unsafeSignalHandler = 1},
+            {.path = "tests/fixtures/concurrency/signal/signal_handler_unsafe_via_helper.c",
+             .intent = "a handler is no safer than the helper it calls",
+             .unsafeSignalHandler = 1},
+            {.path = "tests/fixtures/concurrency/signal/signal_handler_flag_only_no_fp.c",
+             .intent = "writing a volatile sig_atomic_t flag is the shape the standard allows"},
+
+            // --- thread arguments ----------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_stack_escape.c",
+             .intent = "a detached thread keeps reading a frame that is already gone",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_joined_no_fp.c",
+             .intent = "the join keeps the frame alive at least as long as the thread"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_static_storage_no_fp.c",
+             .intent = "the argument outlives every frame, so detaching is fine"},
+
+            // --- process lifecycle ---------------------------------------------------------
+            {.path = "tests/fixtures/concurrency/process/fork_after_thread_creation.c",
+             .intent = "the child inherits a mutex no surviving thread can unlock",
+             // The child returns without joining, which is right: its copy of the handle names
+             // a thread that does not exist there. The join rule sees the path all the same.
+             .missingJoin = 1, .forkAfterThread = 1, .unreapedChild = 1},
+            {.path = "tests/fixtures/concurrency/process/fork_without_wait.c",
+             .intent = "the pid is dropped, so every finished child stays in the table",
+             .unreapedChild = 1},
+            {.path = "tests/fixtures/concurrency/process/fork_then_exec_no_fp.c",
+             .intent = "the child replaces its image at once and keeps nothing it inherited",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/process/fork_sigchld_ignored_no_fp.c",
+             .intent = "handing SIGCHLD to SIG_IGN lets the system reap, so nothing is owed"},
+            {.path = "tests/fixtures/concurrency/process/fork_reaped_no_fp.c",
+             .intent = "no thread, and every child is collected"},
+
             // --- condition variables ------------------------------------------------------
-            // The state around a condition variable is ordinary shared data: the existing rules
-            // still apply to it. Only the wait protocol itself is unmodelled.
+            // The state around a condition variable is ordinary shared data, so the data-race
+            // rule applies to it as well; the wait protocol itself is a separate question.
             {.path = "tests/fixtures/concurrency/condition-variable/"
                      "condition_variable_unprotected_predicate.c",
              .intent = "the predicate is published without the mutex the waiter holds",
@@ -920,19 +999,41 @@ namespace
             {.path = "tests/fixtures/concurrency/condition-variable/"
                      "condition_variable_predicate_loop_no_diagnostic.c",
              .intent = "rechecking the predicate in a loop is the correct protocol"},
+            {.path = "tests/fixtures/concurrency/condition-variable/"
+                     "cpp_condition_wait_predicate_no_fp.cpp",
+             .intent = "every safe C++ spelling of a wait, including the bare one inside a loop",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/condition-variable/"
+                     "cpp_condition_wait_without_predicate.cpp",
+             .intent = "wait and wait_for that read waking up as proof the condition holds",
+             .conditionWait = 2,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/condition-variable/"
+                     "cpp_condition_wait_through_helper.cpp",
+             .intent = "the loop belongs to the caller of a forwarding helper, not to the helper",
+             .conditionWait = 1,
+             .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_spurious.c",
-             .intent = "checking the predicate with if instead of while: no rule models "
-                       "spurious wakeups yet"},
+             .intent = "checking the predicate with if instead of while leaves a wake-up "
+                       "unverified",
+             .conditionWait = 1},
 
             // --- rules that do not exist yet: pinned as silent -----------------------------
             {.path = "tests/fixtures/concurrency/memory-barrier/missing_memory_barrier.c",
              .intent = "no rule models memory ordering yet; the plain accesses still race",
              .dataRace = 2},
             {.path = "tests/fixtures/concurrency/thread-escape/fork_thread_race.c",
-             .intent = "no rule models fork() semantics yet; the global access still races",
-             .dataRace = 1},
+             .intent = "forking while a thread runs, never collecting the child, and racing on "
+                       "the global besides",
+             .dataRace = 1, .forkAfterThread = 1, .unreapedChild = 1},
             {.path = "tests/fixtures/concurrency/data-race/cpp_race_std_async.cpp",
-             .intent = "std::async spawns no recognized thread entry yet"},
+             // The race is real — the fixture exists for it — and whether it is seen depends on
+             // how the standard library implements std::async. libstdc++ builds it on a
+             // std::thread the analyzer recognizes, so the race surfaces there; libc++ does not.
+             // Pinned as a minimum rather than split by platform, since neither answer is wrong.
+             .intent = "std::async is only reachable through the thread some libraries build it "
+                       "on",
+             .countsAreMinimums = true},
 
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
@@ -953,8 +1054,7 @@ namespace
         if (expectation.requiresCxx20)
             compileArgs.emplace_back(kCxx20Standard);
 
-        const AnalysisOptions options{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                                       RuleId::DeadlockLockOrder}};
+        const AnalysisOptions options = AnalysisOptions::allAvailable();
         const std::optional<DiagnosticReport> report =
             analyzeFixture(expectation.path, options, std::move(compileArgs));
         if (!report.has_value())
@@ -971,6 +1071,12 @@ namespace
             {RuleId::DataRaceGlobal, expectation.dataRace, "data-race"},
             {RuleId::MissingJoin, expectation.missingJoin, "missing-join"},
             {RuleId::DeadlockLockOrder, expectation.deadlock, "deadlock-lock-order"},
+            {RuleId::ConditionWaitWithoutPredicate, expectation.conditionWait, "condition-wait"},
+            {RuleId::ForkAfterThreadCreation, expectation.forkAfterThread, "fork-after-thread"},
+            {RuleId::UnreapedChildProcess, expectation.unreapedChild, "unreaped-child"},
+            {RuleId::ThreadArgumentEscapesFrame, expectation.threadArgumentEscape,
+             "thread-arg-escape"},
+            {RuleId::UnsafeSignalHandler, expectation.unsafeSignalHandler, "unsafe-signal-handler"},
         };
 
         bool ok = true;
@@ -995,6 +1101,50 @@ namespace
             std::cerr << "[FAIL] " << expectation.path << " (" << expectation.intent
                       << "): expected a race on '" << expectation.racingSymbol << "'\n";
             ok = false;
+        }
+
+        return ok;
+    }
+
+    /// The optimization level a caller asks for must not change what is reported.
+    ///
+    /// This is a regression, not a hypothetical: a project whose compilation database said -O3
+    /// reported nothing, because a lock helper had been inlined into its caller and a wait
+    /// reached through a helper had collapsed into a library primitive. Nothing signalled the
+    /// loss — the analysis simply described a program the user never wrote.
+    bool testOptimizationRequestDoesNotChangeFindings()
+    {
+        constexpr std::string_view kStructuralFixtures[] = {
+            "tests/fixtures/concurrency/condition-variable/cpp_condition_wait_through_helper.cpp",
+            "tests/fixtures/concurrency/deadlock/deadlock_through_lock_wrappers.c",
+            "tests/fixtures/concurrency/data-race/data_race_lock_wrapper_protected_no_fp.c",
+        };
+
+        bool ok = true;
+        for (const std::string_view fixture : kStructuralFixtures)
+        {
+            std::vector<std::string> unoptimized;
+            std::vector<std::string> optimized{"-O2"};
+            if (fixture.ends_with(".cpp"))
+            {
+                unoptimized.emplace_back(kCxx20Standard);
+                optimized.emplace_back(kCxx20Standard);
+            }
+
+            const std::optional<DiagnosticReport> plain =
+                analyzeFixture(fixture, AnalysisOptions::allAvailable(), std::move(unoptimized));
+            const std::optional<DiagnosticReport> requested =
+                analyzeFixture(fixture, AnalysisOptions::allAvailable(), std::move(optimized));
+            if (!plain.has_value() || !requested.has_value())
+            {
+                ok = false;
+                continue;
+            }
+
+            ok = assertTrue(plain->diagnostics.size() == requested->diagnostics.size(),
+                            std::string("asking for -O2 must not change what ") +
+                                std::string(fixture) + " reports") &&
+                 ok;
         }
 
         return ok;
@@ -1103,6 +1253,7 @@ int main()
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
+    ok = testOptimizationRequestDoesNotChangeFindings() && ok;
     ok = testFixtureExpectationTable() && ok;
     ok = testEveryConcurrencyFixtureIsCovered() && ok;
 

@@ -62,8 +62,10 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    LockOrderCollector::LockOrderCollector(const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+    LockOrderCollector::LockOrderCollector(const ConcurrencySymbolClassifier& classifier,
+                                           const LockWrapperSummaries* summaries,
+                                           const SharedObjectBindings* sharedObjects)
+        : classifier_(classifier), summaries_(summaries), sharedObjects_(sharedObjects)
     {
     }
 
@@ -75,8 +77,19 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<LockOrderFact> facts;
         std::unordered_set<std::string> factKeys;
 
-        const SynchronizationEffectResolver effectResolver(classifier_,
-                                                           function.getParent()->getDataLayout());
+        const SharedObjectBinding* sharedObject = nullptr;
+        if (sharedObjects_ != nullptr)
+        {
+            if (const auto it = sharedObjects_->find(functionId(function));
+                it != sharedObjects_->end())
+            {
+                sharedObject = &it->second;
+            }
+        }
+
+        const SynchronizationEffectResolver effectResolver(
+            classifier_, function.getParent()->getDataLayout(), summaries_,
+            /*nameParameterLocks=*/false, sharedObject);
         const FunctionLockEffects lockEffects =
             collectFunctionLockEffects(function, effectResolver);
 

@@ -54,6 +54,81 @@ namespace ctrace::concurrency::internal::diagnostics
                 },
         };
 
+        static const RuleMetadata kConditionWaitWithoutPredicate{
+            .ruleId = RuleId::ConditionWaitWithoutPredicate,
+            .title = "Condition-variable wait rechecks nothing on wake-up",
+            .shortDescription =
+                "Detects a condition-variable wait with neither a predicate nor a loop around "
+                "it, which treats any wake-up as proof that the condition holds.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "662",
+                    .title = "Improper Synchronization",
+                },
+        };
+
+        static const RuleMetadata kForkAfterThreadCreation{
+            .ruleId = RuleId::ForkAfterThreadCreation,
+            .title = "Fork in a threaded program without an exec in the child",
+            .shortDescription =
+                "Detects a fork performed by a program that creates threads, where the child "
+                "keeps running instead of replacing its process image.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "662",
+                    .title = "Improper Synchronization",
+                },
+        };
+
+        static const RuleMetadata kUnreapedChildProcess{
+            .ruleId = RuleId::UnreapedChildProcess,
+            .title = "Child process is never collected",
+            .shortDescription =
+                "Detects a program that forks but never waits on its children, leaving them as "
+                "zombies in the process table.",
+            .defaultSeverity = Severity::Warning,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "404",
+                    .title = "Improper Resource Shutdown or Release",
+                },
+        };
+
+        static const RuleMetadata kThreadArgumentEscapesFrame{
+            .ruleId = RuleId::ThreadArgumentEscapesFrame,
+            .title = "Thread argument points into the frame that created it",
+            .shortDescription =
+                "Detects a thread started with a pointer to a local variable of a function that "
+                "returns without waiting for it.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "562",
+                    .title = "Return of Stack Variable Address",
+                },
+        };
+
+        static const RuleMetadata kUnsafeSignalHandler{
+            .ruleId = RuleId::UnsafeSignalHandler,
+            .title = "Signal handler calls a function it may not call",
+            .shortDescription =
+                "Detects a signal handler that reaches an allocation, a stream or a lock, none "
+                "of which is async-signal-safe.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "479",
+                    .title = "Signal Handler Use of a Non-reentrant Function",
+                },
+        };
+
         switch (ruleId)
         {
         case RuleId::CompilerDiagnostic:
@@ -64,6 +139,16 @@ namespace ctrace::concurrency::internal::diagnostics
             return kMissingJoin;
         case RuleId::DeadlockLockOrder:
             return kDeadlockLockOrder;
+        case RuleId::ConditionWaitWithoutPredicate:
+            return kConditionWaitWithoutPredicate;
+        case RuleId::ForkAfterThreadCreation:
+            return kForkAfterThreadCreation;
+        case RuleId::UnreapedChildProcess:
+            return kUnreapedChildProcess;
+        case RuleId::ThreadArgumentEscapesFrame:
+            return kThreadArgumentEscapesFrame;
+        case RuleId::UnsafeSignalHandler:
+            return kUnsafeSignalHandler;
         }
 
         return kCompilerDiagnostic;

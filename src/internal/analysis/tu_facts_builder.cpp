@@ -2,15 +2,22 @@
 #include "tu_facts_builder.hpp"
 
 #include "concurrency_symbol_classifier.hpp"
+#include "condition_wait_collector.hpp"
 #include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
 #include "lock_order_collector.hpp"
 #include "lock_scope_tracker.hpp"
 #include "lock_state_propagator.hpp"
+#include "lock_wrapper_summaries.hpp"
+#include "process_lifecycle_collector.hpp"
 #include "shared_access_collector.hpp"
+#include "shared_object_binding_collector.hpp"
+#include "signal_handler_collector.hpp"
+#include "cross_tu/program_symbol_index.hpp"
 #include "task_concurrency_analyzer.hpp"
 #include "thread_lifecycle_collector.hpp"
 #include "thread_spawn_detector.hpp"
+#include "thread_argument_escape_collector.hpp"
 #include "thread_context_propagator.hpp"
 
 #include "synchronization_effects.hpp"
@@ -22,7 +29,10 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
+#include <algorithm>
 #include <cctype>
+#include <filesystem>
+#include <tuple>
 #include <optional>
 #include <sstream>
 #include <unordered_map>
@@ -371,10 +381,37 @@ namespace ctrace::concurrency::internal::analysis
             return recursiveLockIds;
         }
 
+        /// Identity of an argument that is an object a thread already holds.
+        ///
+        /// A method called on such an object by the thread that owns it describes the same bytes
+        /// as the thread's own accesses, so it takes the same identity rather than being dropped
+        /// for lack of a name. Kept separate from the access collector's resolution: this one
+        /// answers about a call argument, where the address is passed directly rather than read
+        /// out of a field.
+        std::optional<RootBinding>
+        sharedObjectArgument(const llvm::Value& operand,
+                             const std::unordered_set<std::string>& sharedObjectIds)
+        {
+            if (sharedObjectIds.empty())
+                return std::nullopt;
+
+            const llvm::Value* slot = operand.stripPointerCastsAndAliases();
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(slot))
+                slot = load->getPointerOperand();
+
+            const std::optional<std::string> slotId = canonicalStorageGroupId(*slot);
+            if (!slotId.has_value() || !sharedObjectIds.contains(*slotId))
+                return std::nullopt;
+
+            return RootBinding::global(*slotId);
+        }
+
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
-            const TaskConcurrencyResult& taskConcurrency)
+            const TaskConcurrencyResult& taskConcurrency,
+            const ProgramDefinedGlobals* programDefined,
+            const std::unordered_set<std::string>& sharedObjectIds)
         {
             std::vector<DirectCallBinding> bindings;
 
@@ -404,8 +441,11 @@ namespace ctrace::concurrency::internal::analysis
                 for (unsigned argumentIndex = 0; argumentIndex < site.call->arg_size();
                      ++argumentIndex)
                 {
-                    const std::optional<RootBinding> root =
-                        resolveTrackedRoot(*site.call->getArgOperand(argumentIndex));
+                    const llvm::Value& operand = *site.call->getArgOperand(argumentIndex);
+                    std::optional<RootBinding> root = resolveTrackedRoot(operand, programDefined);
+                    if (!root.has_value())
+                        root = sharedObjectArgument(operand, sharedObjectIds);
+
                     if (root.has_value())
                         binding.argumentBindings.emplace(argumentIndex, *root);
                 }
@@ -418,18 +458,58 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    TUFacts TUFactsBuilder::build(const llvm::Module& module) const
+    TUFacts TUFactsBuilder::build(const llvm::Module& module,
+                                  const ProgramSymbolIndex* program) const
     {
         const ConcurrencySymbolClassifier classifier;
 
         ThreadSpawnDetector spawnDetector(classifier);
-        ThreadSpawnCollection spawnFacts = spawnDetector.collect(module);
+        const bool crossTU = program != nullptr;
+        ThreadSpawnCollection spawnFacts = spawnDetector.collect(module, crossTU);
         ThreadLifecycleCollector threadLifecycleCollector(classifier);
         const std::vector<DirectCallSite> directCallSites =
             collectDirectCallSites(module, classifier);
 
+        // An `extern` declared here is real shared state only if the program defines it; a unit
+        // on its own cannot tell that from an unresolved symbol.
+        const ProgramDefinedGlobals* programDefined =
+            crossTU ? &program->definedGlobals() : nullptr;
+
+        // Resolved once for the whole unit: a wrapper's effect on the lock it is handed does not
+        // depend on which caller is being looked at.
+        LockWrapperSummaries lockWrapperSummaries =
+            collectLockWrapperSummaries(module, classifier, module.getDataLayout());
+
+        // A helper defined in another unit is only a declaration here, so its body cannot be
+        // summarised; the program supplies the summary the other unit produced.
+        if (crossTU)
+        {
+            for (const llvm::Function& function : module)
+            {
+                if (!function.isDeclaration())
+                    continue;
+
+                if (const std::vector<ParameterLockEffect>* summary =
+                        program->lockSummaryFor(function);
+                    summary != nullptr)
+                {
+                    lockWrapperSummaries.emplace(functionId(function), *summary);
+                }
+            }
+        }
+
+        // Computed before the accesses are gathered: the thread that hands an object over keeps
+        // reaching it through the same slot, so its own accesses need the identity too.
+        const SharedObjectBindings sharedObjectBindings =
+            SharedObjectBindingCollector(classifier).collect(module, directCallSites);
+
+        std::unordered_set<std::string> sharedObjectIds;
+        for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
+            sharedObjectIds.insert(binding.objectId);
+
         SharedAccessCollector accessCollector;
-        std::vector<PendingAccess> pendingAccesses = accessCollector.collect(module);
+        std::vector<PendingAccess> pendingAccesses =
+            accessCollector.collect(module, programDefined, &sharedObjectIds);
 
         std::unordered_map<std::string, std::unordered_set<const llvm::Instruction*>>
             trackedAccessesByFunction;
@@ -441,7 +521,7 @@ namespace ctrace::concurrency::internal::analysis
             functionsById[pendingAccess.fact.functionId] = pendingAccess.function;
         }
 
-        LockScopeTracker lockScopeTracker(classifier);
+        LockScopeTracker lockScopeTracker(classifier, &lockWrapperSummaries, &sharedObjectBindings);
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;
         for (const auto& [functionKey, trackedAccesses] : trackedAccessesByFunction)
         {
@@ -457,11 +537,12 @@ namespace ctrace::concurrency::internal::analysis
         ThreadContextPropagator threadContextPropagator(classifier);
         const TaskConcurrencyAnalyzer taskConcurrencyAnalyzer(classifier);
         const TaskConcurrencyResult taskConcurrency =
-            taskConcurrencyAnalyzer.analyze(module, directCallSites);
+            taskConcurrencyAnalyzer.analyze(module, directCallSites, crossTU);
 
         TUFacts facts;
         facts.spawns = std::move(spawnFacts.spawns);
         facts.entryConcurrency = std::move(spawnFacts.entryConcurrency);
+        facts.lockWrapperSummaries = lockWrapperSummaries;
         facts.sequencedEntryPairs = taskConcurrency.sequencedEntryPairs;
 
         // Replace the raw spawn-site count by the number of instances that can actually be alive at
@@ -473,6 +554,24 @@ namespace ctrace::concurrency::internal::analysis
                 !taskConcurrency.overlappingSpawnEntries.contains(entryId))
             {
                 concurrency.staticSpawnCount = 1;
+            }
+        }
+
+        // A worker defined here may be spawned only from another unit: this module sees its body
+        // and never its creation. The program index supplies the missing half, already corrected
+        // by the unit that owns those spawn sites, so the local rule above must not run on it.
+        if (crossTU)
+        {
+            for (const llvm::Function& function : module)
+            {
+                if (function.isDeclaration() || !program->isThreadEntry(function))
+                    continue;
+
+                EntryConcurrencyInfo& concurrency = facts.entryConcurrency[functionId(function)];
+                concurrency.staticSpawnCount =
+                    std::max(concurrency.staticSpawnCount, program->spawnCount(function));
+                concurrency.hasSpawnInLoop =
+                    concurrency.hasSpawnInLoop || program->spawnedInLoop(function);
             }
         }
 
@@ -544,16 +643,169 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        facts.threadArgumentEscapes = ThreadArgumentEscapeCollector(classifier).collect(module);
+        facts.signalHandlers = SignalHandlerCollector(classifier).collect(module, directCallSites);
+
+        // A fork whose child goes on to replace its process image inherits nothing that
+        // outlives the exec, so neither question this analysis asks about a fork applies to it.
+        // Reachability runs over direct calls, the same way the wait obligation travels.
+        {
+            const ProcessLifecycleCollector processCollector(classifier);
+            ProcessLifecycleCollection processes = processCollector.collect(module);
+            facts.reapsChildProcesses = processes.reapsChildren;
+
+            bool execChanged = true;
+            while (execChanged)
+            {
+                execChanged = false;
+
+                for (const DirectCallSite& site : directCallSites)
+                {
+                    if (!processes.functionsReachingExec.contains(site.calleeFunctionId))
+                        continue;
+
+                    execChanged =
+                        processes.functionsReachingExec.insert(site.callerFunctionId).second ||
+                        execChanged;
+                }
+            }
+
+            facts.programCreatesThreads =
+                !facts.spawns.empty() || (crossTU && program->programCreatesThreads());
+
+            for (ProcessForkFact& fork : processes.forks)
+            {
+                fork.execReachable = processes.functionsReachingExec.contains(fork.functionId);
+                facts.processForks.push_back(std::move(fork));
+            }
+        }
+
+        // A helper cannot recheck a condition it does not know, so the obligation to loop around
+        // a bare wait belongs to whoever called it — and keeps travelling outwards until some
+        // caller does loop. Only the outermost function still carrying it is worth reporting:
+        // that is where the missing loop has to be written.
+        {
+            std::unordered_map<std::string, ConditionWaitFact> unguardedByFunction;
+            const ConditionWaitCollector conditionWaitCollector(classifier);
+            for (const ConditionWaitFact& fact : conditionWaitCollector.collect(module))
+            {
+                if (!fact.guardedByLoop)
+                    unguardedByFunction.emplace(fact.functionId, fact);
+            }
+
+            bool waitsChanged = true;
+            while (waitsChanged)
+            {
+                waitsChanged = false;
+
+                for (const DirectCallSite& site : directCallSites)
+                {
+                    if (site.insideLoop || unguardedByFunction.contains(site.callerFunctionId))
+                        continue;
+
+                    const auto calleeIt = unguardedByFunction.find(site.calleeFunctionId);
+                    if (calleeIt == unguardedByFunction.end())
+                        continue;
+
+                    ConditionWaitFact inherited = calleeIt->second;
+                    inherited.functionId = site.callerFunctionId;
+                    inherited.location = site.userLocation;
+                    inherited.viaHelper = true;
+                    unguardedByFunction.emplace(site.callerFunctionId, std::move(inherited));
+                    waitsChanged = true;
+                }
+            }
+
+            // A function stops being the place to fix the wait once someone above it answers
+            // for it: either a caller that inherited the obligation and is itself further out,
+            // or a caller that loops. A helper every caller already wraps in a loop is used
+            // correctly, and pointing at its body would be pointing at the wrong file.
+            std::unordered_set<std::string> answeredByACaller;
+            std::unordered_set<std::string> calledFromSomewhere;
+            std::unordered_set<std::string> calledOutsideALoop;
+            for (const DirectCallSite& site : directCallSites)
+            {
+                if (!unguardedByFunction.contains(site.calleeFunctionId))
+                    continue;
+
+                calledFromSomewhere.insert(site.calleeFunctionId);
+                if (site.insideLoop)
+                    continue;
+
+                calledOutsideALoop.insert(site.calleeFunctionId);
+                if (unguardedByFunction.contains(site.callerFunctionId))
+                    answeredByACaller.insert(site.calleeFunctionId);
+            }
+
+            for (const std::string& called : calledFromSomewhere)
+            {
+                if (!calledOutsideALoop.contains(called))
+                    answeredByACaller.insert(called);
+            }
+
+            // Filtering happens only here, after propagation: a standard library's own bare
+            // wait is a necessary link in the chain, and dropping it at collection time would
+            // cut the obligation before it ever reached the code that must loop.
+            const std::optional<std::filesystem::path> sourceRoot = primarySourceRoot(module);
+            for (auto& [waitFunctionId, fact] : unguardedByFunction)
+            {
+                if (answeredByACaller.contains(waitFunctionId))
+                    continue;
+
+                if (!isLikelyUserLocation(fact.location, sourceRoot))
+                    continue;
+
+                facts.conditionWaits.push_back(std::move(fact));
+            }
+
+            // The map order is an implementation detail; the report must not inherit it.
+            std::sort(facts.conditionWaits.begin(), facts.conditionWaits.end(),
+                      [](const ConditionWaitFact& lhs, const ConditionWaitFact& rhs)
+                      {
+                          return std::tie(lhs.location.file, lhs.location.line, lhs.location.column,
+                                          lhs.functionId) <
+                                 std::tie(rhs.location.file, rhs.location.line, rhs.location.column,
+                                          rhs.functionId);
+                      });
+        }
+
+        // Published so another unit's creation of the same global handle knows it is resolved.
+        for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
+        {
+            const bool resolves = fact.action == ThreadLifecycleAction::Join ||
+                                  fact.action == ThreadLifecycleAction::Detach;
+            if (resolves && globalOfStorageGroupId(module, fact.handleGroupId) != nullptr)
+                facts.resolvedGlobalHandleIds.insert(fact.handleGroupId);
+        }
+
+        // A handle this unit creates on a global that another unit joins is not outstanding: the
+        // program resolves it, and only the program can see that.
+        if (crossTU)
+        {
+            std::erase_if(facts.threadLifecycles,
+                          [&](const ThreadLifecycleFact& fact)
+                          {
+                              if (fact.action != ThreadLifecycleAction::Create)
+                                  return false;
+
+                              const llvm::GlobalVariable* handle =
+                                  globalOfStorageGroupId(module, fact.handleGroupId);
+                              return handle != nullptr && program->resolvesHandleElsewhere(*handle);
+                          });
+        }
+
         std::vector<AccessFact> concreteAccesses;
         std::unordered_set<std::string> concreteAccessKeys;
         std::unordered_map<std::string, std::vector<ParameterizedAccess>> summariesByFunction;
         std::unordered_map<std::string, std::unordered_set<std::string>> summaryKeysByFunction;
 
-        LockStatePropagator lockStatePropagator(classifier);
+        LockStatePropagator lockStatePropagator(classifier, &lockWrapperSummaries,
+                                                &sharedObjectBindings);
         const LockPropagationResult lockPropagation =
             lockStatePropagator.collect(module, directCallSites);
 
-        LockOrderCollector lockOrderCollector(classifier);
+        LockOrderCollector lockOrderCollector(classifier, &lockWrapperSummaries,
+                                              &sharedObjectBindings);
         for (const llvm::Function& function : module)
         {
             if (function.isDeclaration())
@@ -622,8 +874,9 @@ namespace ctrace::concurrency::internal::analysis
                                    });
         }
 
-        const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
-            directCallSites, lockPropagation.effectiveHeldLocksByCall, taskConcurrency);
+        const std::vector<DirectCallBinding> directCallBindings =
+            buildDirectCallBindings(directCallSites, lockPropagation.effectiveHeldLocksByCall,
+                                    taskConcurrency, programDefined, sharedObjectIds);
 
         bool changed = true;
         while (changed)
@@ -652,6 +905,9 @@ namespace ctrace::concurrency::internal::analysis
                         AccessFact concrete = access.fact;
                         concrete.functionId = callBinding.callerFunctionId;
                         concrete.symbol = bindingIt->second.symbol;
+                        // The binding may name an object a thread holds rather than a global,
+                        // and the two are not described the same way to the reader.
+                        concrete.sharedObject = sharedObjectIds.contains(concrete.symbol);
                         // The callee's region is relative to the argument, which the call site
                         // itself may already have indexed into.
                         concrete.region = access.fact.region.rebasedOn(bindingIt->second.region);
@@ -694,6 +950,37 @@ namespace ctrace::concurrency::internal::analysis
                                                      callBinding.callerFunctionId,
                                                      std::move(propagatedAccess)) ||
                               changed;
+                }
+            }
+        }
+
+        // An access left rooted at a parameter has no identity of its own. When that parameter
+        // is how a thread entry receives an object the spawn sites prove is shared, the object's
+        // storage supplies one: every thread reached it from the same place, so two accesses
+        // through it really are two accesses to the same bytes.
+        //
+        // Nothing is granted without that proof. An entry handed a different object each time
+        // keeps no identity at all, which is what separates this from comparing objects by type.
+        {
+            for (const auto& [summaryFunctionId, summary] : summariesByFunction)
+            {
+                const auto bindingIt = sharedObjectBindings.find(summaryFunctionId);
+                if (bindingIt == sharedObjectBindings.end())
+                    continue;
+
+                for (const ParameterizedAccess& access : summary)
+                {
+                    if (access.root.kind != RootBindingKind::Argument ||
+                        access.root.argumentIndex != bindingIt->second.argumentIndex)
+                    {
+                        continue;
+                    }
+
+                    AccessFact fact = access.fact;
+                    fact.symbol = bindingIt->second.objectId;
+                    fact.region = access.root.region;
+                    fact.sharedObject = true;
+                    addConcreteAccess(concreteAccesses, concreteAccessKeys, std::move(fact));
                 }
             }
         }

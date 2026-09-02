@@ -29,6 +29,10 @@ namespace ctrace::concurrency::internal::analysis
         /// Entries whose lifetimes are provably disjoint because one is joined before the other is
         /// spawned.
         std::unordered_set<EntryPair, EntryPairHash> sequencedEntryPairs;
+        /// Entries a function starts and does not wait for, so its caller keeps running beside
+        /// them once the call returns. An object that owns its thread is the usual source: the
+        /// constructor spawns, and nothing joins until the destructor.
+        std::unordered_map<std::string, ThreadEntrySet> entriesLeftRunningByFunction;
         /// Entries with at least two instances alive at once, established by observing a spawn
         /// while a previous instance of the same entry is still live.
         std::unordered_set<std::string> overlappingSpawnEntries;
@@ -42,9 +46,12 @@ namespace ctrace::concurrency::internal::analysis
       public:
         explicit TaskConcurrencyAnalyzer(const ConcurrencySymbolClassifier& classifier);
 
+        /// `includeExternalEntries` mirrors ThreadSpawnDetector: a project-wide run must decide
+        /// whether two instances of an entry overlap even when its body lives in another unit,
+        /// because that verdict is only observable here, at the spawn sites.
         [[nodiscard]] TaskConcurrencyResult
-        analyze(const llvm::Module& module,
-                const std::vector<DirectCallSite>& directCallSites) const;
+        analyze(const llvm::Module& module, const std::vector<DirectCallSite>& directCallSites,
+                bool includeExternalEntries = false) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;

@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "lock_wrapper_summaries.hpp"
+#include "shared_object_binding_collector.hpp"
+
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -8,6 +12,7 @@ namespace llvm
 {
     class CallBase;
     class DataLayout;
+    class Value;
 } // namespace llvm
 
 namespace ctrace::concurrency::internal::analysis
@@ -45,13 +50,30 @@ namespace ctrace::concurrency::internal::analysis
     class SynchronizationEffectResolver
     {
       public:
+        /// `summaries` lets a call to a user-written wrapper carry the lock effect the wrapper
+        /// has on the argument it was given. Null while the summaries are still being computed.
+        ///
+        /// `nameParameterLocks` reports a lock the enclosing function received as a parameter
+        /// under a placeholder identity instead of dropping it. Only the summary pass wants
+        /// that: every other consumer must see real locks.
         SynchronizationEffectResolver(const ConcurrencySymbolClassifier& classifier,
-                                      const llvm::DataLayout& layout);
+                                      const llvm::DataLayout& layout,
+                                      const LockWrapperSummaries* summaries = nullptr,
+                                      bool nameParameterLocks = false,
+                                      const SharedObjectBinding* sharedObject = nullptr);
 
         [[nodiscard]] std::vector<LockEffect> resolve(const llvm::CallBase& call) const;
 
       private:
+        [[nodiscard]] std::optional<std::string> lockIdOf(const llvm::Value& value) const;
+        [[nodiscard]] std::vector<LockEffect> summarizedEffects(const llvm::CallBase& call) const;
+
         const ConcurrencySymbolClassifier& classifier_;
         const llvm::DataLayout& layout_;
+        const LockWrapperSummaries* summaries_ = nullptr;
+        bool nameParameterLocks_ = false;
+        /// Set while analysing a thread entry whose object the spawn sites identified, so a lock
+        /// held inside that object can be named as well as the data it guards.
+        const SharedObjectBinding* sharedObject_ = nullptr;
     };
 } // namespace ctrace::concurrency::internal::analysis

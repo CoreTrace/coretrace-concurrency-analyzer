@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "lock_wrapper_summaries.hpp"
+
 #include "coretrace_concurrency_analysis.hpp"
 
 #include <cstdint>
@@ -150,6 +152,10 @@ namespace ctrace::concurrency::internal::analysis
         bool coarseCallEffect = false;
         /// True when the symbol identity was guessed by alias analysis rather than resolved.
         bool guessedIdentity = false;
+        /// The symbol names an object handed to a thread, not a global. Its identity is the
+        /// storage the pointer was read from, which is an internal name and must not reach the
+        /// message the way a global's own name does.
+        bool sharedObject = false;
         /// True when the access executes on the initial thread rather than inside a spawned entry.
         bool inRootTask = false;
         /// Spawned entries already running when a root-task access executes.
@@ -235,13 +241,76 @@ namespace ctrace::concurrency::internal::analysis
         return EntryPair{std::move(lhs), std::move(rhs)};
     }
 
+    /// A condition-variable wait that rechecks nothing on wake-up, and whether anything around
+    /// it makes that safe.
+    struct ConditionWaitFact
+    {
+        std::string functionId;
+        SourceLocation location;
+        /// Where the wait itself sits, which for a wait reached through a helper is not where
+        /// the missing loop belongs.
+        SourceLocation loweredLocation;
+        /// A loop around the wait is the caller's way of saying "recheck": with one, a wake-up
+        /// that proves nothing simply waits again.
+        bool guardedByLoop = false;
+        /// The wait is reached through a helper rather than written here. The obligation to loop
+        /// travels to the caller, because a helper cannot recheck a condition it does not know.
+        bool viaHelper = false;
+    };
+
+    /// A thread handed a pointer into the frame that created it, with nothing keeping that
+    /// frame alive until the thread is done with it.
+    struct ThreadArgumentEscapeFact
+    {
+        std::string functionId;
+        std::string entryFunctionId;
+        SourceLocation location;
+    };
+
+    /// A signal handler that calls something a handler may not call.
+    struct SignalHandlerFact
+    {
+        /// Where the handler is installed, which is where the choice was made.
+        SourceLocation location;
+        std::string handlerFunctionId;
+        /// Where the offending call sits, which may be several calls deep inside the handler.
+        SourceLocation unsafeCallLocation;
+        std::string unsafeCallFunctionId;
+    };
+
+    /// A place where the program duplicates itself.
+    struct ProcessForkFact
+    {
+        std::string functionId;
+        SourceLocation location;
+        /// The forking function reaches an `exec`, directly or through a callee. The child then
+        /// replaces its image, which discards the inherited locks and makes the unreaped-child
+        /// question the caller's own design rather than an oversight.
+        bool execReachable = false;
+    };
+
     struct TUFacts
     {
         std::vector<SpawnFact> spawns;
         std::vector<AccessFact> accesses;
         std::vector<LockOrderFact> lockOrders;
         std::vector<ThreadLifecycleFact> threadLifecycles;
+        std::vector<ConditionWaitFact> conditionWaits;
+        std::vector<ProcessForkFact> processForks;
+        std::vector<ThreadArgumentEscapeFact> threadArgumentEscapes;
+        std::vector<SignalHandlerFact> signalHandlers;
+        /// Some part of the program collects its terminated children.
+        bool reapsChildProcesses = false;
+        /// Some part of the program starts a thread. Equal to `!spawns.empty()` when a single
+        /// unit is under analysis, and wider once the whole program is known.
+        bool programCreatesThreads = false;
         std::unordered_map<std::string, EntryConcurrencyInfo> entryConcurrency;
+        /// What each function of this unit does to the locks its callers hand it. Published so a
+        /// caller in another unit can see a helper defined here.
+        LockWrapperSummaries lockWrapperSummaries;
+        /// Handle group ids naming a global that this unit joins or detaches. A thread created
+        /// in one unit and joined in another is resolved, and only the whole program sees it.
+        std::unordered_set<std::string> resolvedGlobalHandleIds;
         std::unordered_map<std::string, ThreadEntrySet> reachableThreadEntriesByFunction;
         /// Locks whose runtime type or attributes allow recursive acquisition.
         std::unordered_set<std::string> recursiveLockIds;

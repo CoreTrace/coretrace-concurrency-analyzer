@@ -43,6 +43,11 @@ namespace ctrace::concurrency
         DataRaceGlobal,
         MissingJoin,
         DeadlockLockOrder,
+        ConditionWaitWithoutPredicate,
+        ForkAfterThreadCreation,
+        UnreapedChildProcess,
+        ThreadArgumentEscapesFrame,
+        UnsafeSignalHandler,
     };
 
     enum class ConfidenceLevel
@@ -134,8 +139,10 @@ namespace ctrace::concurrency
 
     struct AnalysisOptions
     {
-        std::vector<RuleId> enabledRules{RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                         RuleId::DeadlockLockOrder};
+        std::vector<RuleId> enabledRules{
+            RuleId::DataRaceGlobal,          RuleId::MissingJoin,
+            RuleId::DeadlockLockOrder,       RuleId::ConditionWaitWithoutPredicate,
+            RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess};
 
         [[nodiscard]] bool isEnabled(RuleId ruleId) const
         {
@@ -149,9 +156,36 @@ namespace ctrace::concurrency
 
         [[nodiscard]] static AnalysisOptions allAvailable()
         {
-            return AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                                    RuleId::DeadlockLockOrder}};
+            return AnalysisOptions{
+                .enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
+                                 RuleId::DeadlockLockOrder, RuleId::ConditionWaitWithoutPredicate,
+                                 RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess,
+                                 RuleId::ThreadArgumentEscapesFrame, RuleId::UnsafeSignalHandler}};
         }
+    };
+
+    struct ProjectAnalysisReport
+    {
+        DiagnosticReport report;
+        /// Modules left out because their target ABI differs from the rest of the project.
+        std::vector<std::string> skippedIncompatibleModules;
+        /// Units the whole-program view forced through a second analysis.
+        std::size_t reanalyzedUnitCount = 0;
+    };
+
+    /// Analyses a whole program, so that a thread spawned in one translation unit is related to
+    /// the worker body defined in another. Each unit is still analysed on its own terms; what
+    /// crosses the boundary is the set of facts a unit cannot observe by itself.
+    class ProjectConcurrencyAnalyzer
+    {
+      public:
+        explicit ProjectConcurrencyAnalyzer(AnalysisOptions options = {});
+
+        [[nodiscard]] ProjectAnalysisReport
+        analyze(const std::vector<const llvm::Module*>& modules) const;
+
+      private:
+        AnalysisOptions options_;
     };
 
     class SingleTUConcurrencyAnalyzer
@@ -217,6 +251,16 @@ namespace ctrace::concurrency
             return "MissingJoin";
         case RuleId::DeadlockLockOrder:
             return "DeadlockLockOrder";
+        case RuleId::ConditionWaitWithoutPredicate:
+            return "ConditionWaitWithoutPredicate";
+        case RuleId::ForkAfterThreadCreation:
+            return "ForkAfterThreadCreation";
+        case RuleId::UnreapedChildProcess:
+            return "UnreapedChildProcess";
+        case RuleId::ThreadArgumentEscapesFrame:
+            return "ThreadArgumentEscapesFrame";
+        case RuleId::UnsafeSignalHandler:
+            return "UnsafeSignalHandler";
         }
         return "UnknownRule";
     }
