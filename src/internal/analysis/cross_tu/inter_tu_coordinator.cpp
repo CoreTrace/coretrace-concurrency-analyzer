@@ -147,16 +147,13 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
         const ProgramSymbolIndex nothingKnownYet;
         std::vector<TUFacts> factsByModule(compatible.size());
         {
+            const auto analyseAlone = [&](std::size_t index)
+            { factsByModule[index] = factsBuilder.build(*compatible[index], &nothingKnownYet); };
+
             llvm::DefaultThreadPool pool;
             for (std::size_t index = 0; index < compatible.size(); ++index)
-            {
-                pool.async(
-                    [&, index]
-                    {
-                        factsByModule[index] =
-                            factsBuilder.build(*compatible[index], &nothingKnownYet);
-                    });
-            }
+                pool.async([&, index] { analyseAlone(index); });
+
             pool.wait();
         }
 
@@ -166,6 +163,9 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
 
         // Pass B: only the units whose conclusions the program-wide view changes.
         {
+            const auto analyseWithProgram = [&](std::size_t index)
+            { factsByModule[index] = factsBuilder.build(*compatible[index], &programIndex); };
+
             llvm::DefaultThreadPool pool;
             for (std::size_t index = 0; index < compatible.size(); ++index)
             {
@@ -173,13 +173,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                     continue;
 
                 ++analysis.reanalyzedUnitCount;
-
-                pool.async(
-                    [&, index]
-                    {
-                        factsByModule[index] =
-                            factsBuilder.build(*compatible[index], &programIndex);
-                    });
+                pool.async([&, index] { analyseWithProgram(index); });
             }
             pool.wait();
         }
