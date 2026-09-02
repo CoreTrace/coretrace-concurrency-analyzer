@@ -50,7 +50,8 @@ namespace
                "human)\n"
             << "  --verbose                Print request details for debugging\n"
             << "  --                       Forward all following args to compilerlib\n"
-            << "  -h, --help               Show this help message\n\n"
+            << "  -h, --help               Show this help message\n"
+            << "  --version                Print the analyzer version and exit\n\n"
             << "Examples:\n"
             << "  coretrace_concurrency_analyzer test.c --ir-format=ll\n"
             << "  coretrace_concurrency_analyzer test.c --ir-format=bc --compile-arg=-Iinclude\n"
@@ -558,6 +559,13 @@ int main(int argc, char** argv)
         if (arg == "-h" || arg == "--help")
         {
             printHelp();
+            return 0;
+        }
+
+        if (arg == "--version")
+        {
+            llvm::outs() << "coretrace_concurrency_analyzer "
+                         << CORETRACE_CONCURRENCY_ANALYZER_VERSION << "\n";
             return 0;
         }
 
