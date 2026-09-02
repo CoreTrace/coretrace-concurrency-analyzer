@@ -905,6 +905,9 @@ namespace ctrace::concurrency::internal::analysis
                         AccessFact concrete = access.fact;
                         concrete.functionId = callBinding.callerFunctionId;
                         concrete.symbol = bindingIt->second.symbol;
+                        // The binding may name an object a thread holds rather than a global,
+                        // and the two are not described the same way to the reader.
+                        concrete.sharedObject = sharedObjectIds.contains(concrete.symbol);
                         // The callee's region is relative to the argument, which the call site
                         // itself may already have indexed into.
                         concrete.region = access.fact.region.rebasedOn(bindingIt->second.region);
