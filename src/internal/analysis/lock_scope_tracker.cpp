@@ -62,8 +62,9 @@ namespace ctrace::concurrency::internal::analysis
     } // namespace
 
     LockScopeTracker::LockScopeTracker(const ConcurrencySymbolClassifier& classifier,
-                                       const LockWrapperSummaries* summaries)
-        : classifier_(classifier), summaries_(summaries)
+                                       const LockWrapperSummaries* summaries,
+                                       const SharedObjectBindings* sharedObjects)
+        : classifier_(classifier), summaries_(summaries), sharedObjects_(sharedObjects)
     {
     }
 
@@ -76,8 +77,19 @@ namespace ctrace::concurrency::internal::analysis
         if (trackedAccesses.empty())
             return heldLocksByAccess;
 
+        const SharedObjectBinding* sharedObject = nullptr;
+        if (sharedObjects_ != nullptr)
+        {
+            if (const auto it = sharedObjects_->find(functionId(function));
+                it != sharedObjects_->end())
+            {
+                sharedObject = &it->second;
+            }
+        }
+
         const SynchronizationEffectResolver effectResolver(
-            classifier_, function.getParent()->getDataLayout(), summaries_);
+            classifier_, function.getParent()->getDataLayout(), summaries_,
+            /*nameParameterLocks=*/false, sharedObject);
         const FunctionLockEffects lockEffects =
             collectFunctionLockEffects(function, effectResolver);
 

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "lock_wrapper_summaries.hpp"
+#include "shared_object_binding_collector.hpp"
 
 #include <set>
 #include <string>
@@ -25,7 +26,8 @@ namespace ctrace::concurrency::internal::analysis
         /// they are given, so a lock taken inside a helper still protects the code after the
         /// call. Null leaves those calls opaque, as before.
         explicit LockScopeTracker(const ConcurrencySymbolClassifier& classifier,
-                                  const LockWrapperSummaries* summaries = nullptr);
+                                  const LockWrapperSummaries* summaries = nullptr,
+                                  const SharedObjectBindings* sharedObjects = nullptr);
 
         [[nodiscard]] std::unordered_map<const llvm::Instruction*, std::set<std::string>>
         collectHeldLocks(const llvm::Function& function,
@@ -34,5 +36,6 @@ namespace ctrace::concurrency::internal::analysis
       private:
         const ConcurrencySymbolClassifier& classifier_;
         const LockWrapperSummaries* summaries_ = nullptr;
+        const SharedObjectBindings* sharedObjects_ = nullptr;
     };
 } // namespace ctrace::concurrency::internal::analysis

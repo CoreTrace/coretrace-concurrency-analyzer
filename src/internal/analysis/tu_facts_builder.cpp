@@ -483,7 +483,10 @@ namespace ctrace::concurrency::internal::analysis
             functionsById[pendingAccess.fact.functionId] = pendingAccess.function;
         }
 
-        LockScopeTracker lockScopeTracker(classifier, &lockWrapperSummaries);
+        const SharedObjectBindings sharedObjectBindings =
+            SharedObjectBindingCollector(classifier).collect(module);
+
+        LockScopeTracker lockScopeTracker(classifier, &lockWrapperSummaries, &sharedObjectBindings);
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;
         for (const auto& [functionKey, trackedAccesses] : trackedAccessesByFunction)
         {
@@ -761,11 +764,13 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_map<std::string, std::vector<ParameterizedAccess>> summariesByFunction;
         std::unordered_map<std::string, std::unordered_set<std::string>> summaryKeysByFunction;
 
-        LockStatePropagator lockStatePropagator(classifier, &lockWrapperSummaries);
+        LockStatePropagator lockStatePropagator(classifier, &lockWrapperSummaries,
+                                                &sharedObjectBindings);
         const LockPropagationResult lockPropagation =
             lockStatePropagator.collect(module, directCallSites);
 
-        LockOrderCollector lockOrderCollector(classifier, &lockWrapperSummaries);
+        LockOrderCollector lockOrderCollector(classifier, &lockWrapperSummaries,
+                                              &sharedObjectBindings);
         for (const llvm::Function& function : module)
         {
             if (function.isDeclaration())
@@ -919,13 +924,10 @@ namespace ctrace::concurrency::internal::analysis
         // Nothing is granted without that proof. An entry handed a different object each time
         // keeps no identity at all, which is what separates this from comparing objects by type.
         {
-            const SharedObjectBindings sharedObjects =
-                SharedObjectBindingCollector(classifier).collect(module);
-
             for (const auto& [summaryFunctionId, summary] : summariesByFunction)
             {
-                const auto bindingIt = sharedObjects.find(summaryFunctionId);
-                if (bindingIt == sharedObjects.end())
+                const auto bindingIt = sharedObjectBindings.find(summaryFunctionId);
+                if (bindingIt == sharedObjectBindings.end())
                     continue;
 
                 for (const ParameterizedAccess& access : summary)

@@ -3,6 +3,7 @@
 
 #include "facts.hpp"
 #include "lock_wrapper_summaries.hpp"
+#include "shared_object_binding_collector.hpp"
 
 #include <unordered_map>
 #include <vector>
@@ -27,7 +28,8 @@ namespace ctrace::concurrency::internal::analysis
         /// they are given, so a lock taken inside a helper still protects the code after the
         /// call. Null leaves those calls opaque, as before.
         explicit LockOrderCollector(const ConcurrencySymbolClassifier& classifier,
-                                    const LockWrapperSummaries* summaries = nullptr);
+                                    const LockWrapperSummaries* summaries = nullptr,
+                                    const SharedObjectBindings* sharedObjects = nullptr);
 
         [[nodiscard]] std::vector<LockOrderFact>
         collect(const llvm::Function& function, const std::set<std::string>& initialHeldLocks = {},
@@ -36,5 +38,6 @@ namespace ctrace::concurrency::internal::analysis
       private:
         const ConcurrencySymbolClassifier& classifier_;
         const LockWrapperSummaries* summaries_ = nullptr;
+        const SharedObjectBindings* sharedObjects_ = nullptr;
     };
 } // namespace ctrace::concurrency::internal::analysis

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "lock_wrapper_summaries.hpp"
+#include "shared_object_binding_collector.hpp"
 
 #include <optional>
 #include <string>
@@ -58,7 +59,8 @@ namespace ctrace::concurrency::internal::analysis
         SynchronizationEffectResolver(const ConcurrencySymbolClassifier& classifier,
                                       const llvm::DataLayout& layout,
                                       const LockWrapperSummaries* summaries = nullptr,
-                                      bool nameParameterLocks = false);
+                                      bool nameParameterLocks = false,
+                                      const SharedObjectBinding* sharedObject = nullptr);
 
         [[nodiscard]] std::vector<LockEffect> resolve(const llvm::CallBase& call) const;
 
@@ -70,5 +72,8 @@ namespace ctrace::concurrency::internal::analysis
         const llvm::DataLayout& layout_;
         const LockWrapperSummaries* summaries_ = nullptr;
         bool nameParameterLocks_ = false;
+        /// Set while analysing a thread entry whose object the spawn sites identified, so a lock
+        /// held inside that object can be named as well as the data it guards.
+        const SharedObjectBinding* sharedObject_ = nullptr;
     };
 } // namespace ctrace::concurrency::internal::analysis

@@ -525,6 +525,22 @@ namespace ctrace::concurrency::internal::analysis
         return module.getGlobalVariable(name, /*AllowInternal=*/true);
     }
 
+    std::optional<std::string> objectFieldLockId(const llvm::Value& value,
+                                                 const llvm::DataLayout* layout,
+                                                 unsigned argumentIndex,
+                                                 const std::string& objectId)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        walk.layout = layout;
+        const auto* argument =
+            llvm::dyn_cast_or_null<llvm::Argument>(resolveCopiedValue(value, seen, &walk));
+        if (argument == nullptr || argument->getArgNo() != argumentIndex)
+            return std::nullopt;
+
+        return objectId + walk.region().suffix();
+    }
+
     std::optional<std::string> parameterLockId(const llvm::Value& value)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;

@@ -48,9 +48,10 @@ namespace ctrace::concurrency::internal::analysis
 
     SynchronizationEffectResolver::SynchronizationEffectResolver(
         const ConcurrencySymbolClassifier& classifier, const llvm::DataLayout& layout,
-        const LockWrapperSummaries* summaries, bool nameParameterLocks)
+        const LockWrapperSummaries* summaries, bool nameParameterLocks,
+        const SharedObjectBinding* sharedObject)
         : classifier_(classifier), layout_(layout), summaries_(summaries),
-          nameParameterLocks_(nameParameterLocks)
+          nameParameterLocks_(nameParameterLocks), sharedObject_(sharedObject)
     {
     }
 
@@ -61,6 +62,16 @@ namespace ctrace::concurrency::internal::analysis
             lockId.has_value())
         {
             return lockId;
+        }
+
+        if (sharedObject_ != nullptr)
+        {
+            if (std::optional<std::string> fieldId = objectFieldLockId(
+                    value, &layout_, sharedObject_->argumentIndex, sharedObject_->objectId);
+                fieldId.has_value())
+            {
+                return fieldId;
+            }
         }
 
         return nameParameterLocks_ ? parameterLockId(value) : std::nullopt;

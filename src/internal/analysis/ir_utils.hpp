@@ -89,6 +89,17 @@ namespace ctrace::concurrency::internal::analysis
     /// It stands for whatever the caller passed, and is only meaningful while summarising the
     /// callee: every consumer sees it substituted by the caller's own lock.
     [[nodiscard]] std::optional<std::string> parameterLockId(const llvm::Value& value);
+
+    /// Identity of a lock that is a field of the object a parameter points at.
+    ///
+    /// A thread-safe class keeps its mutex beside the data it guards, so once the object has an
+    /// identity the lock has one too: the same base, plus the offset of the field. Without this
+    /// the data would be identifiable and the lock protecting it would not, which reports every
+    /// correctly guarded access as a race.
+    [[nodiscard]] std::optional<std::string> objectFieldLockId(const llvm::Value& value,
+                                                               const llvm::DataLayout* layout,
+                                                               unsigned argumentIndex,
+                                                               const std::string& objectId);
     /// Resolves the tracked root of a pointer, together with the byte range it designates.
     /// `byteSize` is the extent of the access; zero means unknown and conservatively covers the
     /// whole object.
