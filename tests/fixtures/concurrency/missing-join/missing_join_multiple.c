@@ -70,4 +70,6 @@ int main() {
 // 	cwe: CWE-562
 // 	at line 23, column 9
 // 	[!!!Error] thread is given a pointer into the frame that created it
+// 	     ↳ the argument is a local variable of this function, and no join stands between the creation and every way out: the frame is gone while the thread still reads it
+// 	     ↳ either join before returning, or give the thread storage that outlives the call
 // EXPECT-HUMAN-DIAGNOSTICS-END
