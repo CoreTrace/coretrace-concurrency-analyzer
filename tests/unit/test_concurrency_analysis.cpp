@@ -734,6 +734,10 @@ namespace
                      "data_race_creator_and_thread_share_object.c",
              .intent = "the thread that hands the object over keeps using it",
              .dataRace = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_shared_object_member_method_race.cpp",
+             .intent = "a method called on the object a thread holds reaches the same bytes",
+             .dataRace = 1, .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/data_race_shared_heap_object.c",
              .intent = "heap state has no name, but both threads were handed the same pointer",
              .dataRace = 1},
