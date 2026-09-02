@@ -11,6 +11,7 @@
 #include "lock_wrapper_summaries.hpp"
 #include "process_lifecycle_collector.hpp"
 #include "shared_access_collector.hpp"
+#include "shared_object_binding_collector.hpp"
 #include "signal_handler_collector.hpp"
 #include "cross_tu/program_symbol_index.hpp"
 #include "task_concurrency_analyzer.hpp"
@@ -906,6 +907,40 @@ namespace ctrace::concurrency::internal::analysis
                                                      callBinding.callerFunctionId,
                                                      std::move(propagatedAccess)) ||
                               changed;
+                }
+            }
+        }
+
+        // An access left rooted at a parameter has no identity of its own. When that parameter
+        // is how a thread entry receives an object the spawn sites prove is shared, the object's
+        // storage supplies one: every thread reached it from the same place, so two accesses
+        // through it really are two accesses to the same bytes.
+        //
+        // Nothing is granted without that proof. An entry handed a different object each time
+        // keeps no identity at all, which is what separates this from comparing objects by type.
+        {
+            const SharedObjectBindings sharedObjects =
+                SharedObjectBindingCollector(classifier).collect(module);
+
+            for (const auto& [summaryFunctionId, summary] : summariesByFunction)
+            {
+                const auto bindingIt = sharedObjects.find(summaryFunctionId);
+                if (bindingIt == sharedObjects.end())
+                    continue;
+
+                for (const ParameterizedAccess& access : summary)
+                {
+                    if (access.root.kind != RootBindingKind::Argument ||
+                        access.root.argumentIndex != bindingIt->second.argumentIndex)
+                    {
+                        continue;
+                    }
+
+                    AccessFact fact = access.fact;
+                    fact.symbol = bindingIt->second.objectId;
+                    fact.region = access.root.region;
+                    fact.sharedObject = true;
+                    addConcreteAccess(concreteAccesses, concreteAccessKeys, std::move(fact));
                 }
             }
         }

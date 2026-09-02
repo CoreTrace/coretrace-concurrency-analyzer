@@ -57,6 +57,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/process_lifecycle_checker.cpp
     src/internal/analysis/process_lifecycle_collector.cpp
     src/internal/analysis/shared_access_collector.cpp
+    src/internal/analysis/shared_object_binding_collector.cpp
     src/internal/analysis/signal_handler_collector.cpp
     src/internal/analysis/thread_argument_escape_collector.cpp
     src/internal/analysis/thread_context_propagator.cpp

@@ -152,6 +152,10 @@ namespace ctrace::concurrency::internal::analysis
         bool coarseCallEffect = false;
         /// True when the symbol identity was guessed by alias analysis rather than resolved.
         bool guessedIdentity = false;
+        /// The symbol names an object handed to a thread, not a global. Its identity is the
+        /// storage the pointer was read from, which is an internal name and must not reach the
+        /// message the way a global's own name does.
+        bool sharedObject = false;
         /// True when the access executes on the initial thread rather than inside a spawned entry.
         bool inRootTask = false;
         /// Spawned entries already running when a root-task access executes.

@@ -72,6 +72,19 @@ namespace ctrace::concurrency::internal::analysis
             return access.symbol;
         }
 
+        /// What the conflict is about, said the way the reader can act on it.
+        ///
+        /// An object handed to a thread has no name of its own: its identity is the storage the
+        /// pointer was read from, which is an internal label. Printing it as if it were a global
+        /// would name something the reader cannot find in the source.
+        std::string describeConflictSubject(const AccessFact& access)
+        {
+            if (access.sharedObject)
+                return "unsynchronized concurrent access to an object shared with a thread";
+
+            return "unsynchronized concurrent access to global '" + describeSymbol(access) + "'";
+        }
+
         std::vector<std::string> sortedLocks(const AccessFact& access)
         {
             return std::vector<std::string>(access.heldLocks.begin(), access.heldLocks.end());
@@ -270,7 +283,7 @@ namespace ctrace::concurrency::internal::analysis
             builder.confidence(inferConfidence(lhs, rhs))
                 .primaryLocation(lhs.userLocation)
                 .relatedLocation("Conflicting access", rhs.userLocation)
-                .message("unsynchronized concurrent access to global '" + describeSymbol(lhs) + "'")
+                .message(describeConflictSubject(lhs))
                 .note("first access: " + describeAccess(lhs, orderedLhsEntries))
                 .note("conflicting access: " + describeAccess(rhs, orderedRhsEntries))
                 .note("possible conflict kinds: " + joinValues(conflictKinds));
@@ -329,8 +342,7 @@ namespace ctrace::concurrency::internal::analysis
             builder.confidence(inferConfidence(access))
                 .primaryLocation(access.userLocation)
                 .relatedLocation("Concurrent invocation", access.userLocation)
-                .message("unsynchronized concurrent access to global '" + describeSymbol(access) +
-                         "'")
+                .message(describeConflictSubject(access))
                 .note("access: " + describeAccess(access, orderedEntries))
                 .note("conflicts with another concurrent invocation reachable from thread entry "
                       "'" +
