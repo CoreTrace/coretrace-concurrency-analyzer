@@ -677,14 +677,31 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
 
+            // A function stops being the place to fix the wait once someone above it answers
+            // for it: either a caller that inherited the obligation and is itself further out,
+            // or a caller that loops. A helper every caller already wraps in a loop is used
+            // correctly, and pointing at its body would be pointing at the wrong file.
             std::unordered_set<std::string> answeredByACaller;
+            std::unordered_set<std::string> calledFromSomewhere;
+            std::unordered_set<std::string> calledOutsideALoop;
             for (const DirectCallSite& site : directCallSites)
             {
-                if (!site.insideLoop && unguardedByFunction.contains(site.calleeFunctionId) &&
-                    unguardedByFunction.contains(site.callerFunctionId))
-                {
+                if (!unguardedByFunction.contains(site.calleeFunctionId))
+                    continue;
+
+                calledFromSomewhere.insert(site.calleeFunctionId);
+                if (site.insideLoop)
+                    continue;
+
+                calledOutsideALoop.insert(site.calleeFunctionId);
+                if (unguardedByFunction.contains(site.callerFunctionId))
                     answeredByACaller.insert(site.calleeFunctionId);
-                }
+            }
+
+            for (const std::string& called : calledFromSomewhere)
+            {
+                if (!calledOutsideALoop.contains(called))
+                    answeredByACaller.insert(called);
             }
 
             // Filtering happens only here, after propagation: a standard library's own bare
