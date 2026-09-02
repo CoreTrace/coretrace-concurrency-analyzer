@@ -274,6 +274,131 @@ namespace ctrace::concurrency::internal::analysis
             sitesByFunction.emplace(currentFunctionId, std::move(sites));
         }
 
+        // A function that starts a thread and returns without waiting for it hands that thread
+        // to its caller, still running. One path out is enough: the caller cannot assume the
+        // join happened on the branch it did not take.
+        for (const llvm::Function& function : module)
+        {
+            if (function.isDeclaration())
+                continue;
+
+            const auto sitesIt = sitesByFunction.find(functionId(function));
+            if (sitesIt == sitesByFunction.end() || sitesIt->second.spawns.empty())
+                continue;
+
+            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
+            const llvm::DominatorTree dominatorTree(mutableFunction);
+
+            for (const SpawnSite& spawn : sitesIt->second.spawns)
+            {
+                bool stillRunningOnSomeReturn = true;
+                for (const llvm::BasicBlock& block : function)
+                {
+                    const llvm::Instruction* terminator = block.getTerminator();
+                    if (!llvm::isa<llvm::ReturnInst>(terminator) ||
+                        !dominatorTree.isReachableFromEntry(&block))
+                    {
+                        continue;
+                    }
+
+                    stillRunningOnSomeReturn = false;
+                    if (spawnIsLiveAt(spawn, *terminator, sitesIt->second, dominatorTree))
+                    {
+                        stillRunningOnSomeReturn = true;
+                        break;
+                    }
+                }
+
+                // A function with no reachable return never gives the thread back, so the
+                // question does not arise; leaving the entry recorded is the safe answer.
+                if (stillRunningOnSomeReturn)
+                {
+                    result.entriesLeftRunningByFunction[functionId(function)].insert(
+                        spawn.entryFunctionId);
+                }
+            }
+        }
+
+        // The property travels up the call graph: a complete constructor that calls the base one
+        // hands the same running thread to whoever called it. A function that joins something is
+        // left out — it may well be the one waiting, and claiming otherwise would report a race
+        // against a thread that is already finished.
+        bool leakedChanged = true;
+        while (leakedChanged)
+        {
+            leakedChanged = false;
+
+            for (const DirectCallSite& site : directCallSites)
+            {
+                const auto calleeIt =
+                    result.entriesLeftRunningByFunction.find(site.calleeFunctionId);
+                if (calleeIt == result.entriesLeftRunningByFunction.end())
+                    continue;
+
+                const auto callerSitesIt = sitesByFunction.find(site.callerFunctionId);
+                if (callerSitesIt != sitesByFunction.end() && !callerSitesIt->second.joins.empty())
+                    continue;
+
+                ThreadEntrySet& callerEntries =
+                    result.entriesLeftRunningByFunction[site.callerFunctionId];
+                for (const std::string& entry : calleeIt->second)
+                    leakedChanged = callerEntries.insert(entry).second || leakedChanged;
+            }
+        }
+
+        // A call to such a function is a spawn as far as its caller is concerned: from there on,
+        // the thread runs beside everything the call dominates.
+        //
+        // Nothing turns it off again. A caller that joins later keeps the entry live to its own
+        // return, which costs precision after the join and never soundness — and for the shape
+        // this exists for, an object owning its thread, the join is the destructor and the
+        // object is gone by then anyway.
+        for (const llvm::Function& function : module)
+        {
+            if (function.isDeclaration())
+                continue;
+
+            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
+            const llvm::DominatorTree dominatorTree(mutableFunction);
+
+            for (const llvm::BasicBlock& block : function)
+            {
+                if (!dominatorTree.isReachableFromEntry(&block))
+                    continue;
+
+                for (const llvm::Instruction& instruction : block)
+                {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (call == nullptr)
+                        continue;
+
+                    const llvm::Function* callee = classifier_.directCallee(*call);
+                    if (callee == nullptr)
+                        continue;
+
+                    const auto leakedIt =
+                        result.entriesLeftRunningByFunction.find(functionId(*callee));
+                    if (leakedIt == result.entriesLeftRunningByFunction.end())
+                        continue;
+
+                    for (const llvm::BasicBlock& reachedBlock : function)
+                    {
+                        for (const llvm::Instruction& reached : reachedBlock)
+                        {
+                            if (&reached == &instruction ||
+                                !dominatorTree.dominates(&instruction, &reached))
+                            {
+                                continue;
+                            }
+
+                            ThreadEntrySet& live = result.liveEntriesAtInstruction[&reached];
+                            live.insert(leakedIt->second.begin(), leakedIt->second.end());
+                        }
+                    }
+                }
+            }
+        }
+
         // Propagate the live set across direct calls so that a helper invoked by the initial thread
         // inherits the tasks running at its call sites.
         std::unordered_map<std::string, ThreadEntrySet> liveEntriesAtFunctionEntry;
