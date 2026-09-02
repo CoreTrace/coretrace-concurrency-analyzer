@@ -47,10 +47,12 @@ namespace
     class CompiledProject
     {
       public:
-        [[nodiscard]] bool add(std::string_view relativePath)
+        [[nodiscard]] bool add(std::string_view relativePath,
+                               std::vector<std::string> compileArgs = {})
         {
             CompileRequest request;
             request.inputFile = projectFixturePath(relativePath).string();
+            request.extraCompileArgs = std::move(compileArgs);
             request.format = IRFormat::BC;
 
             CompileResult result = InMemoryIRCompiler().compile(request, context_);
@@ -369,6 +371,100 @@ namespace
         return ok;
     }
 
+    std::size_t countRule(const DiagnosticReport& report, RuleId rule)
+    {
+        std::size_t count = 0;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+        {
+            if (diagnostic.ruleId == rule)
+                ++count;
+        }
+
+        return count;
+    }
+
+    std::vector<std::string> idiomaticServiceArgs()
+    {
+        return {"-std=c++20", "-I" + projectFixturePath("idiomatic-cxx-service").string()};
+    }
+
+    /// A service written the way C++ services are written: synchronisation behind hand-rolled
+    /// wrappers, shared state held as members, a thread started from a pointer-to-member, and a
+    /// fork whose children keep running the same program.
+    ///
+    /// The fork is judged against the whole program: the unit that forks starts no thread of its
+    /// own, and only the unit next to it does.
+    bool testIdiomaticServiceReportsWhatCrossesTheProgram()
+    {
+        CompiledProject project;
+        const std::vector<std::string> args = idiomaticServiceArgs();
+        if (!project.add("idiomatic-cxx-service/worker.cpp", args) ||
+            !project.add("idiomatic-cxx-service/supervisor.cpp", args) ||
+            !project.add("idiomatic-cxx-service/main.cpp", args))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(project.modules());
+
+        return assertTrue(countRule(analysis.report, RuleId::ForkAfterThreadCreation) == 1,
+                          "the fork is unsafe because another unit starts a thread") &&
+               assertTrue(countRule(analysis.report, RuleId::UnreapedChildProcess) == 1,
+                          "no unit of the program collects the children");
+    }
+
+    /// The forking unit alone starts no thread, so on its own it has no reason to object.
+    /// Without this, the test above would pass even if the fork rule ignored the program.
+    bool testForkingUnitAloneDoesNotSeeTheThreads()
+    {
+        CompiledProject project;
+        if (!project.add("idiomatic-cxx-service/supervisor.cpp", idiomaticServiceArgs()))
+            return false;
+
+        const DiagnosticReport report = SingleTUConcurrencyAnalyzer().analyze(project.moduleAt(0));
+
+        return assertTrue(countRule(report, RuleId::ForkAfterThreadCreation) == 0,
+                          "a unit that starts no thread cannot call its own fork unsafe") &&
+               assertTrue(countRule(report, RuleId::UnreapedChildProcess) == 1,
+                          "the unreaped child is visible from the forking unit alone");
+    }
+
+    /// Pins the frontier rather than a finding: two real defects in this fixture are invisible,
+    /// and both need work that does not exist yet. When either becomes visible this test fails,
+    /// which is the point — it is how the analyzer announces that it grew.
+    bool testIdiomaticServiceKeepsItsKnownBlindSpots()
+    {
+        CompiledProject project;
+        const std::vector<std::string> args = idiomaticServiceArgs();
+        if (!project.add("idiomatic-cxx-service/worker.cpp", args) ||
+            !project.add("idiomatic-cxx-service/supervisor.cpp", args) ||
+            !project.add("idiomatic-cxx-service/main.cpp", args))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(project.modules());
+
+        // `Worker::stop` writes `_running` while `Worker::loop` reads it, neither under a lock.
+        // Seeing it needs an identity for a field reached through `this`, and a thread entry
+        // resolved through the pointer-to-member `std::thread` was handed.
+        const bool sharedMemberRaceInvisible =
+            countRule(analysis.report, RuleId::DataRaceGlobal) == 0;
+
+        // `Worker::loop` wraps the bare wait in `while (_running)`, so the rule considers the
+        // recheck done. That the loop tests something unrelated to the condition waited on is
+        // beyond what it models.
+        const bool loopIsTakenAtFaceValue =
+            countRule(analysis.report, RuleId::ConditionWaitWithoutPredicate) == 0;
+
+        return assertTrue(sharedMemberRaceInvisible,
+                          "a race on a member reached through this is still invisible") &&
+               assertTrue(loopIsTakenAtFaceValue,
+                          "a loop around a bare wait is still taken at face value");
+    }
+
     /// An empty project is a valid input, not a crash.
     bool testEmptyProjectIsAnEmptyReport()
     {
@@ -389,6 +485,9 @@ int main()
     ok = testRepeatedUnitIsNotReportedTwice() && ok;
     ok = testExternGlobalDefinedInAnotherUnitIsTracked() && ok;
     ok = testUnresolvedExternIsNotTracked() && ok;
+    ok = testIdiomaticServiceReportsWhatCrossesTheProgram() && ok;
+    ok = testForkingUnitAloneDoesNotSeeTheThreads() && ok;
+    ok = testIdiomaticServiceKeepsItsKnownBlindSpots() && ok;
     ok = testHandleJoinedInAnotherUnitIsNotOutstanding() && ok;
     ok = testCreatingUnitAloneStillReportsTheHandle() && ok;
     ok = testLockWrapperDefinedInAnotherUnitClosesTheCycle() && ok;
