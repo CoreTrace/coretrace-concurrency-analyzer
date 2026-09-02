@@ -381,11 +381,37 @@ namespace ctrace::concurrency::internal::analysis
             return recursiveLockIds;
         }
 
+        /// Identity of an argument that is an object a thread already holds.
+        ///
+        /// A method called on such an object by the thread that owns it describes the same bytes
+        /// as the thread's own accesses, so it takes the same identity rather than being dropped
+        /// for lack of a name. Kept separate from the access collector's resolution: this one
+        /// answers about a call argument, where the address is passed directly rather than read
+        /// out of a field.
+        std::optional<RootBinding>
+        sharedObjectArgument(const llvm::Value& operand,
+                             const std::unordered_set<std::string>& sharedObjectIds)
+        {
+            if (sharedObjectIds.empty())
+                return std::nullopt;
+
+            const llvm::Value* slot = operand.stripPointerCastsAndAliases();
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(slot))
+                slot = load->getPointerOperand();
+
+            const std::optional<std::string> slotId = canonicalStorageGroupId(*slot);
+            if (!slotId.has_value() || !sharedObjectIds.contains(*slotId))
+                return std::nullopt;
+
+            return RootBinding::global(*slotId);
+        }
+
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
             const TaskConcurrencyResult& taskConcurrency,
-            const ProgramDefinedGlobals* programDefined)
+            const ProgramDefinedGlobals* programDefined,
+            const std::unordered_set<std::string>& sharedObjectIds)
         {
             std::vector<DirectCallBinding> bindings;
 
@@ -415,8 +441,11 @@ namespace ctrace::concurrency::internal::analysis
                 for (unsigned argumentIndex = 0; argumentIndex < site.call->arg_size();
                      ++argumentIndex)
                 {
-                    const std::optional<RootBinding> root = resolveTrackedRoot(
-                        *site.call->getArgOperand(argumentIndex), programDefined);
+                    const llvm::Value& operand = *site.call->getArgOperand(argumentIndex);
+                    std::optional<RootBinding> root = resolveTrackedRoot(operand, programDefined);
+                    if (!root.has_value())
+                        root = sharedObjectArgument(operand, sharedObjectIds);
+
                     if (root.has_value())
                         binding.argumentBindings.emplace(argumentIndex, *root);
                 }
@@ -472,7 +501,7 @@ namespace ctrace::concurrency::internal::analysis
         // Computed before the accesses are gathered: the thread that hands an object over keeps
         // reaching it through the same slot, so its own accesses need the identity too.
         const SharedObjectBindings sharedObjectBindings =
-            SharedObjectBindingCollector(classifier).collect(module);
+            SharedObjectBindingCollector(classifier).collect(module, directCallSites);
 
         std::unordered_set<std::string> sharedObjectIds;
         for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
@@ -847,7 +876,7 @@ namespace ctrace::concurrency::internal::analysis
 
         const std::vector<DirectCallBinding> directCallBindings =
             buildDirectCallBindings(directCallSites, lockPropagation.effectiveHeldLocksByCall,
-                                    taskConcurrency, programDefined);
+                                    taskConcurrency, programDefined, sharedObjectIds);
 
         bool changed = true;
         while (changed)

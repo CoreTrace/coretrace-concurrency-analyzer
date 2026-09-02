@@ -4,6 +4,7 @@
 #include "facts.hpp"
 
 #include <unordered_map>
+#include <vector>
 
 namespace llvm
 {
@@ -13,6 +14,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    struct DirectCallSite;
 
     /// The object a thread entry receives, when the program proves that object is shared.
     ///
@@ -41,7 +43,12 @@ namespace ctrace::concurrency::internal::analysis
       public:
         explicit SharedObjectBindingCollector(const ConcurrencySymbolClassifier& classifier);
 
-        [[nodiscard]] SharedObjectBindings collect(const llvm::Module& module) const;
+        /// `directCallSites` lets an object known only as a parameter be traced back to the
+        /// caller that owns it: an object whose constructor starts its own thread hands `this`
+        /// to the spawn, and `this` names nothing until the construction site is known.
+        [[nodiscard]] SharedObjectBindings
+        collect(const llvm::Module& module,
+                const std::vector<DirectCallSite>& directCallSites) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
