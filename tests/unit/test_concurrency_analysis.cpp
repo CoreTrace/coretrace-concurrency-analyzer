@@ -730,6 +730,10 @@ namespace
     {
         static const std::vector<FixtureExpectation> expectations = {
             // --- data race: conflicts that must be reported -------------------------------
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_creator_and_thread_share_object.c",
+             .intent = "the thread that hands the object over keeps using it",
+             .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_shared_heap_object.c",
              .intent = "heap state has no name, but both threads were handed the same pointer",
              .dataRace = 1},
