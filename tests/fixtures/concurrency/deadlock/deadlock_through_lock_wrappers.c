@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // The inversion is expressed entirely through helpers: neither thread names a lock primitive
 // directly. Without a summary of what `take` does to the lock it is handed, the acquisition
 // vanishes at the return and the cycle is invisible.

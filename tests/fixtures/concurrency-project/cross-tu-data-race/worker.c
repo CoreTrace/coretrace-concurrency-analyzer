@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Worker unit: it owns the shared counter and the thread body, and never sees a spawn.
 // On its own this unit is silent — nothing here proves two threads run `worker`.
 #include <stddef.h>

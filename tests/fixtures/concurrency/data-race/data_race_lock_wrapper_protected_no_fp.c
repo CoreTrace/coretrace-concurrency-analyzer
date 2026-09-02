@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // The access is protected, but only through helpers. The summary that closes the deadlock case
 // must not stop here: treating `take` as opaque reports a race that cannot happen.
 #include <pthread.h>

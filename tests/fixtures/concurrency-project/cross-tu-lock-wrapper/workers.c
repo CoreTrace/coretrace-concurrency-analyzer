@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Worker unit: it holds the inversion, but never names a lock primitive. Both halves of the
 // proof are needed, and neither unit has both.
 #include <pthread.h>

@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Synchronization unit: it owns the helpers and holds no lock ordering of its own.
 #include <pthread.h>
 

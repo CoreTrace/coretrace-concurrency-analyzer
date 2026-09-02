@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // The helper only takes the lock on one branch, so the caller cannot be told it holds it.
 // Claiming otherwise would silence a real race, which is the failure worth avoiding.
 #include <pthread.h>

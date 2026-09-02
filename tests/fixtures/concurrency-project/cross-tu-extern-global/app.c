@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: Apache-2.0
 // Application unit: it spawns both threads and holds both conflicting accesses, but the object
 // they fight over is only declared here. Alone, this unit cannot tell that `extern` from an
 // unresolved symbol, so it stays silent.
