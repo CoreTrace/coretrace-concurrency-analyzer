@@ -90,6 +90,18 @@ namespace ctrace::concurrency::internal::analysis
     /// callee: every consumer sees it substituted by the caller's own lock.
     [[nodiscard]] std::optional<std::string> parameterLockId(const llvm::Value& value);
 
+    /// Identity of an access made through a pointer the program holds in a named slot, when
+    /// that slot is one the spawn sites identified as shared.
+    ///
+    /// The thread that hands an object over usually keeps using it, and its own accesses reach
+    /// the object by loading the same variable the spawn read. Following that load to the
+    /// allocation gives nothing nameable; stopping at the slot gives the identity both sides
+    /// already agree on.
+    [[nodiscard]] std::optional<RootBinding>
+    resolveSharedObjectRoot(const llvm::Value& value, const llvm::DataLayout* layout,
+                            std::uint64_t byteSize,
+                            const std::unordered_set<std::string>& sharedObjectIds);
+
     /// Identity of a lock that is a field of the object a parameter points at.
     ///
     /// A thread-safe class keeps its mutex beside the data it guards, so once the object has an

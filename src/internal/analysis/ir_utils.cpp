@@ -260,6 +260,28 @@ namespace ctrace::concurrency::internal::analysis
 
         /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
         /// which keeps the region conservatively overlapping every sibling.
+        /// Strips casts and aliases while leaving indexing steps in place.
+        ///
+        /// `stripPointerCastsAndAliases` also removes a GEP whose indices are all zero, because
+        /// it computes the same address. It does not describe the same thing: the first field of
+        /// an aggregate sits at offset zero, so that GEP is where its type and offset appear.
+        const llvm::Value* stripCastsKeepingIndexing(const llvm::Value* value)
+        {
+            while (value != nullptr)
+            {
+                if (llvm::isa<llvm::GEPOperator>(value))
+                    return value;
+
+                const llvm::Value* stripped = value->stripPointerCastsAndAliases();
+                if (stripped == value)
+                    return value;
+
+                value = stripped;
+            }
+
+            return value;
+        }
+
         void accumulateGepOffset(AccessPathWalk& walk, const llvm::GEPOperator& gep)
         {
             if (!walk.hasKnownOffset)
@@ -523,6 +545,41 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
 
         return module.getGlobalVariable(name, /*AllowInternal=*/true);
+    }
+
+    std::optional<RootBinding>
+    resolveSharedObjectRoot(const llvm::Value& value, const llvm::DataLayout* layout,
+                            std::uint64_t byteSize,
+                            const std::unordered_set<std::string>& sharedObjectIds)
+    {
+        if (sharedObjectIds.empty())
+            return std::nullopt;
+
+        AccessPathWalk walk;
+        walk.layout = layout;
+
+        const llvm::Value* current = stripCastsKeepingIndexing(&value);
+        while (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(current))
+        {
+            noteGepTypes(walk, *gep);
+            accumulateGepOffset(walk, *gep);
+            current = stripCastsKeepingIndexing(gep->getPointerOperand());
+        }
+
+        // The load is where the pointer was read, and its operand is the slot holding it. That
+        // slot is what the spawn site named, so the walk stops here rather than chasing the
+        // value to an allocation that has no name.
+        const auto* load = llvm::dyn_cast<llvm::LoadInst>(current);
+        if (load == nullptr || walk.touchesSyncPrimitive)
+            return std::nullopt;
+
+        const std::optional<std::string> slotId =
+            canonicalStorageGroupId(*load->getPointerOperand());
+        if (!slotId.has_value() || !sharedObjectIds.contains(*slotId))
+            return std::nullopt;
+
+        return RootBinding::global(*slotId,
+                                   walk.region(byteSize != 0 ? byteSize : walk.designatedSize));
     }
 
     std::optional<std::string> objectFieldLockId(const llvm::Value& value,

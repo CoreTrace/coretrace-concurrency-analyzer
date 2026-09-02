@@ -469,9 +469,18 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        // Computed before the accesses are gathered: the thread that hands an object over keeps
+        // reaching it through the same slot, so its own accesses need the identity too.
+        const SharedObjectBindings sharedObjectBindings =
+            SharedObjectBindingCollector(classifier).collect(module);
+
+        std::unordered_set<std::string> sharedObjectIds;
+        for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
+            sharedObjectIds.insert(binding.objectId);
+
         SharedAccessCollector accessCollector;
         std::vector<PendingAccess> pendingAccesses =
-            accessCollector.collect(module, programDefined);
+            accessCollector.collect(module, programDefined, &sharedObjectIds);
 
         std::unordered_map<std::string, std::unordered_set<const llvm::Instruction*>>
             trackedAccessesByFunction;
@@ -482,9 +491,6 @@ namespace ctrace::concurrency::internal::analysis
                 pendingAccess.instruction);
             functionsById[pendingAccess.fact.functionId] = pendingAccess.function;
         }
-
-        const SharedObjectBindings sharedObjectBindings =
-            SharedObjectBindingCollector(classifier).collect(module);
 
         LockScopeTracker lockScopeTracker(classifier, &lockWrapperSummaries, &sharedObjectBindings);
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;

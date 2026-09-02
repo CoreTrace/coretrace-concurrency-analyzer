@@ -269,7 +269,8 @@ namespace ctrace::concurrency::internal::analysis
 
     std::vector<PendingAccess>
     SharedAccessCollector::collect(const llvm::Module& module,
-                                   const ProgramDefinedGlobals* programDefined) const
+                                   const ProgramDefinedGlobals* programDefined,
+                                   const std::unordered_set<std::string>* sharedObjectIds) const
     {
         std::vector<PendingAccess> accesses;
         std::vector<const llvm::GlobalVariable*> trackedGlobals;
@@ -284,6 +285,9 @@ namespace ctrace::concurrency::internal::analysis
         ConcurrencySymbolClassifier classifier;
         AtomicOnlyCache atomicOnlyCache;
         const llvm::DataLayout& layout = module.getDataLayout();
+        static const std::unordered_set<std::string> kNoSharedObjects;
+        const std::unordered_set<std::string>& sharedObjects =
+            sharedObjectIds != nullptr ? *sharedObjectIds : kNoSharedObjects;
         const MemoryScope scope{.layout = layout, .programDefined = programDefined};
 
         for (const llvm::Function& function : module)
@@ -357,6 +361,12 @@ namespace ctrace::concurrency::internal::analysis
 
                     std::optional<RootBinding> root =
                         resolveTrackedRoot(*pointerOperand, &layout, byteSize, programDefined);
+                    if (!root.has_value())
+                    {
+                        root = resolveSharedObjectRoot(*pointerOperand, &layout, byteSize,
+                                                       sharedObjects);
+                    }
+
                     if (!root.has_value())
                     {
                         const std::optional<AliasResolvedGlobal> aliasResolvedGlobal =
