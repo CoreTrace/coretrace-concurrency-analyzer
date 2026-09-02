@@ -410,7 +410,8 @@ namespace
         internal::LLVMIRLoader irLoader;
         std::vector<CompiledUnit> units;
         std::vector<std::string> failedSources;
-        std::size_t cacheHits = 0;
+        std::size_t reusedUnits = 0;
+        std::size_t compiledUnits = 0;
 
         for (const internal::CompileCommand& command : commands)
         {
@@ -426,7 +427,7 @@ namespace
                     unit.module = irLoader.parseBC(unit.bitcode, *unit.context, parseError);
                     if (unit.module != nullptr)
                     {
-                        ++cacheHits;
+                        ++reusedUnits;
                         units.push_back(std::move(unit));
                         continue;
                     }
@@ -473,6 +474,7 @@ namespace
             // parseBC keeps a non-owning view over the bitcode buffer.
             unit.bitcode = std::move(result.llvmBitcode);
             unit.module = std::move(result.module);
+            ++compiledUnits;
             units.push_back(std::move(unit));
         }
 
@@ -497,12 +499,15 @@ namespace
             const auto milliseconds = [](auto from, auto to)
             { return std::chrono::duration_cast<std::chrono::milliseconds>(to - from).count(); };
 
-            llvm::errs() << "units: " << units.size() << " compiled, " << failedSources.size()
-                         << " failed\n"
+            // Reused units are reported apart from compiled ones. Adding them together under
+            // "compiled" claims a compilation that never ran: a project whose sources no longer
+            // build reads as fully healthy for as long as its cache entries stay valid, which is
+            // exactly when the reader most needs to be told otherwise.
+            llvm::errs() << "units: " << compiledUnits << " compiled, " << reusedUnits
+                         << " reused, " << failedSources.size() << " failed\n"
                          << "compile-ms: " << milliseconds(startedAt, compiledAt) << "\n"
                          << "analysis-ms: " << milliseconds(compiledAt, finishedAt) << "\n"
-                         << "reanalyzed-units: " << analysis.reanalyzedUnitCount << "\n"
-                         << "cache-hits: " << cacheHits << "\n";
+                         << "reanalyzed-units: " << analysis.reanalyzedUnitCount << "\n";
         }
 
         // A partial project yields partial conclusions; saying so is part of the result.

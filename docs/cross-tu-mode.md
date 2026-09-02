@@ -71,8 +71,14 @@ the flags, and every header the compiler actually opened — read from the depen
 compiler writes, not guessed at — so a header edit the source never names directly still
 invalidates it. `--no-cache` recompiles everything.
 
-`--verbose` reports the split, the number of cache hits, and how many units the second pass
-touched.
+`--verbose` reports the split, how many units the second pass touched, and — separately — how
+many units were compiled and how many were reused from the cache. The two are never added
+together: a project whose sources no longer build reads as fully healthy for as long as its
+cache entries stay valid, which is exactly when the reader most needs to be told otherwise.
+
+```
+units: 0 compiled, 15 reused, 0 failed
+```
 
 ## Limits
 
