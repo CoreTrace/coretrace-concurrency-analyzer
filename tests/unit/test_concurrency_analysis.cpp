@@ -734,6 +734,13 @@ namespace
                      "data_race_creator_and_thread_share_object.c",
              .intent = "the thread that hands the object over keeps using it",
              .dataRace = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_object_owns_its_thread_race.cpp",
+             .intent = "a constructor that starts a thread leaves it running for its caller",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_helper_joins_before_returning_no_fp.cpp",
+             .intent = "a helper that waits for its thread hands nothing back",
+             .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_shared_object_member_method_race.cpp",
              .intent = "a method called on the object a thread holds reaches the same bytes",
