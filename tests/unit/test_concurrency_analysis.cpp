@@ -779,6 +779,9 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/data_race_mutex_protected.c",
              .intent = "a common mutex protects both accesses"},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_member_mutex_no_fp.c",
+             .intent = "the mutex guarding a shared object lives inside it and still counts"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_private_heap_object_no_fp.c",
              .intent = "the same body on two allocations of its own shares nothing"},
             {.path = "tests/fixtures/concurrency/data-race/"
