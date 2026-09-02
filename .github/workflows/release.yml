@@ -1,0 +1,192 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Cutting a release is pushing a tag. Everything below hangs off that one act:
+# the tag is verified to agree with the version in the tree, the same build and
+# test matrix CI runs on every push runs again on the tagged commit, the image
+# is published to GHCR, and only then does the GitHub release appear. A release
+# that exists is therefore one that built and passed its tests.
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+env:
+  # GHCR rejects an uppercase path and the owner here is "CoreTrace".
+  IMAGE_NAME: ghcr.io/coretrace/coretrace-concurrency-analyzer
+
+jobs:
+  version-agrees:
+    name: Tag agrees with CMake version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cheap, and it runs first: a tag that disagrees with the tree is a
+      # release nobody can trace back, and finding that out after a 20-minute
+      # LLVM build wastes the whole matrix.
+      - name: Compare tag against project(VERSION)
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          cmake_version="$(sed -n 's/^project([a-z_]* VERSION \([0-9.]*\)).*/\1/p' CMakeLists.txt)"
+          echo "tag:   ${tag_version}"
+          echo "cmake: ${cmake_version}"
+          if [[ -z "${cmake_version}" ]]; then
+            echo "::error::could not read VERSION out of CMakeLists.txt project()"
+            exit 1
+          fi
+          if [[ "${tag_version}" != "${cmake_version}" ]]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match project(VERSION ${cmake_version}); bump CMakeLists.txt before tagging"
+            exit 1
+          fi
+
+  verify:
+    name: Build and test (${{ matrix.runner }})
+    needs: version-agrees
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, macos-14]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install LLVM 20 and build tools on Ubuntu
+        if: runner.os == 'Linux'
+        run: |
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 20
+          sudo apt-get update
+          sudo apt-get install -y clang-20 llvm-20-dev libclang-20-dev cmake ninja-build
+
+      - name: Install LLVM 20 and build tools on macOS
+        if: runner.os == 'macOS'
+        run: brew install llvm@20 cmake ninja
+
+      - name: Configure toolchain environment
+        shell: bash
+        run: |
+          if [[ "${RUNNER_OS}" == "Linux" ]]; then
+            llvm_prefix="/usr/lib/llvm-20"
+            clang_executable="/usr/bin/clang-20"
+          else
+            llvm_prefix="$(brew --prefix llvm@20)"
+            clang_executable="${llvm_prefix}/bin/clang"
+          fi
+
+          echo "${llvm_prefix}/bin" >> "${GITHUB_PATH}"
+          echo "LLVM_DIR=${llvm_prefix}/lib/cmake/llvm" >> "${GITHUB_ENV}"
+          echo "Clang_DIR=${llvm_prefix}/lib/cmake/clang" >> "${GITHUB_ENV}"
+          echo "CLANG_EXECUTABLE=${clang_executable}" >> "${GITHUB_ENV}"
+          echo "CLANG_RESOURCE_DIR=$("${clang_executable}" -print-resource-dir)" >> "${GITHUB_ENV}"
+
+      - name: Configure
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DLLVM_DIR="${LLVM_DIR}" \
+            -DClang_DIR="${Clang_DIR}" \
+            -DCLANG_EXECUTABLE="${CLANG_EXECUTABLE}" \
+            -DCLANG_RESOURCE_DIR="${CLANG_RESOURCE_DIR}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Run CTest
+        run: ctest --test-dir build --output-on-failure
+
+      # The binary is what a user ends up holding; make it say which release it
+      # came from before that release exists.
+      - name: Check --version reports the tag
+        shell: bash
+        run: |
+          reported="$(./build/coretrace_concurrency_analyzer --version)"
+          echo "${reported}"
+          [[ "${reported}" == "coretrace_concurrency_analyzer ${GITHUB_REF_NAME#v}" ]]
+
+  image:
+    name: Publish image to GHCR
+    needs: verify
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/release-linux.Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  publish:
+    name: Create the GitHub release
+    needs: [verify, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --generate-notes lists the merged pull requests; the body adds what a
+      # generated list cannot say, which is how to actually run this version.
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cat > notes.md <<NOTES
+          ## Run it
+
+          \`\`\`sh
+          docker run --rm -v "\$PWD:/work" ${IMAGE_NAME}:${GITHUB_REF_NAME} file.c --analyze
+          \`\`\`
+
+          ## Build it from source
+
+          \`\`\`cmake
+          FetchContent_Declare(
+            concurrency_analyzer
+            GIT_REPOSITORY ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git
+            GIT_TAG ${GITHUB_REF_NAME}
+          )
+          \`\`\`
+
+          Requires LLVM/Clang 20. See [CHANGELOG.md](CHANGELOG.md) for what changed.
+          NOTES
+
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "${GITHUB_REF_NAME}" \
+            --notes-file notes.md \
+            --generate-notes \
+            --verify-tag

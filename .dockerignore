@@ -1,0 +1,5 @@
+# The image build configures its own tree; a host build directory would be
+# copied in only to be ignored, and it is the largest thing in the repo.
+build/
+.git/
+.pytest_cache/

@@ -94,6 +94,36 @@ backend, but the dependency is isolated behind internal interfaces:
 `InMemoryIRCompiler` keeps a stable public `compile(...)` API and also supports dependency
 injection for architecture-level tests.
 
+## Releases
+
+Released versions are tagged `vX.Y.Z`. The version lives in `project(... VERSION ...)`
+in `CMakeLists.txt`, the binary reports it under `--version`, and the release workflow
+refuses a tag that disagrees with the tree.
+
+The published image carries the clang 20 the analyzer needs, so it needs nothing
+installed beyond a container runtime:
+
+```bash
+docker run --rm -v "$PWD:/work" \
+  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.1.0 file.c --analyze
+```
+
+To build a specific release from source instead, consume the tag through CMake:
+
+```cmake
+FetchContent_Declare(
+  concurrency_analyzer
+  GIT_REPOSITORY https://github.com/CoreTrace/coretrace-concurrency-analyzer.git
+  GIT_TAG v0.1.0
+)
+```
+
+Cutting a release is pushing a tag. `.github/workflows/release.yml` then checks the
+tag against the tree, rebuilds and retests on Linux and macOS, publishes the image,
+and only then creates the GitHub release — so a release that exists is one that
+built and passed. Versions follow the Conventional Commits this repository already
+enforces; see [CHANGELOG.md](CHANGELOG.md).
+
 ## Build (LLVM/Clang 20)
 
 ```bash

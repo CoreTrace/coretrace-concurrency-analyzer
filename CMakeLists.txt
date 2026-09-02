@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.21)
-project(coretrace_concurrency_analyzer)
+project(coretrace_concurrency_analyzer VERSION 0.1.0)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 include(CheckLLVMVersion OPTIONAL)
@@ -141,6 +141,19 @@ if(BUILD_CLI)
       PRIVATE
         coretrace_concurrency_analyzer_lib
     )
+
+    # --version answers from the same string the release tag is cut from, so a
+    # binary someone has can be traced back to a tag without guessing.
+    target_compile_definitions(coretrace_concurrency_analyzer
+      PRIVATE
+        CORETRACE_CONCURRENCY_ANALYZER_VERSION="${PROJECT_VERSION}"
+    )
+
+    # A consumer that FetchContents this project wants the library, not our CLI
+    # landing in its install tree; only a standalone build installs.
+    if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
+        install(TARGETS coretrace_concurrency_analyzer RUNTIME DESTINATION bin)
+    endif()
 endif()
 
 if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
