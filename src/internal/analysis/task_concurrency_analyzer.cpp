@@ -381,17 +381,35 @@ namespace ctrace::concurrency::internal::analysis
                     if (leakedIt == result.entriesLeftRunningByFunction.end())
                         continue;
 
-                    for (const llvm::BasicBlock& reachedBlock : function)
+                    // Walking the dominator subtree instead of testing every instruction:
+                    // the region a call dominates is exactly its own block after the call plus
+                    // the blocks below it in the tree, and visiting it costs its own size rather
+                    // than the size of the function squared.
+                    const auto markFrom = [&](const llvm::Instruction& first)
                     {
-                        for (const llvm::Instruction& reached : reachedBlock)
+                        const llvm::BasicBlock* owner = first.getParent();
+                        for (auto it = std::next(first.getIterator()); it != owner->end(); ++it)
                         {
-                            if (&reached == &instruction ||
-                                !dominatorTree.dominates(&instruction, &reached))
-                            {
-                                continue;
-                            }
+                            ThreadEntrySet& live = result.liveEntriesAtInstruction[&*it];
+                            live.insert(leakedIt->second.begin(), leakedIt->second.end());
+                        }
+                    };
 
-                            ThreadEntrySet& live = result.liveEntriesAtInstruction[&reached];
+                    markFrom(instruction);
+
+                    std::deque<const llvm::DomTreeNode*> pending;
+                    if (const llvm::DomTreeNode* node = dominatorTree.getNode(&block))
+                        pending.assign(node->begin(), node->end());
+
+                    while (!pending.empty())
+                    {
+                        const llvm::DomTreeNode* node = pending.front();
+                        pending.pop_front();
+                        pending.insert(pending.end(), node->begin(), node->end());
+
+                        for (const llvm::Instruction& dominated : *node->getBlock())
+                        {
+                            ThreadEntrySet& live = result.liveEntriesAtInstruction[&dominated];
                             live.insert(leakedIt->second.begin(), leakedIt->second.end());
                         }
                     }
