@@ -186,6 +186,29 @@ Notes:
 - `--rules=...` acts as an explicit rule filter.
 - `--rules` and `--format` require `--analyze`.
 
+## Exit Codes
+
+The exit code is what a CI job reads, so it distinguishes *the analysis found
+something* from *the analysis could not run* — a pipeline that conflates them
+reports a crashed tool as a clean tree.
+
+| Code | Meaning |
+| --- | --- |
+| `0` | The analysis ran, and nothing tripped `--fail-on`. |
+| `1` | The analysis could not produce a verdict: bad arguments, a source that would not compile, a unit missing from a compilation database. |
+| `2` | The analysis ran and reported at or above the `--fail-on` severity. |
+
+`--fail-on=none|error|warning` selects the gate, and defaults to `none`: the
+tool reports, and the caller decides what is fatal. In CI you usually want
+`--fail-on=error`.
+
+```bash
+coretrace_concurrency_analyzer src/worker.c --analyze --format=sarif --fail-on=error
+```
+
+A unit that would not compile outranks the gate. `1` wins over `2`, because a
+tree that was never fully seen cannot be pronounced clean.
+
 ## Public API
 
 Compilation API:
