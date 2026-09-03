@@ -28,6 +28,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /src
 COPY . .
 
+# FetchContent clones the compiler backend, and it in turn clones the logger.
+# Git negotiates those over HTTP/2 by default, which several container network
+# stacks truncate mid-pack: the ref listing succeeds, the transfer dies as
+# "remote end hung up", and git then misreads the truncated response as an auth
+# challenge and asks for a username -- for a public repository. HTTP/1.1 carries
+# the same objects and costs nothing here, being a handful of clones at image
+# build time.
+RUN git config --global http.version HTTP/1.1
+
 # The same four cache variables every other build of this project sets; they
 # are what the compiler backend resolves clang against.
 RUN cmake -S . -B build -G Ninja \
