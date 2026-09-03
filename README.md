@@ -234,6 +234,21 @@ Outputs are `sarif-file`, `errors` and `warnings`. The SARIF is uploaded before
 the gate fails the job, so the run that stops the build is not the run whose
 findings get lost.
 
+When the gate fails the job, the action's `errors` and `warnings` outputs are
+**empty**: GitHub does not evaluate a composite action's outputs when it fails,
+so they are unavailable exactly when findings exist. Read `sarif-file` from the
+workspace instead, or set `fail-on: none` and decide for yourself:
+
+```yaml
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+    id: scan
+    with:
+      sources: src/worker.c
+      fail-on: none
+  - run: |
+      test "${{ steps.scan.outputs.errors }}" -eq 0 || exit 1
+```
+
 Note that `fail-on` defaults to `error` here while the CLI defaults to `none`:
 a CI job is asked to have an opinion, a command line is not.
 

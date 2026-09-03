@@ -69,13 +69,18 @@ jobs:
           sarif-file: bad.sarif
           upload-sarif: "false"
 
+      # Counts come from the SARIF, not from the action's outputs: GitHub does
+      # not evaluate a composite action's outputs when it fails, so they are
+      # empty exactly when the gate fired. The report on disk is what survives,
+      # which is also what a consumer has to read in this situation.
       - name: Check that the gate tripped
         run: |
-          echo "outcome=${{ steps.bad.outcome }} errors=${{ steps.bad.outputs.errors }}"
+          errors="$(jq '[.runs[].results[] | select(.level == "error")] | length' bad.sarif)"
+          echo "outcome=${{ steps.bad.outcome }} errors=${errors}"
           [[ "${{ steps.bad.outcome }}" == "failure" ]] \
             || { echo "::error::the gate did not fail the step"; exit 1; }
-          [[ "${{ steps.bad.outputs.errors }}" -ge 1 ]] \
-            || { echo "::error::expected at least one error result"; exit 1; }
+          [[ "${errors}" -ge 1 ]] \
+            || { echo "::error::expected at least one error result in the SARIF"; exit 1; }
 
   cross-tu:
     name: A compilation database made on the runner resolves in the container
