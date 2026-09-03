@@ -8,6 +8,23 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## v0.2.1
+
+- The action's examples referenced `@v1`, a tag that does not exist, so anyone
+  copying the documentation got "unable to resolve action". They now say `@v0`,
+  a moving tag the release workflow updates on every release. It is `v0` rather
+  than `v1` deliberately: this project is below 1.0.0 and its report format may
+  still change, which a `v1` tag would deny.
+- The release workflow triggers on `v*.*.*` instead of `v*`, so the moving tag
+  it maintains no longer triggers a release of itself.
+- The action accepts an `image` input overriding `version` with a full
+  reference, which lets CI point it at an image built from the commit under
+  test. Unset, nothing changes.
+- The smoke tests build that image from source, so a pull request breaking the
+  analyzer or the Dockerfile is caught before a tag rather than after one.
+- `docs/github-action.md` covers integrating the action in another project, and
+  an issue form collects what makes a wrong finding actionable.
+
 ## v0.2.0
 
 Two features, both aimed at running this in CI.

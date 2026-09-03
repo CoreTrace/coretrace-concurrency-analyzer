@@ -36,7 +36,7 @@ job fails when one reaches `error`.
 ## Which reference to use
 
 `@v0` follows releases: it is moved to each new one by the release workflow, so
-a fix reaches you without editing anything. `@v0.2.0` pins one exact release and
+a fix reaches you without editing anything. `@v0.2.1` pins one exact release and
 never changes.
 
 It is `v0` rather than the `v1` the ecosystem usually offers because this
@@ -142,7 +142,7 @@ that matters:
   belief.
 - The **rule id** (`DataRaceGlobal`, `MissingJoin`, …), shown on the alert and in
   the SARIF.
-- The **version**: `docker run --rm ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.2.0 --version`.
+- The **version**: `docker run --rm ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.2.1 --version`.
 - Whether it was a single file or a compilation database, since the two paths
   reason differently.
 - **Why it cannot happen.** This is the part only you can supply — the lock that

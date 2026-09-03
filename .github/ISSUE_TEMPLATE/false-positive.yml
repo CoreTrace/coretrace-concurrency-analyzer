@@ -50,7 +50,7 @@ body:
     attributes:
       label: Version
       description: "`coretrace_concurrency_analyzer --version`, or the image tag the action ran."
-      placeholder: 0.2.0
+      placeholder: 0.2.1
     validations:
       required: true
 
