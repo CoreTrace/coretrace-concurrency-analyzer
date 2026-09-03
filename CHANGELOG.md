@@ -8,7 +8,12 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
-## Unreleased
+## v0.1.1
+
+A packaging release: no analysis behaviour changed. The conventional commits
+since v0.1.0 are `ci` and `docs`, which move no version on their own, but the
+published artifact differs -- an arm64 machine can now pull the image at all --
+and a tag is the only thing that publishes it.
 
 - The published image is built for `linux/amd64` and `linux/arm64`, each on a
   native runner and merged into one manifest list, so a pull resolves without
