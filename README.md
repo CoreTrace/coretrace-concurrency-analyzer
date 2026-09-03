@@ -228,6 +228,7 @@ database made on the runner resolves unchanged inside the container.
 | `sarif-file` | `coretrace-concurrency.sarif` | Where the report is written |
 | `upload-sarif` | `true` | Send results to Code Scanning |
 | `version` | the release this action ships with | Analyzer image tag |
+| `image` | | Full image reference, overriding `version`; for testing an image built from source |
 | `extra-args` | | Forwarded to the analyzer verbatim |
 
 Outputs are `sarif-file`, `errors` and `warnings`. The SARIF is uploaded before

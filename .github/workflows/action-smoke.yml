@@ -1,16 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 #
-# Runs this repository's own action against this repository's own fixtures.
+# Runs this repository's own action against this repository's own fixtures,
+# using an image built from the commit under test.
 #
-# A composite action only proves itself by executing: nothing about mounting the
-# workspace, forwarding arguments, reading counts back out of the SARIF or
-# chaining the three steps is checked by parsing action.yml. This is where that
-# happens, and it turns into a standing regression -- a change that breaks the
-# action says so here rather than in a stranger's pipeline.
+# Two things are proven here that nothing else proves. That the action works at
+# all: no amount of valid YAML says whether the workspace mounts correctly,
+# whether arguments reach the analyzer, or whether the three steps chain in the
+# right order. And that this commit's image builds: outside this job the
+# Dockerfile is only ever built while cutting a tag, which is how three
+# successive v0.1.1 releases failed after the tag was already pushed.
 #
-# It runs the action from the checkout (uses: ./) so a pull request tests its
-# own version, while the analyzer itself comes from the published image named by
-# action.yml's default -- which also checks that default actually resolves.
+# One job rather than three, because every case needs the same locally built
+# image and passing a 1.8 GB image between runners costs more than it saves.
 name: action-smoke
 
 on:
@@ -22,15 +23,32 @@ permissions:
   contents: read
 
 jobs:
-  gate-passes:
-    name: A clean source leaves the job green
+  smoke:
+    name: The action works against an image built from this commit
     runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-      security-events: write
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # load, not push: this image exists for the length of this job and never
+      # reaches a registry.
+      - name: Build the analyzer image from source
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/release-linux.Dockerfile
+          platforms: linux/amd64
+          load: true
+          tags: coretrace-concurrency-analyzer:ci
+          cache-from: type=gha,scope=smoke
+          cache-to: type=gha,mode=max,scope=smoke
+
+      - name: The image reports a version
+        run: docker run --rm coretrace-concurrency-analyzer:ci --version
+
+      # ---- a clean source leaves the job green -------------------------
       - name: Analyze a source with nothing to report
         id: clean
         uses: ./
@@ -38,27 +56,19 @@ jobs:
           sources: tests/fixtures/hello.c
           fail-on: error
           sarif-file: clean.sarif
-          # Only on main: a fork's pull request is not granted
-          # security-events: write, and this must not fail for a contributor.
-          # The fixture reports nothing, so no alert is ever created.
-          upload-sarif: ${{ github.event_name == 'push' }}
+          image: coretrace-concurrency-analyzer:ci
+          upload-sarif: "false"
 
-      - name: Check the outputs
+      - name: Check the clean run
         run: |
           echo "errors=${{ steps.clean.outputs.errors }} warnings=${{ steps.clean.outputs.warnings }}"
           [[ "${{ steps.clean.outputs.errors }}" == "0" ]] || { echo "::error::expected no errors"; exit 1; }
-          test -s clean.sarif || { echo "::error::no SARIF was written"; exit 1; }
           jq -e '.runs[0].tool.driver.name' clean.sarif > /dev/null
 
-  gate-trips:
-    name: A known finding fails the job
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
+      # ---- a known finding fails the job -------------------------------
       # continue-on-error keeps the job alive so the failure itself can be
-      # asserted: a gate that never fires and a gate that fires correctly are
-      # otherwise indistinguishable from a green run.
+      # asserted: from a green run, a gate that never fires and a gate that
+      # fires correctly look identical.
       - name: Analyze a fixture that reports an error
         id: bad
         continue-on-error: true
@@ -67,12 +77,13 @@ jobs:
           sources: tests/fixtures/concurrency/missing-join/missing_join_multiple.c
           fail-on: error
           sarif-file: bad.sarif
+          image: coretrace-concurrency-analyzer:ci
           upload-sarif: "false"
 
-      # Counts come from the SARIF, not from the action's outputs: GitHub does
-      # not evaluate a composite action's outputs when it fails, so they are
-      # empty exactly when the gate fired. The report on disk is what survives,
-      # which is also what a consumer has to read in this situation.
+      # Counts come from the SARIF, not the action's outputs: GitHub does not
+      # evaluate a composite action's outputs when it fails, so they are empty
+      # exactly when the gate fired. The report on disk is what a consumer has
+      # to read in this situation too.
       - name: Check that the gate tripped
         run: |
           errors="$(jq '[.runs[].results[] | select(.level == "error")] | length' bad.sarif)"
@@ -82,16 +93,10 @@ jobs:
           [[ "${errors}" -ge 1 ]] \
             || { echo "::error::expected at least one error result in the SARIF"; exit 1; }
 
-  cross-tu:
-    name: A compilation database made on the runner resolves in the container
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-
-      # Written here rather than committed, because the point is precisely that
-      # a database carrying this runner's absolute paths still resolves inside
-      # the container -- which is why the action mounts the workspace at its own
-      # path instead of at /work.
+      # ---- cross-TU resolves inside the container ----------------------
+      # Written here rather than committed, because the point is that it carries
+      # this runner's absolute paths and still resolves inside the container --
+      # which is why the action mounts the workspace at its own path.
       - name: Generate a compilation database
         run: |
           dir="${GITHUB_WORKSPACE}/tests/fixtures/concurrency-project/cross-tu-data-race"
@@ -99,7 +104,6 @@ jobs:
             '[$d + "/main.c", $d + "/worker.c"]
              | map({directory: $d, file: ., command: ("/usr/bin/clang-20 -c " + . + " -o /dev/null")})' \
             > compile_commands.json
-          jq -r '.[].file' compile_commands.json
 
       - name: Analyze the whole project
         id: project
@@ -108,10 +112,11 @@ jobs:
           compile-commands: compile_commands.json
           fail-on: none
           sarif-file: project.sarif
+          image: coretrace-concurrency-analyzer:ci
           upload-sarif: "false"
 
       - name: Check that both units were seen
         run: |
           echo "errors=${{ steps.project.outputs.errors }} warnings=${{ steps.project.outputs.warnings }}"
           jq -e '.runs[0].results | length > 0' project.sarif > /dev/null \
-            || { echo "::error::cross-TU analysis reported nothing; the database likely did not resolve"; exit 1; }
+            || { echo "::error::cross-TU reported nothing; the database likely did not resolve"; exit 1; }
