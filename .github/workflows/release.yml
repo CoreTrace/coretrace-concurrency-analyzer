@@ -9,7 +9,11 @@ name: release
 
 on:
   push:
-    tags: ['v*']
+    # Semantic tags only. The moving major tag this workflow itself maintains
+    # (v0, later v1) also starts with v, and would otherwise trigger a release
+    # of itself -- one that fails immediately, since "v0" agrees with no
+    # project(VERSION).
+    tags: ['v*.*.*']
 
 permissions:
   contents: read
@@ -298,3 +302,16 @@ jobs:
             --notes-file notes.md \
             --generate-notes \
             --verify-tag
+
+      # Consumers of the action write @v0 and expect it to follow releases. A
+      # moving tag nobody remembers to move is worse than none, so it moves
+      # here -- last, so it only ever points at a release that exists.
+      - name: Move the major tag to this release
+        run: |
+          major="${GITHUB_REF_NAME#v}"
+          major="v${major%%.*}"
+          echo "moving ${major} to ${GITHUB_SHA}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f "${major}" "${GITHUB_SHA}"
+          git push -f origin "refs/tags/${major}"

@@ -203,7 +203,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v0
     with:
       sources: src/worker.c src/pool.c
       fail-on: error
@@ -212,7 +212,7 @@ steps:
 Whole-project analysis takes a compilation database instead:
 
 ```yaml
-  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v0
     with:
       compile-commands: build/compile_commands.json
 ```
@@ -245,7 +245,7 @@ so they are unavailable exactly when findings exist. Read `sarif-file` from the
 workspace instead, or set `fail-on: none` and decide for yourself:
 
 ```yaml
-  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v0
     id: scan
     with:
       sources: src/worker.c

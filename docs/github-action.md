@@ -24,7 +24,7 @@ jobs:
       security-events: write   # only while upload-sarif is true
     steps:
       - uses: actions/checkout@v4
-      - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+      - uses: CoreTrace/coretrace-concurrency-analyzer@v0
         with:
           sources: src/worker.c src/pool.c
           fail-on: error
@@ -32,6 +32,17 @@ jobs:
 
 Findings appear under the repository's **Security → Code scanning** tab, and the
 job fails when one reaches `error`.
+
+## Which reference to use
+
+`@v0` follows releases: it is moved to each new one by the release workflow, so
+a fix reaches you without editing anything. `@v0.2.0` pins one exact release and
+never changes.
+
+It is `v0` rather than the `v1` the ecosystem usually offers because this
+project is below 1.0.0 and says so: the report format may still change between
+minor releases. A `v1` tag would promise a stability that has not been declared.
+When 1.0.0 arrives, `@v1` starts being maintained the same way.
 
 ## A whole project
 
@@ -49,7 +60,7 @@ unit fails to compile. Generating it in the job is one step:
       - name: Generate a compilation database
         run: cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 
-      - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+      - uses: CoreTrace/coretrace-concurrency-analyzer@v0
         with:
           compile-commands: build/compile_commands.json
           fail-on: error
@@ -94,7 +105,7 @@ the counts, either read the SARIF the action wrote, or take the gate into your
 own hands:
 
 ```yaml
-      - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+      - uses: CoreTrace/coretrace-concurrency-analyzer@v0
         id: scan
         with:
           sources: src/worker.c
