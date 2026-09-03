@@ -17,20 +17,25 @@ FROM ${BASE_IMAGE} AS build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# apt.llvm.org is fetched twice per image, once per stage, and it is the one
-# download this build cannot proceed without.
+# apt.llvm.org is dual-stack, and the network a container gets during this
+# build resolves its AAAA record without having a route to it. wget does not
+# fall back to IPv4 once it has picked that address, so it fails outright --
+# while apt, which does fall back, pulls packages from the same host in the
+# same layer without trouble. The runners themselves are fine: the same
+# llvm.sh runs unaided in the build workflows, outside any container.
 #
-# -4 is the part that matters: the host resolves to IPv6, the build runners
-# have no IPv6 route, and wget fails every attempt with "Network is
-# unreachable" rather than falling back to IPv4 -- which is why apt, which does
-# fall back, downloads from the same host in the same layer without trouble.
+# The setting goes in /etc/wgetrc rather than on the command line because the
+# call that actually fails is not ours: llvm.sh probes the repository with its
+# own `wget --method=HEAD`, and reads an unreachable host as "your distribution
+# is not supported". A flag here would never reach that invocation.
 #
-# The retries cover an actually transient failure, and -nv keeps the reason in
+# The retries cover a genuinely transient failure, and -nv keeps the reason in
 # the log: with -q this failed silently behind an exit code.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ git gnupg lsb-release ninja-build \
         software-properties-common wget \
- && wget -4 -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
+ && echo 'inet4_only = on' >> /etc/wgetrc \
+ && wget -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
         https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
  && apt-get update && apt-get install -y --no-install-recommends \
         clang-20 libclang-20-dev llvm-20-dev libstdc++-14-dev \
@@ -67,7 +72,8 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates gnupg lsb-release software-properties-common wget \
- && wget -4 -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
+ && echo 'inet4_only = on' >> /etc/wgetrc \
+ && wget -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
         https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
  && apt-get update && apt-get install -y --no-install-recommends \
         clang-20 libstdc++-14-dev \
