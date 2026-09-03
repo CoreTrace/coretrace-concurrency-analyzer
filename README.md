@@ -257,6 +257,13 @@ workspace instead, or set `fail-on: none` and decide for yourself:
 Note that `fail-on` defaults to `error` here while the CLI defaults to `none`:
 a CI job is asked to have an opinion, a command line is not.
 
+## Performance
+
+[docs/performance.md](docs/performance.md) records what the analyzer costs on a
+real project, where the time goes, and what the profile says to do next. In
+short: compiling a 49-unit project to IR takes 11.5 s and analysing it 15.4 s,
+peaking above 1 GB of RSS.
+
 ## Exit Codes
 
 The exit code is what a CI job reads, so it distinguishes *the analysis found
