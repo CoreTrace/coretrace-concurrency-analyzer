@@ -7,8 +7,8 @@ When a new minor is released, the previous one stops being supported.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.1.x   | yes       |
-| < 0.1   | no (no such release) |
+| 0.2.x   | yes       |
+| < 0.2   | no        |
 
 ## Reporting a vulnerability
 
@@ -59,5 +59,5 @@ The published container image is one way to do that:
 
 ```sh
 docker run --rm --network none -v "$PWD:/work:ro" \
-  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.1.1 suspicious.c --analyze
+  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.2.0 suspicious.c --analyze
 ```

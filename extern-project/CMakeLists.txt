@@ -21,7 +21,7 @@ else()
   FetchContent_Declare(
     concurrency_analyzer
     GIT_REPOSITORY https://github.com/CoreTrace/coretrace-concurrency-analyzer.git
-    GIT_TAG v0.1.1
+    GIT_TAG v0.2.0
   )
 endif()
 

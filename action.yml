@@ -39,7 +39,7 @@ inputs:
   version:
     description: "Analyzer image tag to run. Defaults to the release this action ships with."
     required: false
-    default: "v0.1.1"
+    default: "v0.2.0"
   extra-args:
     description: "Extra arguments forwarded to the analyzer (space-separated)."
     required: false
