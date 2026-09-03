@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# Runs this repository's own action against this repository's own fixtures.
+#
+# A composite action only proves itself by executing: nothing about mounting the
+# workspace, forwarding arguments, reading counts back out of the SARIF or
+# chaining the three steps is checked by parsing action.yml. This is where that
+# happens, and it turns into a standing regression -- a change that breaks the
+# action says so here rather than in a stranger's pipeline.
+#
+# It runs the action from the checkout (uses: ./) so a pull request tests its
+# own version, while the analyzer itself comes from the published image named by
+# action.yml's default -- which also checks that default actually resolves.
+name: action-smoke
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate-passes:
+    name: A clean source leaves the job green
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Analyze a source with nothing to report
+        id: clean
+        uses: ./
+        with:
+          sources: tests/fixtures/hello.c
+          fail-on: error
+          sarif-file: clean.sarif
+          # Only on main: a fork's pull request is not granted
+          # security-events: write, and this must not fail for a contributor.
+          # The fixture reports nothing, so no alert is ever created.
+          upload-sarif: ${{ github.event_name == 'push' }}
+
+      - name: Check the outputs
+        run: |
+          echo "errors=${{ steps.clean.outputs.errors }} warnings=${{ steps.clean.outputs.warnings }}"
+          [[ "${{ steps.clean.outputs.errors }}" == "0" ]] || { echo "::error::expected no errors"; exit 1; }
+          test -s clean.sarif || { echo "::error::no SARIF was written"; exit 1; }
+          jq -e '.runs[0].tool.driver.name' clean.sarif > /dev/null
+
+  gate-trips:
+    name: A known finding fails the job
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # continue-on-error keeps the job alive so the failure itself can be
+      # asserted: a gate that never fires and a gate that fires correctly are
+      # otherwise indistinguishable from a green run.
+      - name: Analyze a fixture that reports an error
+        id: bad
+        continue-on-error: true
+        uses: ./
+        with:
+          sources: tests/fixtures/concurrency/missing-join/missing_join_multiple.c
+          fail-on: error
+          sarif-file: bad.sarif
+          upload-sarif: "false"
+
+      # Counts come from the SARIF, not from the action's outputs: GitHub does
+      # not evaluate a composite action's outputs when it fails, so they are
+      # empty exactly when the gate fired. The report on disk is what survives,
+      # which is also what a consumer has to read in this situation.
+      - name: Check that the gate tripped
+        run: |
+          errors="$(jq '[.runs[].results[] | select(.level == "error")] | length' bad.sarif)"
+          echo "outcome=${{ steps.bad.outcome }} errors=${errors}"
+          [[ "${{ steps.bad.outcome }}" == "failure" ]] \
+            || { echo "::error::the gate did not fail the step"; exit 1; }
+          [[ "${errors}" -ge 1 ]] \
+            || { echo "::error::expected at least one error result in the SARIF"; exit 1; }
+
+  cross-tu:
+    name: A compilation database made on the runner resolves in the container
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Written here rather than committed, because the point is precisely that
+      # a database carrying this runner's absolute paths still resolves inside
+      # the container -- which is why the action mounts the workspace at its own
+      # path instead of at /work.
+      - name: Generate a compilation database
+        run: |
+          dir="${GITHUB_WORKSPACE}/tests/fixtures/concurrency-project/cross-tu-data-race"
+          jq -n --arg d "${dir}" \
+            '[$d + "/main.c", $d + "/worker.c"]
+             | map({directory: $d, file: ., command: ("/usr/bin/clang-20 -c " + . + " -o /dev/null")})' \
+            > compile_commands.json
+          jq -r '.[].file' compile_commands.json
+
+      - name: Analyze the whole project
+        id: project
+        uses: ./
+        with:
+          compile-commands: compile_commands.json
+          fail-on: none
+          sarif-file: project.sarif
+          upload-sarif: "false"
+
+      - name: Check that both units were seen
+        run: |
+          echo "errors=${{ steps.project.outputs.errors }} warnings=${{ steps.project.outputs.warnings }}"
+          jq -e '.runs[0].results | length > 0' project.sarif > /dev/null \
+            || { echo "::error::cross-TU analysis reported nothing; the database likely did not resolve"; exit 1; }
