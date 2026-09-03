@@ -40,6 +40,10 @@ inputs:
     description: "Analyzer image tag to run. Defaults to the release this action ships with."
     required: false
     default: "v0.2.0"
+  image:
+    description: "Full image reference to run, overriding version. For testing an image built from source; leave empty to use the published release."
+    required: false
+    default: ""
   extra-args:
     description: "Extra arguments forwarded to the analyzer (space-separated)."
     required: false
@@ -69,7 +73,8 @@ runs:
       # interpolated into it. An action is a public entry point, and text
       # substituted straight into a shell is text that can end it.
       env:
-        IMAGE: "ghcr.io/coretrace/coretrace-concurrency-analyzer:${{ inputs.version }}"
+        IMAGE_OVERRIDE: ${{ inputs.image }}
+        VERSION: ${{ inputs.version }}
         SOURCES: ${{ inputs.sources }}
         COMPILE_COMMANDS: ${{ inputs.compile-commands }}
         RULES: ${{ inputs.rules }}
@@ -78,6 +83,11 @@ runs:
         EXTRA_ARGS: ${{ inputs.extra-args }}
       run: |
         set -uo pipefail
+
+        # An input default cannot reference another input, so the published
+        # reference is assembled here rather than declared above.
+        IMAGE="${IMAGE_OVERRIDE:-ghcr.io/coretrace/coretrace-concurrency-analyzer:${VERSION}}"
+        echo "analyzer image: ${IMAGE}"
 
         args=(--format=sarif "--rules=${RULES}" "--fail-on=${FAIL_ON}")
         if [[ -n "${COMPILE_COMMANDS}" ]]; then
