@@ -8,6 +8,18 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased
+
+- The published image is built for `linux/amd64` and `linux/arm64`, each on a
+  native runner and merged into one manifest list, so a pull resolves without
+  `--platform`. Emulating arm64 through QEMU was rejected: this image compiles
+  an LLVM-based analyzer, which emulated turns minutes into hours.
+- `docker/release-linux.Dockerfile` clones its dependencies over HTTP/1.1.
+  Git's HTTP/2 transfer is truncated by some container network stacks, and the
+  truncated response is misread as an auth challenge on a public repository.
+- `SECURITY.md` states which versions are supported and how to report a
+  vulnerability privately.
+
 ## v0.1.0
 
 First tagged release. It covers the 216 commits made before tagging began, which
