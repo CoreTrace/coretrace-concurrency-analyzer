@@ -49,7 +49,9 @@ behaviour rather than a defect.
 ship them; report those to the LLVM project.
 
 **Wrong analysis results.** A missed race or a false positive is a correctness
-bug, not a vulnerability. Open a normal issue.
+bug, not a vulnerability. Open a [false positive
+report](https://github.com/CoreTrace/coretrace-concurrency-analyzer/issues/new?template=false-positive.yml)
+instead; it asks for the reproducer that makes one actionable.
 
 ## Analysing code you do not trust
 
@@ -59,5 +61,5 @@ The published container image is one way to do that:
 
 ```sh
 docker run --rm --network none -v "$PWD:/work:ro" \
-  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.2.0 suspicious.c --analyze
+  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.2.1 suspicious.c --analyze
 ```

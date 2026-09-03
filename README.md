@@ -105,7 +105,7 @@ installed beyond a container runtime:
 
 ```bash
 docker run --rm -v "$PWD:/work" \
-  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.2.0 file.c --analyze
+  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.2.1 file.c --analyze
 ```
 
 To build a specific release from source instead, consume the tag through CMake:
@@ -114,7 +114,7 @@ To build a specific release from source instead, consume the tag through CMake:
 FetchContent_Declare(
   concurrency_analyzer
   GIT_REPOSITORY https://github.com/CoreTrace/coretrace-concurrency-analyzer.git
-  GIT_TAG v0.2.0
+  GIT_TAG v0.2.1
 )
 ```
 
@@ -192,6 +192,10 @@ Notes:
 so a job starts in seconds rather than installing LLVM and building the
 analyzer.
 
+[docs/github-action.md](docs/github-action.md) carries the complete workflows,
+how to generate a compilation database on the runner, and what to do about a
+finding you believe is wrong. What follows is the short version.
+
 ```yaml
 permissions:
   contents: read
@@ -199,7 +203,7 @@ permissions:
 
 steps:
   - uses: actions/checkout@v4
-  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v0
     with:
       sources: src/worker.c src/pool.c
       fail-on: error
@@ -208,7 +212,7 @@ steps:
 Whole-project analysis takes a compilation database instead:
 
 ```yaml
-  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v0
     with:
       compile-commands: build/compile_commands.json
 ```
@@ -241,7 +245,7 @@ so they are unavailable exactly when findings exist. Read `sarif-file` from the
 workspace instead, or set `fail-on: none` and decide for yourself:
 
 ```yaml
-  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v0
     id: scan
     with:
       sources: src/worker.c

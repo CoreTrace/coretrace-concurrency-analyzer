@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 cmake_minimum_required(VERSION 3.21)
-project(coretrace_concurrency_analyzer VERSION 0.2.0)
+project(coretrace_concurrency_analyzer VERSION 0.2.1)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/cmake")
 include(CheckLLVMVersion OPTIONAL)
