@@ -105,7 +105,7 @@ installed beyond a container runtime:
 
 ```bash
 docker run --rm -v "$PWD:/work" \
-  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.1.1 file.c --analyze
+  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.2.0 file.c --analyze
 ```
 
 To build a specific release from source instead, consume the tag through CMake:
@@ -114,7 +114,7 @@ To build a specific release from source instead, consume the tag through CMake:
 FetchContent_Declare(
   concurrency_analyzer
   GIT_REPOSITORY https://github.com/CoreTrace/coretrace-concurrency-analyzer.git
-  GIT_TAG v0.1.1
+  GIT_TAG v0.2.0
 )
 ```
 
@@ -185,6 +185,57 @@ Notes:
 - `--analyze` enables all currently available rules by default.
 - `--rules=...` acts as an explicit rule filter.
 - `--rules` and `--format` require `--analyze`.
+
+## GitHub Action
+
+`action.yml` at the root of this repository runs the published container image,
+so a job starts in seconds rather than installing LLVM and building the
+analyzer.
+
+```yaml
+permissions:
+  contents: read
+  security-events: write   # only needed while upload-sarif is true
+
+steps:
+  - uses: actions/checkout@v4
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+    with:
+      sources: src/worker.c src/pool.c
+      fail-on: error
+```
+
+Whole-project analysis takes a compilation database instead:
+
+```yaml
+  - uses: CoreTrace/coretrace-concurrency-analyzer@v1
+    with:
+      compile-commands: build/compile_commands.json
+```
+
+**Generate that database on the runner.** It records absolute paths and the
+toolchain that produced it, so one generated on a developer's macOS machine
+names an SDK the Linux container does not have, and every unit fails to
+compile. The action mounts the workspace at its own path precisely so a
+database made on the runner resolves unchanged inside the container.
+
+| Input | Default | |
+| --- | --- | --- |
+| `sources` | | Files to analyze, space-separated |
+| `compile-commands` | | Compilation database; takes precedence over `sources` |
+| `rules` | `all` | Comma-separated rule selection |
+| `fail-on` | `error` | `none`, `error`, or `warning` |
+| `sarif-file` | `coretrace-concurrency.sarif` | Where the report is written |
+| `upload-sarif` | `true` | Send results to Code Scanning |
+| `version` | the release this action ships with | Analyzer image tag |
+| `extra-args` | | Forwarded to the analyzer verbatim |
+
+Outputs are `sarif-file`, `errors` and `warnings`. The SARIF is uploaded before
+the gate fails the job, so the run that stops the build is not the run whose
+findings get lost.
+
+Note that `fail-on` defaults to `error` here while the CLI defaults to `none`:
+a CI job is asked to have an opinion, a command line is not.
 
 ## Exit Codes
 

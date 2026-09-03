@@ -8,6 +8,25 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## v0.2.0
+
+Two features, both aimed at running this in CI.
+
+- `--fail-on=none|error|warning` gates the exit code on findings. The analyzer
+  used to exit `0` whatever it reported, which made a CI job incapable of
+  failing. Findings exit `2`, distinct from the `1` that means the analysis
+  could not conclude, so a pipeline cannot mistake a crashed tool for a clean
+  tree. The CLI default stays `none`.
+- `action.yml` publishes a GitHub Action that runs the released container
+  image, so a job starts in seconds instead of building the analyzer. It writes
+  SARIF, uploads it to Code Scanning before the gate fails the job, and exposes
+  `errors` and `warnings` as outputs. Its gate defaults to `error`: a CI job is
+  asked to have an opinion, a command line is not.
+
+The release workflow now also refuses a tag whose version disagrees with the
+action's default image, which would otherwise analyse with the previous release
+while claiming to be the current one.
+
 ## v0.1.1
 
 A packaging release: no analysis behaviour changed. The conventional commits

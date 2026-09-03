@@ -1,0 +1,145 @@
+# SPDX-License-Identifier: Apache-2.0
+#
+# The metadata sits at the repository root because the GitHub Marketplace only
+# lists actions defined there; an action in a subdirectory is usable but not
+# publishable.
+name: "CoreTrace Concurrency Analyzer"
+description: "Concurrency analysis for C/C++ — data races, missing joins, lock-order inversions, unsafe signal handlers."
+author: "CoreTrace"
+
+branding:
+  icon: "git-merge"
+  color: "purple"
+
+inputs:
+  sources:
+    description: "Source files to analyze (space-separated). Ignored when compile-commands is set."
+    required: false
+    default: ""
+  compile-commands:
+    description: "Path to a compile_commands.json, for whole-project (cross-TU) analysis."
+    required: false
+    default: ""
+  rules:
+    description: "Comma-separated rule selection: data-race, missing-join, deadlock-lock-order, condition-wait, fork-after-thread, unreaped-child, thread-arg-escape, unsafe-signal-handler, or all."
+    required: false
+    default: "all"
+  fail-on:
+    description: "CI gate: none (never fail the job), error, or warning (fail on errors and warnings)."
+    required: false
+    default: "error"
+  sarif-file:
+    description: "Where to write the SARIF report."
+    required: false
+    default: "coretrace-concurrency.sarif"
+  upload-sarif:
+    description: "Upload the SARIF to GitHub Code Scanning. Needs security-events: write."
+    required: false
+    default: "true"
+  version:
+    description: "Analyzer image tag to run. Defaults to the release this action ships with."
+    required: false
+    default: "v0.2.0"
+  extra-args:
+    description: "Extra arguments forwarded to the analyzer (space-separated)."
+    required: false
+    default: ""
+
+outputs:
+  sarif-file:
+    description: "Path to the generated SARIF report."
+    value: ${{ steps.analyze.outputs.sarif-file }}
+  errors:
+    description: "Number of error-level results."
+    value: ${{ steps.analyze.outputs.errors }}
+  warnings:
+    description: "Number of warning-level results."
+    value: ${{ steps.analyze.outputs.warnings }}
+
+runs:
+  using: "composite"
+  steps:
+    # The published image is the entire engine: nothing is compiled here, so a
+    # job starts in seconds instead of installing LLVM and building the
+    # analyzer on every run.
+    - name: Run the analyzer
+      id: analyze
+      shell: bash
+      # Inputs reach the script as environment variables rather than being
+      # interpolated into it. An action is a public entry point, and text
+      # substituted straight into a shell is text that can end it.
+      env:
+        IMAGE: "ghcr.io/coretrace/coretrace-concurrency-analyzer:${{ inputs.version }}"
+        SOURCES: ${{ inputs.sources }}
+        COMPILE_COMMANDS: ${{ inputs.compile-commands }}
+        RULES: ${{ inputs.rules }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        SARIF_FILE: ${{ inputs.sarif-file }}
+        EXTRA_ARGS: ${{ inputs.extra-args }}
+      run: |
+        set -uo pipefail
+
+        args=(--format=sarif "--rules=${RULES}" "--fail-on=${FAIL_ON}")
+        if [[ -n "${COMPILE_COMMANDS}" ]]; then
+          args=("--compile-commands=${COMPILE_COMMANDS}" "${args[@]}")
+        elif [[ -n "${SOURCES}" ]]; then
+          read -r -a source_list <<< "${SOURCES}"
+          args=("${source_list[@]}" --analyze "${args[@]}")
+        else
+          echo "::error::set either 'sources' or 'compile-commands'"
+          exit 1
+        fi
+        read -r -a extra_list <<< "${EXTRA_ARGS}"
+
+        # The workspace is mounted at its own path rather than at /work: a
+        # compile_commands.json generated on this runner holds absolute paths,
+        # and they have to resolve identically inside the container.
+        docker run --rm \
+          -v "${GITHUB_WORKSPACE}:${GITHUB_WORKSPACE}" \
+          -w "${GITHUB_WORKSPACE}" \
+          "${IMAGE}" "${args[@]}" ${extra_list[@]+"${extra_list[@]}"} \
+          > "${SARIF_FILE}"
+        status=$?
+
+        # 1 means no verdict was produced, so there is no report to read and
+        # nothing to upload; whatever landed in the file is a diagnostic.
+        if [[ ${status} -eq 1 ]]; then
+          echo "::error::the analysis could not run"
+          cat "${SARIF_FILE}" >&2 || true
+          exit 1
+        fi
+
+        errors=$(jq '[.runs[].results[] | select(.level == "error")] | length' "${SARIF_FILE}")
+        warnings=$(jq '[.runs[].results[] | select(.level == "warning")] | length' "${SARIF_FILE}")
+        {
+          echo "sarif-file=${SARIF_FILE}"
+          echo "errors=${errors}"
+          echo "warnings=${warnings}"
+          echo "gate-status=${status}"
+        } >> "${GITHUB_OUTPUT}"
+
+        {
+          echo "### CoreTrace Concurrency Analyzer"
+          echo ""
+          echo "${errors} error(s), ${warnings} warning(s) — gate \`${FAIL_ON}\`"
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+    # Uploaded before the gate fails the job, so findings still reach Code
+    # Scanning on the run that stops the build -- the run whose findings matter
+    # most is otherwise the one that loses them.
+    - name: Upload SARIF to Code Scanning
+      if: inputs.upload-sarif == 'true'
+      uses: github/codeql-action/upload-sarif@v3
+      with:
+        sarif_file: ${{ inputs.sarif-file }}
+
+    - name: Fail if the gate tripped
+      if: steps.analyze.outputs.gate-status != '0'
+      shell: bash
+      env:
+        FAIL_ON: ${{ inputs.fail-on }}
+        ERRORS: ${{ steps.analyze.outputs.errors }}
+        WARNINGS: ${{ steps.analyze.outputs.warnings }}
+      run: |
+        echo "::error::${ERRORS} error(s) and ${WARNINGS} warning(s) reached the '${FAIL_ON}' gate"
+        exit 1
