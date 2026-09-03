@@ -1,0 +1,85 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Wrong analysis result
+description: A finding that cannot happen, or one that should have been reported and was not.
+title: "[analysis] "
+labels: ["analysis"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A rule is fixed by writing a test that fails on today's build and passes
+        on the next one. That test is the snippet you paste below — it is the one
+        field that decides whether this can be acted on.
+
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What happened
+      options:
+        - A finding that cannot happen (false positive)
+        - A problem that was not reported (false negative)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproducer
+    attributes:
+      label: Source that reproduces it
+      description: As small as you can make it, and self-contained if possible.
+      render: c
+      placeholder: |
+        #include <pthread.h>
+
+        static int shared;
+
+        static void *worker(void *arg) { shared++; return NULL; }
+    validations:
+      required: true
+
+  - type: input
+    id: rule
+    attributes:
+      label: Rule
+      description: The ruleId on the alert or in the SARIF.
+      placeholder: DataRaceGlobal
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: "`coretrace_concurrency_analyzer --version`, or the image tag the action ran."
+      placeholder: 0.2.0
+    validations:
+      required: true
+
+  - type: dropdown
+    id: mode
+    attributes:
+      label: How it was analyzed
+      description: The two paths reason differently, so this changes where to look.
+      options:
+        - A single file
+        - A compilation database (--compile-commands)
+    validations:
+      required: true
+
+  - type: textarea
+    id: reasoning
+    attributes:
+      label: Why it cannot happen — or why it should have been caught
+      description: |
+        The part only you can supply: the lock always held, the ordering the
+        analyzer cannot see, the branch that is unreachable.
+    validations:
+      required: true
+
+  - type: textarea
+    id: command
+    attributes:
+      label: Command or workflow step
+      description: How the analyzer was invoked. Optional, but it settles questions about flags.
+      render: shell
+    validations:
+      required: false

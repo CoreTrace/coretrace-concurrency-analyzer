@@ -192,6 +192,10 @@ Notes:
 so a job starts in seconds rather than installing LLVM and building the
 analyzer.
 
+[docs/github-action.md](docs/github-action.md) carries the complete workflows,
+how to generate a compilation database on the runner, and what to do about a
+finding you believe is wrong. What follows is the short version.
+
 ```yaml
 permissions:
   contents: read
