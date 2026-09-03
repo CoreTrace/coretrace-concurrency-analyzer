@@ -24,6 +24,10 @@
 
 namespace
 {
+    // 2, not 1: 1 already means the analysis failed to produce a verdict, and the
+    // difference matters to whoever reads the job.
+    constexpr int kFindingsExitCode = 2;
+
     void printHelp()
     {
         llvm::outs()
@@ -51,7 +55,12 @@ namespace
             << "  --verbose                Print request details for debugging\n"
             << "  --                       Forward all following args to compilerlib\n"
             << "  -h, --help               Show this help message\n"
-            << "  --version                Print the analyzer version and exit\n\n"
+            << "  --version                Print the analyzer version and exit\n"
+            << "  --fail-on=none|error|warning\n"
+            << "                           Exit " + std::to_string(kFindingsExitCode) +
+                   " when the analysis reports at that severity or\n"
+                   "                           above (default: none). Exit 1 still means the\n"
+                   "                           analysis could not run.\n\n"
             << "Examples:\n"
             << "  coretrace_concurrency_analyzer test.c --ir-format=ll\n"
             << "  coretrace_concurrency_analyzer test.c --ir-format=bc --compile-arg=-Iinclude\n"
@@ -303,6 +312,51 @@ namespace
         };
     }
 
+    // What a caller running in CI wants to know from the exit code alone: did the
+    // analysis find something worth failing a build over. Kept separate from the
+    // codes that mean the analysis could not run at all, because a pipeline that
+    // cannot tell those apart reports a crashed tool as a clean tree.
+    enum class FailOn
+    {
+        None,
+        Error,
+        Warning,
+    };
+
+    bool parseFailOn(std::string_view value, FailOn& out)
+    {
+        if (value == "none")
+        {
+            out = FailOn::None;
+            return true;
+        }
+        if (value == "error")
+        {
+            out = FailOn::Error;
+            return true;
+        }
+        if (value == "warning")
+        {
+            out = FailOn::Warning;
+            return true;
+        }
+        return false;
+    }
+
+    int gateExitCode(FailOn policy, const ctrace::concurrency::DiagnosticSummary& summary)
+    {
+        switch (policy)
+        {
+        case FailOn::None:
+            return 0;
+        case FailOn::Error:
+            return summary.error > 0 ? kFindingsExitCode : 0;
+        case FailOn::Warning:
+            return (summary.error > 0 || summary.warning > 0) ? kFindingsExitCode : 0;
+        }
+        return 0;
+    }
+
     void
     emitStructuredReport(const ctrace::concurrency::DiagnosticReport& report,
                          const ctrace::concurrency::internal::reporting::RenderContext& context,
@@ -370,7 +424,8 @@ namespace
 
     int analyzeProject(const std::string& databasePath,
                        const ctrace::concurrency::AnalysisOptions& analysisOptions,
-                       ctrace::concurrency::OutputFormat outputFormat, bool verbose, bool useCache)
+                       ctrace::concurrency::OutputFormat outputFormat, bool verbose, bool useCache,
+                       FailOn failOn)
     {
         namespace internal = ctrace::concurrency::internal;
 
@@ -523,7 +578,10 @@ namespace
         emitStructuredReport(analysis.report, makeRenderContext(databasePath, duration),
                              outputFormat);
 
-        return failedSources.empty() ? 0 : 1;
+        if (!failedSources.empty())
+            return 1;
+
+        return gateExitCode(failOn, analysis.report.diagnosticsSummary);
     }
 } // namespace
 
@@ -533,6 +591,7 @@ int main(int argc, char** argv)
     bool analyze = false;
     bool passthroughMode = false;
     bool verbose = false;
+    FailOn failOn = FailOn::None;
     bool outputFormatExplicit = false;
     bool rulesExplicit = false;
     std::string compileCommandsPath;
@@ -587,6 +646,17 @@ int main(int argc, char** argv)
             if (!parseFormat(arg.substr(formatPrefix.size()), request.format))
             {
                 llvm::errs() << "Unsupported --ir-format value: " << std::string(arg) << "\n";
+                return 1;
+            }
+            continue;
+        }
+
+        constexpr std::string_view failOnPrefix = "--fail-on=";
+        if (arg.rfind(failOnPrefix, 0) == 0)
+        {
+            if (!parseFailOn(arg.substr(failOnPrefix.size()), failOn))
+            {
+                llvm::errs() << "Unsupported --fail-on value: " << std::string(arg) << "\n";
                 return 1;
             }
             continue;
@@ -681,8 +751,8 @@ int main(int argc, char** argv)
             return 1;
         }
 
-        return analyzeProject(compileCommandsPath, analysisOptions, outputFormat, verbose,
-                              useCache);
+        return analyzeProject(compileCommandsPath, analysisOptions, outputFormat, verbose, useCache,
+                              failOn);
     }
 
     if (request.inputFile.empty())
@@ -747,7 +817,7 @@ int main(int argc, char** argv)
             std::chrono::duration_cast<std::chrono::milliseconds>(finishedAt - startedAt).count();
 
         emitStructuredReport(report, makeRenderContext(request.inputFile, duration), outputFormat);
-        return 0;
+        return gateExitCode(failOn, report.diagnosticsSummary);
     }
 
     const std::size_t payloadBytes = (request.format == ctrace::concurrency::IRFormat::BC)
