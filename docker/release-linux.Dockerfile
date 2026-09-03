@@ -18,14 +18,19 @@ FROM ${BASE_IMAGE} AS build
 ENV DEBIAN_FRONTEND=noninteractive
 
 # apt.llvm.org is fetched twice per image, once per stage, and it is the one
-# download this build cannot proceed without. A single transient failure there
-# used to abort a release build -- and with -q, wget reported nothing but its
-# exit code, which says "network failure" and not much else. Retries, and
-# -nv so a real failure is legible in the log.
+# download this build cannot proceed without.
+#
+# -4 is the part that matters: the host resolves to IPv6, the build runners
+# have no IPv6 route, and wget fails every attempt with "Network is
+# unreachable" rather than falling back to IPv4 -- which is why apt, which does
+# fall back, downloads from the same host in the same layer without trouble.
+#
+# The retries cover an actually transient failure, and -nv keeps the reason in
+# the log: with -q this failed silently behind an exit code.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ git gnupg lsb-release ninja-build \
         software-properties-common wget \
- && wget -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
+ && wget -4 -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
         https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
  && apt-get update && apt-get install -y --no-install-recommends \
         clang-20 libclang-20-dev llvm-20-dev libstdc++-14-dev \
@@ -62,7 +67,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates gnupg lsb-release software-properties-common wget \
- && wget -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
+ && wget -4 -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
         https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
  && apt-get update && apt-get install -y --no-install-recommends \
         clang-20 libstdc++-14-dev \
