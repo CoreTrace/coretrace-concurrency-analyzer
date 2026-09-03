@@ -43,6 +43,26 @@ jobs:
             exit 1
           fi
 
+      # The action runs the image by tag. If its default is left behind, the
+      # action keeps analysing with the previous release while claiming to be
+      # this one, and nothing else would ever say so.
+      - name: Compare tag against the action's default image
+        run: |
+          action_version="$(
+            sed -n '/^  version:/,/^  [a-z]/p' action.yml \
+              | sed -n 's/^ *default: *"\(v[0-9.]*\)".*/\1/p'
+          )"
+          echo "tag:    ${GITHUB_REF_NAME}"
+          echo "action: ${action_version}"
+          if [[ -z "${action_version}" ]]; then
+            echo "::error::could not read the default version out of action.yml"
+            exit 1
+          fi
+          if [[ "${action_version}" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::error::action.yml runs ${action_version} but this tag is ${GITHUB_REF_NAME}; update its version input default before tagging"
+            exit 1
+          fi
+
   verify:
     name: Build and test (${{ matrix.runner }})
     needs: version-agrees
