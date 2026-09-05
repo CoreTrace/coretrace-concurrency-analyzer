@@ -3,6 +3,7 @@
 
 #include <optional>
 #include <string_view>
+#include <unordered_map>
 
 namespace llvm
 {
@@ -78,5 +79,14 @@ namespace ctrace::concurrency::internal::analysis
         [[nodiscard]] const llvm::Function*
         installedSignalHandler(const llvm::CallBase& call) const;
         [[nodiscard]] static std::string_view toString(CallKind kind);
+
+      private:
+        /// What classify() answers depends only on the callee, and a translation unit calls the
+        /// same handful of functions over and over. Mutable because the answer is a memo, not a
+        /// change of state: a classifier remains logically const.
+        ///
+        /// Not synchronised, and does not need to be: cross-TU analysis parallelises per unit,
+        /// and each unit's facts are built with their own classifier.
+        mutable std::unordered_map<const llvm::Function*, CallKind> classificationCache_;
     };
 } // namespace ctrace::concurrency::internal::analysis
