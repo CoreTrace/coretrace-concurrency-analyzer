@@ -414,99 +414,117 @@ namespace ctrace::concurrency::internal::analysis
         return nullptr;
     }
 
+    namespace
+    {
+        // Thirty-odd predicates tried in order, each comparing against string literals. What it
+        // answers depends on the callee alone, so it belongs once per function rather than once
+        // per call site; classify() below remembers the answer.
+        CallKind classifyCallee(const llvm::Function& callee)
+        {
+            const std::string canonical = canonicalName(callee);
+            const llvm::StringRef name = canonical;
+            if (matchesPlainSymbol(name, "pthread_create"))
+                return CallKind::PThreadCreate;
+            if (matchesPlainSymbol(name, "pthread_join"))
+                return CallKind::PThreadJoin;
+            if (matchesPlainSymbol(name, "pthread_detach"))
+                return CallKind::PThreadDetach;
+            if (matchesPlainSymbol(name, "fork") || matchesPlainSymbol(name, "vfork"))
+                return CallKind::ProcessFork;
+            if (matchesPlainSymbol(name, "execl") || matchesPlainSymbol(name, "execlp") ||
+                matchesPlainSymbol(name, "execle") || matchesPlainSymbol(name, "execv") ||
+                matchesPlainSymbol(name, "execvp") || matchesPlainSymbol(name, "execvpe") ||
+                matchesPlainSymbol(name, "execve") || matchesPlainSymbol(name, "posix_spawn") ||
+                matchesPlainSymbol(name, "posix_spawnp"))
+            {
+                return CallKind::ProcessExec;
+            }
+            if (matchesPlainSymbol(name, "wait") || matchesPlainSymbol(name, "waitpid") ||
+                matchesPlainSymbol(name, "waitid") || matchesPlainSymbol(name, "wait3") ||
+                matchesPlainSymbol(name, "wait4"))
+            {
+                return CallKind::ProcessWait;
+            }
+            if (matchesPlainSymbol(name, "pthread_cond_wait") ||
+                matchesPlainSymbol(name, "pthread_cond_timedwait"))
+            {
+                return CallKind::CondWaitWithoutPredicate;
+            }
+            if (matchesPlainSymbol(name, "pthread_mutex_lock"))
+                return CallKind::PThreadMutexLock;
+            if (matchesPlainSymbol(name, "pthread_mutex_unlock"))
+                return CallKind::PThreadMutexUnlock;
+            if (matchesPlainSymbol(name, "pthread_mutex_trylock") ||
+                matchesPlainSymbol(name, "pthread_mutex_timedlock"))
+                return CallKind::PThreadMutexTryLock;
+            if (matchesPlainSymbol(name, "pthread_rwlock_rdlock") ||
+                matchesPlainSymbol(name, "pthread_rwlock_wrlock"))
+                return CallKind::PThreadRwLockAcquire;
+            if (matchesPlainSymbol(name, "pthread_rwlock_tryrdlock") ||
+                matchesPlainSymbol(name, "pthread_rwlock_trywrlock") ||
+                matchesPlainSymbol(name, "pthread_rwlock_timedrdlock") ||
+                matchesPlainSymbol(name, "pthread_rwlock_timedwrlock"))
+                return CallKind::PThreadRwLockTryAcquire;
+            if (matchesPlainSymbol(name, "pthread_rwlock_unlock"))
+                return CallKind::PThreadRwLockUnlock;
+            if (matchesPlainSymbol(name, "pthread_spin_lock"))
+                return CallKind::PThreadSpinLock;
+            if (matchesPlainSymbol(name, "pthread_spin_unlock"))
+                return CallKind::PThreadSpinUnlock;
+            if (matchesPlainSymbol(name, "pthread_spin_trylock"))
+                return CallKind::PThreadSpinTryLock;
+            if (matchesPlainSymbol(name, "pthread_mutex_init"))
+                return CallKind::PThreadMutexInit;
+            if (matchesPlainSymbol(name, "pthread_mutexattr_settype"))
+                return CallKind::PThreadMutexAttrSetType;
+            if (isStdJThreadCtor(name))
+                return CallKind::StdJThreadCtor;
+            if (isStdThreadMove(name))
+                return CallKind::StdThreadMove;
+            if (isStdThreadCtor(name))
+                return CallKind::StdThreadCtor;
+            if (isStdThreadJoin(name))
+                return CallKind::StdThreadJoin;
+            if (isStdThreadDetach(name))
+                return CallKind::StdThreadDetach;
+            if (isStdThreadDtor(name))
+                return CallKind::StdThreadDtor;
+            if (isStdMutexTryLock(name))
+                return CallKind::StdMutexTryLock;
+            if (isStdMutexLock(name))
+                return CallKind::StdMutexLock;
+            if (isStdMutexUnlock(name))
+                return CallKind::StdMutexUnlock;
+            if (const std::optional<bool> rechecks = conditionWaitRechecksItself(name);
+                rechecks.has_value())
+            {
+                return *rechecks ? CallKind::CondWaitWithPredicate
+                                 : CallKind::CondWaitWithoutPredicate;
+            }
+            if (isStdLockGuardDtor(name))
+                return CallKind::StdLockGuardDtor;
+            if (isStdLockGuardCtor(name))
+            {
+                return isDeferredLockGuardCtor(name) ? CallKind::StdLockGuardDeferredCtor
+                                                     : CallKind::StdLockGuardCtor;
+            }
+            return CallKind::Unknown;
+        }
+    } // namespace
+
     CallKind ConcurrencySymbolClassifier::classify(const llvm::CallBase& call) const
     {
         const llvm::Function* callee = directCallee(call);
         if (callee == nullptr)
             return CallKind::Unknown;
 
-        const std::string canonical = canonicalName(*callee);
-        const llvm::StringRef name = canonical;
-        if (matchesPlainSymbol(name, "pthread_create"))
-            return CallKind::PThreadCreate;
-        if (matchesPlainSymbol(name, "pthread_join"))
-            return CallKind::PThreadJoin;
-        if (matchesPlainSymbol(name, "pthread_detach"))
-            return CallKind::PThreadDetach;
-        if (matchesPlainSymbol(name, "fork") || matchesPlainSymbol(name, "vfork"))
-            return CallKind::ProcessFork;
-        if (matchesPlainSymbol(name, "execl") || matchesPlainSymbol(name, "execlp") ||
-            matchesPlainSymbol(name, "execle") || matchesPlainSymbol(name, "execv") ||
-            matchesPlainSymbol(name, "execvp") || matchesPlainSymbol(name, "execvpe") ||
-            matchesPlainSymbol(name, "execve") || matchesPlainSymbol(name, "posix_spawn") ||
-            matchesPlainSymbol(name, "posix_spawnp"))
-        {
-            return CallKind::ProcessExec;
-        }
-        if (matchesPlainSymbol(name, "wait") || matchesPlainSymbol(name, "waitpid") ||
-            matchesPlainSymbol(name, "waitid") || matchesPlainSymbol(name, "wait3") ||
-            matchesPlainSymbol(name, "wait4"))
-        {
-            return CallKind::ProcessWait;
-        }
-        if (matchesPlainSymbol(name, "pthread_cond_wait") ||
-            matchesPlainSymbol(name, "pthread_cond_timedwait"))
-        {
-            return CallKind::CondWaitWithoutPredicate;
-        }
-        if (matchesPlainSymbol(name, "pthread_mutex_lock"))
-            return CallKind::PThreadMutexLock;
-        if (matchesPlainSymbol(name, "pthread_mutex_unlock"))
-            return CallKind::PThreadMutexUnlock;
-        if (matchesPlainSymbol(name, "pthread_mutex_trylock") ||
-            matchesPlainSymbol(name, "pthread_mutex_timedlock"))
-            return CallKind::PThreadMutexTryLock;
-        if (matchesPlainSymbol(name, "pthread_rwlock_rdlock") ||
-            matchesPlainSymbol(name, "pthread_rwlock_wrlock"))
-            return CallKind::PThreadRwLockAcquire;
-        if (matchesPlainSymbol(name, "pthread_rwlock_tryrdlock") ||
-            matchesPlainSymbol(name, "pthread_rwlock_trywrlock") ||
-            matchesPlainSymbol(name, "pthread_rwlock_timedrdlock") ||
-            matchesPlainSymbol(name, "pthread_rwlock_timedwrlock"))
-            return CallKind::PThreadRwLockTryAcquire;
-        if (matchesPlainSymbol(name, "pthread_rwlock_unlock"))
-            return CallKind::PThreadRwLockUnlock;
-        if (matchesPlainSymbol(name, "pthread_spin_lock"))
-            return CallKind::PThreadSpinLock;
-        if (matchesPlainSymbol(name, "pthread_spin_unlock"))
-            return CallKind::PThreadSpinUnlock;
-        if (matchesPlainSymbol(name, "pthread_spin_trylock"))
-            return CallKind::PThreadSpinTryLock;
-        if (matchesPlainSymbol(name, "pthread_mutex_init"))
-            return CallKind::PThreadMutexInit;
-        if (matchesPlainSymbol(name, "pthread_mutexattr_settype"))
-            return CallKind::PThreadMutexAttrSetType;
-        if (isStdJThreadCtor(name))
-            return CallKind::StdJThreadCtor;
-        if (isStdThreadMove(name))
-            return CallKind::StdThreadMove;
-        if (isStdThreadCtor(name))
-            return CallKind::StdThreadCtor;
-        if (isStdThreadJoin(name))
-            return CallKind::StdThreadJoin;
-        if (isStdThreadDetach(name))
-            return CallKind::StdThreadDetach;
-        if (isStdThreadDtor(name))
-            return CallKind::StdThreadDtor;
-        if (isStdMutexTryLock(name))
-            return CallKind::StdMutexTryLock;
-        if (isStdMutexLock(name))
-            return CallKind::StdMutexLock;
-        if (isStdMutexUnlock(name))
-            return CallKind::StdMutexUnlock;
-        if (const std::optional<bool> rechecks = conditionWaitRechecksItself(name);
-            rechecks.has_value())
-        {
-            return *rechecks ? CallKind::CondWaitWithPredicate : CallKind::CondWaitWithoutPredicate;
-        }
-        if (isStdLockGuardDtor(name))
-            return CallKind::StdLockGuardDtor;
-        if (isStdLockGuardCtor(name))
-        {
-            return isDeferredLockGuardCtor(name) ? CallKind::StdLockGuardDeferredCtor
-                                                 : CallKind::StdLockGuardCtor;
-        }
-        return CallKind::Unknown;
+        const auto cached = classificationCache_.find(callee);
+        if (cached != classificationCache_.end())
+            return cached->second;
+
+        const CallKind kind = classifyCallee(*callee);
+        classificationCache_.emplace(callee, kind);
+        return kind;
     }
 
     std::string_view ConcurrencySymbolClassifier::toString(CallKind kind)
