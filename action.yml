@@ -39,7 +39,7 @@ inputs:
   version:
     description: "Analyzer image tag to run. Defaults to the release this action ships with."
     required: false
-    default: "v0.2.1"
+    default: "v0.2.2"
   image:
     description: "Full image reference to run, overriding version. For testing an image built from source; leave empty to use the published release."
     required: false
