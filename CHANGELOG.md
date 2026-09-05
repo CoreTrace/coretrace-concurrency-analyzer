@@ -8,6 +8,17 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## v0.2.2
+
+- Analysing a project is roughly six times faster. Identifying a stack slot used
+  to render its `alloca` with `printAsOperand`, which builds a module-wide
+  `SlotTracker` per call and walks every metadata node in the module; 80% of
+  analysis time went there. A slot's position identifies it just as well. On a
+  49-unit project: 98.1s before, 15.4s after, with identical results.
+- `docs/performance.md` records the method, the scaling and memory figures, the
+  complexity of each phase, and the next axes in the order the profile ranks
+  them.
+
 ## v0.2.1
 
 - The action's examples referenced `@v1`, a tag that does not exist, so anyone

@@ -70,6 +70,29 @@ namespace ctrace::concurrency::internal::analysis
             return stream.str();
         }
 
+        // An unnamed alloca has no textual name, and printAsOperand would supply one -- at the
+        // cost of building a module-wide SlotTracker on every call, which walks every metadata
+        // node in the module. All this identifier has to do is separate one stack slot from
+        // another within a function and stay the same across runs, which its position does.
+        std::string allocaSlotId(const llvm::AllocaInst& alloca)
+        {
+            if (alloca.hasName())
+                return std::string(alloca.getName());
+
+            std::size_t index = 0;
+            for (const llvm::BasicBlock& block : *alloca.getFunction())
+            {
+                for (const llvm::Instruction& instruction : block)
+                {
+                    if (&instruction == &alloca)
+                        return "%" + std::to_string(index);
+                    if (llvm::isa<llvm::AllocaInst>(instruction))
+                        ++index;
+                }
+            }
+            return "%?";
+        }
+
         template <typename GEPType> std::string printGepIndices(const GEPType& gep)
         {
             std::string rendered;
@@ -653,7 +676,7 @@ namespace ctrace::concurrency::internal::analysis
             if (const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(current))
             {
                 return withPath("stack:" + functionId(*alloca->getFunction()) + ":" +
-                                printValueOperand(*alloca));
+                                allocaSlotId(*alloca));
             }
 
             if (const auto* gepInstruction = llvm::dyn_cast<llvm::GetElementPtrInst>(current))
