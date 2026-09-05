@@ -46,6 +46,86 @@ the cost of one walk of the function instead of one walk of the module:
 | After | 15.4 s / 15.5 s |
 | | **6.4× faster**, identical results, 7/7 tests passing |
 
+## Classifier memoization: follow-up measurement
+
+Measured on 2026-09-05, comparing `24a03da` (stack-slot change, no memo) with
+`824a2b1` (callee memo). Both were freshly built with CMake Release
+(`-O3 -DNDEBUG`), AppleClang, and LLVM 20.1.2 on an eight-core Mac15,13 running
+Darwin 24.6.0. These are a separate comparison from the historical timings
+above; the absolute times and speedup ratios should not be combined.
+
+The workload was `coretrace-stack-analyzer` at
+`c91b88187f6544a9a80c7a071aa5768ba4c02729`: 84 compilation database entries,
+of which 49 project units remain after the analyzer excludes dependencies.
+Both builds used the same clean dependency checkouts: `coretrace-compiler` at
+`866fa76403f29e4fefda99770e04d284175f4408` and `coretrace-logger` at
+`624688ad5e5d00a1d04fd72909d43fe6d948575b`. Source and cached-bitcode SHA-256
+hashes were unchanged throughout the measurements.
+
+After one unmeasured warm-up per binary, the measured order was
+**A B B A B A A B**, where A is the baseline and B has the memo. All builds
+and tests finished before timing began. Background system activity remained;
+the one-minute load average ranged from 3.66 to 6.47, so this is an observed
+local improvement, not an idle-machine or universal performance claim.
+
+| | Without memo | With memo |
+| --- | --- | --- |
+| Analysis, four runs (ms) | 5094 / 5171 / 5273 / 5292 | 4746 / 4786 / 4735 / 4733 |
+| Median analysis (ms) | 5222 | 4740.5 |
+| Peak RSS, each run (MB, decimal) | 898.580 / 1150.075 / 1087.685 / 1007.747 | 1128.628 / 925.254 / 1154.826 / 1115.865 |
+
+The median analysis time is **9.2% lower (1.10×)**. The highest observed RSS
+increases by 4.75 MB; individual RSS readings vary substantially, so this does
+not establish a precise memory overhead. Every measured run reused all 49 IR
+units, compiled none, and reported no failures. All JSON report fields matched
+after excluding only `meta.analysisTimeMs`; both binaries passed 7/7 CTest tests.
+The workload produced no diagnostics, so the existing regression suite remains
+the evidence for preserving positive findings.
+
+A separate instrumented run counted all paths directly, using atomic counters
+because different classifier instances run concurrently. Its timing is excluded:
+
+| Counter | Executions |
+| --- | --- |
+| All `classify()` calls | 2,472,670 |
+| Unresolved callees, returned before cache lookup | 4,194 |
+| Calls eligible for memoization | 2,468,476 |
+| Cache hits | 2,321,499 |
+| Cascade executions / cache misses | 146,977 |
+
+The previously reported 2,468,476 calls count only resolved callees. The cache
+answers 94.05% of those calls; unresolved calls are not cache hits. Instrumented
+and uninstrumented reports match with the same timing-field exclusion.
+
+To reproduce, create separate worktrees at the two analyzer revisions above.
+Set `SOURCE`, `BUILD`, and `DB` for each build and the same frozen compilation
+database; set `CC_SOURCE` and `LOGGER_SOURCE` to the dependency checkouts above.
+Configure both builds identically (adjust LLVM paths for the host):
+
+```sh
+cmake -S "$SOURCE" -B "$BUILD" -DCMAKE_BUILD_TYPE=Release \
+  -DLLVM_DIR="$LLVM_PREFIX/lib/cmake/llvm" \
+  -DClang_DIR="$LLVM_PREFIX/lib/cmake/clang" \
+  -DCLANG_EXECUTABLE="$LLVM_PREFIX/bin/clang" \
+  -DFETCHCONTENT_SOURCE_DIR_CC="$CC_SOURCE" \
+  -DFETCHCONTENT_SOURCE_DIR_CORETRACE_LOGGER="$LOGGER_SOURCE"
+cmake --build "$BUILD" --parallel 4
+ctest --test-dir "$BUILD" --output-on-failure
+```
+
+Finish both builds and tests, warm each binary once, then run the alternating
+order above, retaining stdout and stderr separately for every run:
+
+```sh
+/usr/bin/time -l "$BUILD/coretrace_concurrency_analyzer" \
+  --compile-commands="$DB" --verbose --fail-on=none --format=json \
+  > "$RUN.json" 2> "$RUN.log"
+```
+
+`time -l` reports RSS in bytes on macOS; on Linux use `/usr/bin/time -v` and
+convert its maximum RSS from KiB. Compare `analysis-ms`, not total wall time,
+and check `0 compiled, 49 reused, 0 failed` before accepting a timed run.
+
 ## Scaling
 
 After that change, with the cross-TU thread pool active:
@@ -72,12 +152,15 @@ size of the module, with a large constant: **12 distinct sites construct their
 own `llvm::DominatorTree` per function**, each O(V+E) with LLVM's own allocation
 cost. Nothing shares them.
 
-**Symbol classification** — `classify()` is a cascade of ~31 predicates tried in
-order, each comparing the callee name against `const char*` literals. Every
-comparison converts a literal to `StringRef`, so each call costs a `strlen` per
-literal tried, and `canonicalName` allocates a `std::string` per call. It is
-O(P·L) per call site where P is the number of predicates and L the literal
-lengths — with no memoisation across call sites that share a callee.
+**Symbol classification** — the cascade of ~31 predicates and canonical-name
+construction now run once per distinct resolved callee per classifier instance.
+A cache keyed on `const llvm::Function*` gives subsequent calls an expected
+O(1) lookup. For C calls and U distinct callees, expected work is
+O(C + U·P·L), with O(U) cache space, where P counts predicates and L their
+string-comparison cost. The cache belongs to the local analysis invocation:
+it is not shared across worker threads or retained after its module is destroyed.
+The predicates still use string comparisons on cache misses; compiler
+optimization determines whether literal-length calculations remain at runtime.
 
 **Data race detection** — accesses are grouped by symbol, then compared
 pairwise: for each symbol with k accesses, O(k²) pairs. Total is Σkᵢ², which is
@@ -94,11 +177,9 @@ sets and shared-object bindings, each proportional to the unit's size.
 
 Ranked by measured weight, not by guess.
 
-1. **Memoise symbol classification.** It is now the largest self-time consumer,
-   and its whole cascade depends only on the callee. A map keyed on
-   `llvm::Function*` would collapse repeated work across call sites; a
-   `StringSwitch` or a `constexpr std::string_view` table would remove the
-   repeated `strlen` within one classification.
+1. **Memoise symbol classification — completed.** The measurement above records
+   its effect. Profile the remaining cache misses before choosing a separate
+   `StringSwitch` or `constexpr std::string_view` table change.
 2. **Share the dominator trees.** Twelve sites build their own per function.
    Building each once and passing it through the facts would remove eleven
    redundant constructions per function.
