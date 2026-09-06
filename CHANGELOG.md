@@ -8,6 +8,17 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## v0.2.3
+
+- Memoize concurrency-symbol classification by resolved callee within each
+  analysis invocation. On the documented 49-unit workload, 94.05% of eligible
+  calls reuse the cached result. Fresh Release builds measured 9.2% lower median
+  analysis time (5222 ms versus 4740.5 ms), with identical reports. This is a
+  local workload measurement, not a universal speedup claim.
+- Record the complete benchmark protocol, dependency revisions, per-run timing
+  and peak memory, and direct counts of cache hits and unresolved calls in
+  `docs/performance.md`.
+
 ## v0.2.2
 
 - Analysing a project is roughly six times faster. Identifying a stack slot used
