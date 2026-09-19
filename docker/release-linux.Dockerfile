@@ -17,26 +17,17 @@ FROM ${BASE_IMAGE} AS build
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# apt.llvm.org is dual-stack, and the network a container gets during this
-# build resolves its AAAA record without having a route to it. wget does not
-# fall back to IPv4 once it has picked that address, so it fails outright --
-# while apt, which does fall back, pulls packages from the same host in the
-# same layer without trouble. The runners themselves are fine: the same
-# llvm.sh runs unaided in the build workflows, outside any container.
-#
-# The setting goes in /etc/wgetrc rather than on the command line because the
-# call that actually fails is not ours: llvm.sh probes the repository with its
-# own `wget --method=HEAD`, and reads an unreachable host as "your distribution
-# is not supported". A flag here would never reach that invocation.
-#
-# The retries cover a genuinely transient failure, and -nv keeps the reason in
-# the log: with -q this failed silently behind an exit code.
+# The download policy (IPv4, bounded retries) lives in docker/wgetrc; see the
+# comments there. It is copied after wget is installed so it replaces the
+# package's default file instead of colliding with it, and it also governs the
+# wget calls llvm.sh makes itself. -nv keeps the failure reason in the log:
+# with -q this failed silently behind an exit code.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ git gnupg lsb-release ninja-build \
         software-properties-common wget \
- && echo 'inet4_only = on' >> /etc/wgetrc \
- && wget -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
-        https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
+ && rm -rf /var/lib/apt/lists/*
+COPY docker/wgetrc /etc/wgetrc
+RUN wget -nv https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
  && apt-get update && apt-get install -y --no-install-recommends \
         clang-20 libclang-20-dev llvm-20-dev libstdc++-14-dev \
  && rm -rf /var/lib/apt/lists/* llvm.sh
@@ -70,11 +61,13 @@ FROM ${BASE_IMAGE} AS runtime
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# Same download policy as the build stage; purging wget afterwards removes the
+# copied /etc/wgetrc along with it.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates gnupg lsb-release software-properties-common wget \
- && echo 'inet4_only = on' >> /etc/wgetrc \
- && wget -nv --tries=5 --waitretry=10 --retry-connrefused --timeout=30 \
-        https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
+ && rm -rf /var/lib/apt/lists/*
+COPY docker/wgetrc /etc/wgetrc
+RUN wget -nv https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
  && apt-get update && apt-get install -y --no-install-recommends \
         clang-20 libstdc++-14-dev \
  && apt-get purge -y --auto-remove gnupg software-properties-common wget \

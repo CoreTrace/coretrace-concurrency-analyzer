@@ -30,7 +30,14 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates cmake g++ git gnupg lsb-release ninja-build python3 \
         software-properties-common wget \
- && wget -q https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
+ && rm -rf /var/lib/apt/lists/*
+
+# The download policy (IPv4, bounded retries) lives in wgetrc; see the comments
+# there. It is copied after wget is installed so it replaces the package's
+# default file instead of colliding with it, and it also governs the wget calls
+# llvm.sh makes itself. -nv keeps the failure reason in the log.
+COPY wgetrc /etc/wgetrc
+RUN wget -nv https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
  && apt-get update && apt-get install -y --no-install-recommends \
         clang-20 libclang-20-dev llvm-20-dev ${STDLIB_PACKAGE} \
  && rm -rf /var/lib/apt/lists/* llvm.sh
