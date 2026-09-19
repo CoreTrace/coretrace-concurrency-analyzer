@@ -457,6 +457,48 @@ namespace ctrace::concurrency::internal::analysis
 
             return bindings;
         }
+        /// Records the program symbols the whole-program passes will ask about this unit, so
+        /// they can be answered once the module is gone. Runs last: it needs the handle group
+        /// ids the lifecycle facts settled on.
+        ProgramSymbolFacts collectProgramSymbolFacts(const llvm::Module& module,
+                                                     const TUFacts& facts)
+        {
+            ProgramSymbolFacts program;
+            for (const llvm::GlobalVariable& global : module.globals())
+            {
+                (global.isDeclaration() ? program.declaredGlobals : program.definedGlobals)
+                    .insert(programSymbol(global));
+            }
+
+            for (const llvm::Function& function : module)
+            {
+                std::string symbol = programSymbol(function);
+                if (function.isDeclaration())
+                    program.declaredFunctions.insert(symbol);
+                program.functionSymbolsById.emplace(functionId(function), std::move(symbol));
+            }
+
+            const auto recordHandle = [&](const std::string& handleGroupId)
+            {
+                if (program.handleSymbolsByGroupId.contains(handleGroupId))
+                    return;
+                if (const llvm::GlobalVariable* handle =
+                        globalOfStorageGroupId(module, handleGroupId);
+                    handle != nullptr)
+                {
+                    program.handleSymbolsByGroupId.emplace(handleGroupId, programSymbol(*handle));
+                }
+            };
+            for (const std::string& handleGroupId : facts.resolvedGlobalHandleIds)
+                recordHandle(handleGroupId);
+            for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
+            {
+                if (fact.action == ThreadLifecycleAction::Create)
+                    recordHandle(fact.handleGroupId);
+            }
+
+            return program;
+        }
     } // namespace
 
     TUFacts TUFactsBuilder::build(const llvm::Module& module,
@@ -496,7 +538,7 @@ namespace ctrace::concurrency::internal::analysis
                     continue;
 
                 if (const std::vector<ParameterLockEffect>* summary =
-                        program->lockSummaryFor(function);
+                        program->lockSummaryFor(programSymbol(function));
                     summary != nullptr)
                 {
                     lockWrapperSummaries.emplace(functionId(function), *summary);
@@ -571,14 +613,18 @@ namespace ctrace::concurrency::internal::analysis
         {
             for (const llvm::Function& function : module)
             {
-                if (function.isDeclaration() || !program->isThreadEntry(function))
+                if (function.isDeclaration())
+                    continue;
+
+                const std::string symbol = programSymbol(function);
+                if (!program->isThreadEntry(symbol))
                     continue;
 
                 EntryConcurrencyInfo& concurrency = facts.entryConcurrency[functionId(function)];
                 concurrency.staticSpawnCount =
-                    std::max(concurrency.staticSpawnCount, program->spawnCount(function));
+                    std::max(concurrency.staticSpawnCount, program->spawnCount(symbol));
                 concurrency.hasSpawnInLoop =
-                    concurrency.hasSpawnInLoop || program->spawnedInLoop(function);
+                    concurrency.hasSpawnInLoop || program->spawnedInLoop(symbol);
             }
         }
 
@@ -798,7 +844,8 @@ namespace ctrace::concurrency::internal::analysis
 
                               const llvm::GlobalVariable* handle =
                                   globalOfStorageGroupId(module, fact.handleGroupId);
-                              return handle != nullptr && program->resolvesHandleElsewhere(*handle);
+                              return handle != nullptr &&
+                                     program->resolvesHandleElsewhere(programSymbol(*handle));
                           });
         }
 
@@ -1028,6 +1075,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         facts.accesses = filterProjectedConcreteAccesses(std::move(concreteAccesses));
+        facts.program = collectProgramSymbolFacts(module, facts);
         return facts;
     }
 } // namespace ctrace::concurrency::internal::analysis

@@ -289,6 +289,25 @@ namespace ctrace::concurrency::internal::analysis
         bool execReachable = false;
     };
 
+    /// What the program-wide passes look up about this unit, recorded while its module is live
+    /// so that the symbol index and the second-pass gate never need the IR again. Every entry is
+    /// a program symbol (`GlobalValue::getGlobalIdentifier`), which is what keeps two
+    /// `static int counter` in different files apart.
+    struct ProgramSymbolFacts
+    {
+        /// Globals this unit defines, and globals it only declares.
+        std::unordered_set<std::string> definedGlobals;
+        std::unordered_set<std::string> declaredGlobals;
+        /// Program symbol of every function, keyed by the function id the other facts use.
+        std::unordered_map<std::string, std::string> functionSymbolsById;
+        /// Functions this unit only declares; every other symbol in `functionSymbolsById` is
+        /// defined here.
+        std::unordered_set<std::string> declaredFunctions;
+        /// Program symbol of the global behind each handle group id this unit creates or
+        /// resolves. Absent when the id does not name a global of this module.
+        std::unordered_map<std::string, std::string> handleSymbolsByGroupId;
+    };
+
     struct TUFacts
     {
         std::vector<SpawnFact> spawns;
@@ -316,5 +335,7 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_set<std::string> recursiveLockIds;
         /// Entry pairs separated by a join, hence never concurrent.
         std::unordered_set<EntryPair, EntryPairHash> sequencedEntryPairs;
+        /// The unit as the whole-program passes see it, without its IR.
+        ProgramSymbolFacts program;
     };
 } // namespace ctrace::concurrency::internal::analysis

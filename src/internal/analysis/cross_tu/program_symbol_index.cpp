@@ -2,11 +2,8 @@
 #include "program_symbol_index.hpp"
 
 #include "internal/analysis/facts.hpp"
-#include "internal/analysis/ir_utils.hpp"
 
-#include <llvm/IR/Function.h>
-#include <llvm/IR/GlobalVariable.h>
-#include <llvm/IR/Module.h>
+#include <llvm/IR/GlobalValue.h>
 
 namespace ctrace::concurrency::internal::analysis
 {
@@ -15,40 +12,40 @@ namespace ctrace::concurrency::internal::analysis
         return value.getGlobalIdentifier();
     }
 
-    void ProgramSymbolIndex::addModule(const llvm::Module& module, const TUFacts& facts)
+    void ProgramSymbolIndex::addUnit(const TUFacts& facts)
     {
-        for (const llvm::GlobalVariable& global : module.globals())
-        {
-            if (!global.isDeclaration())
-                definedGlobals_.insert(programSymbol(global));
-        }
+        const ProgramSymbolFacts& program = facts.program;
+        definedGlobals_.insert(program.definedGlobals.begin(), program.definedGlobals.end());
 
-        // `entryConcurrency` is already corrected by this module's own may-happen-in-parallel
+        // `entryConcurrency` is already corrected by this unit's own may-happen-in-parallel
         // analysis: two spawns on mutually exclusive branches count as one instance. Re-counting
         // spawn calls here would discard that verdict and report races the unit had ruled out.
         for (const std::string& handleGroupId : facts.resolvedGlobalHandleIds)
         {
-            if (const llvm::GlobalVariable* handle = globalOfStorageGroupId(module, handleGroupId);
-                handle != nullptr)
+            if (const auto it = program.handleSymbolsByGroupId.find(handleGroupId);
+                it != program.handleSymbolsByGroupId.end())
             {
-                resolvedHandleSymbols_.insert(programSymbol(*handle));
+                resolvedHandleSymbols_.insert(it->second);
             }
         }
 
         for (const auto& [helperFunctionId, parameterEffects] : facts.lockWrapperSummaries)
         {
-            const llvm::Function* helper = module.getFunction(helperFunctionId);
-            if (helper != nullptr && !helper->isDeclaration())
-                lockSummariesBySymbol_.emplace(programSymbol(*helper), parameterEffects);
+            const auto it = program.functionSymbolsById.find(helperFunctionId);
+            if (it != program.functionSymbolsById.end() &&
+                !program.declaredFunctions.contains(it->second))
+            {
+                lockSummariesBySymbol_.emplace(it->second, parameterEffects);
+            }
         }
 
         for (const auto& [entryFunctionId, concurrency] : facts.entryConcurrency)
         {
-            const llvm::Function* entry = module.getFunction(entryFunctionId);
-            if (entry == nullptr)
+            const auto it = program.functionSymbolsById.find(entryFunctionId);
+            if (it == program.functionSymbolsById.end())
                 continue;
 
-            EntrySpawns& spawns = spawnSitesByEntry_[programSymbol(*entry)];
+            EntrySpawns& spawns = spawnSitesByEntry_[it->second];
             // Instances created by different units have no dominance relation to sequence them,
             // so their counts add up.
             spawns.instanceCount += concurrency.staticSpawnCount;
@@ -57,36 +54,36 @@ namespace ctrace::concurrency::internal::analysis
     }
 
     const std::vector<ParameterLockEffect>*
-    ProgramSymbolIndex::lockSummaryFor(const llvm::Function& function) const
+    ProgramSymbolIndex::lockSummaryFor(const std::string& symbol) const
     {
-        const auto it = lockSummariesBySymbol_.find(programSymbol(function));
+        const auto it = lockSummariesBySymbol_.find(symbol);
         return it == lockSummariesBySymbol_.end() ? nullptr : &it->second;
     }
 
-    bool ProgramSymbolIndex::resolvesHandleElsewhere(const llvm::GlobalVariable& handle) const
+    bool ProgramSymbolIndex::resolvesHandleElsewhere(const std::string& symbol) const
     {
-        return resolvedHandleSymbols_.contains(programSymbol(handle));
+        return resolvedHandleSymbols_.contains(symbol);
     }
 
-    bool ProgramSymbolIndex::isThreadEntry(const llvm::Function& function) const
+    bool ProgramSymbolIndex::isThreadEntry(const std::string& symbol) const
     {
-        return spawnSitesByEntry_.contains(programSymbol(function));
+        return spawnSitesByEntry_.contains(symbol);
     }
 
-    std::size_t ProgramSymbolIndex::spawnCount(const llvm::Function& function) const
+    std::size_t ProgramSymbolIndex::spawnCount(const std::string& symbol) const
     {
-        const auto it = spawnSitesByEntry_.find(programSymbol(function));
+        const auto it = spawnSitesByEntry_.find(symbol);
         return it == spawnSitesByEntry_.end() ? 0 : it->second.instanceCount;
     }
 
-    bool ProgramSymbolIndex::spawnedInLoop(const llvm::Function& function) const
+    bool ProgramSymbolIndex::spawnedInLoop(const std::string& symbol) const
     {
-        const auto it = spawnSitesByEntry_.find(programSymbol(function));
+        const auto it = spawnSitesByEntry_.find(symbol);
         return it != spawnSitesByEntry_.end() && it->second.insideLoop;
     }
 
-    bool ProgramSymbolIndex::isDefinedSomewhere(const llvm::GlobalVariable& global) const
+    bool ProgramSymbolIndex::isDefinedSomewhere(const std::string& symbol) const
     {
-        return definedGlobals_.contains(programSymbol(global));
+        return definedGlobals_.contains(symbol);
     }
 } // namespace ctrace::concurrency::internal::analysis
