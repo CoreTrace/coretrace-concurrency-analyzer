@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: Apache-2.0
 name: Install LLVM 20 from apt.llvm.org
 description: >-
   Installs the LLVM 20 toolchain and the build tools on an Ubuntu runner with
