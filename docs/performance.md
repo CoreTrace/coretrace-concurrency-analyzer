@@ -160,6 +160,43 @@ readings ranged 0.95–1.22 GB for both binaries with no separable difference,
 as expected: a cached tree lives only for its unit's `TUFactsBuilder::build`
 call and is small next to the parsed module.
 
+## Bounded live units: follow-up measurement
+
+Measured on 2026-09-19, comparing `85f3929` (every module live for the whole
+run) with the bounded-memory change, same machine, toolchain, Release settings
+and 49-unit workload as above (`0 compiled, 49 reused, 0 failed` on every run).
+The one-minute load average sat between 4.6 and 7.4; the order was
+**A B B A B A A B** for the eight-unit bound, then **4 4 1 1 4 1** for the
+smaller bounds, all with a frozen copy of each binary and nothing else building.
+Peak RSS is `/usr/bin/time -l`, which `peak-rss-mb` matched on every run. All
+fourteen JSON reports are identical to the baseline's.
+
+| | Baseline | 8 live units | 4 live units | 1 live unit |
+| --- | --- | --- | --- | --- |
+| Runs | 4 | 4 | 3 | 3 |
+| Median `compile-ms` | 4314 | 4702 | 4616 | 4595 |
+| Median `analysis-ms` | 5238 | 6096 | 7398 | 12710 |
+| Median total wall (s) | 9.98 | 10.91 | 12.01 | 17.44 |
+| Peak RSS, min–max (MB) | 933–1276 | 799–832 | 695–705 | 431–449 |
+| `load-ms`, summed over workers | — | ~2550 | ~1950 | ~1230 |
+| Bitcode retained (MB) | — | 138 | 138 | 138 |
+
+At eight live units — the default on this machine — peak RSS is about **35%
+lower** (1266 → 815 MB, medians) for about **9% more total wall time**
+(9.98 → 10.91 s). Where the time goes: each unit is now parsed inside the
+worker that analyses it, and eight parsers contend (2.5 s of parsing summed
+over workers, against 1.2 s when one worker parses alone); the module and its
+context are also destroyed inside the analysis instead of at exit. `compile-ms`
+rises by about 0.4 s because the cache probe parses and discards a module the
+baseline kept; the probe is what preserves the recompile-on-unreadable-entry
+behaviour. The bound is a straight trade below that: one live unit runs the
+analysis serially at 0.44 GB.
+
+The floor is the bitcode itself: 138 MB held for the whole run, plus the
+facts. The ceiling above it is roughly 45 MB per live unit on this workload.
+Spilling bitcode to a temporary file would lower the floor without changing the
+API; see `docs/cross-tu-mode.md`.
+
 ## Scaling
 
 After that change, with the cross-TU thread pool active:
@@ -220,10 +257,10 @@ Ranked by measured weight, not by guess.
    its effect: 90.5% fewer constructions on the 49-unit workload. The three
    `collectDirectCallSites` walks per unit remain and are the next duplication
    to remove on this path.
-3. **Bound memory in cross-TU mode.** Peak RSS above 1 GB at 49 units is the
-   figure most likely to stop a large project outright, and it is structural:
-   modules are all live at once. Releasing a unit's module once its facts are
-   extracted would trade a re-parse for a much lower ceiling.
+3. **Bound memory in cross-TU mode — completed for modules.** The measurement
+   above records the effect: modules are bounded by `--max-live-units`, and the
+   remaining floor is the bitcode held in memory (138 MB here). Spilling it to
+   a temporary file is the next step on this axis.
 4. **Reconsider unconditional fact building.** `--rules=missing-join` pays for
    every fact the other seven rules need. Building lazily would make narrow runs
    proportional to what they ask for.

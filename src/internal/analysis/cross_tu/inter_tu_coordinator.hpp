@@ -4,13 +4,9 @@
 #include "coretrace_concurrency_analysis.hpp"
 
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <vector>
-
-namespace llvm
-{
-    class Module;
-} // namespace llvm
 
 namespace ctrace::concurrency::internal::analysis::cross_tu
 {
@@ -24,6 +20,10 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
         /// Units the program-wide view forced through a second analysis. Reported because it is
         /// the cost of the project mode over a run of independent units.
         std::size_t reanalyzedUnitCount = 0;
+        /// Units that could not be loaded, in unit order. See ProjectAnalysisReport.
+        std::vector<FailedUnit> failedUnits;
+        std::size_t peakLiveUnits = 0;
+        std::int64_t loadMilliseconds = 0;
     };
 
     /// Runs the per-unit analysis over a whole project, letting each unit see the facts the
@@ -39,8 +39,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
       public:
         explicit InterTUCoordinator(AnalysisOptions options = {});
 
-        [[nodiscard]] ProjectAnalysis
-        analyze(const std::vector<const llvm::Module*>& modules) const;
+        [[nodiscard]] ProjectAnalysis analyze(const ProjectUnitSource& units) const;
 
       private:
         AnalysisOptions options_;

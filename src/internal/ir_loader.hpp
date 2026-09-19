@@ -37,5 +37,11 @@ namespace ctrace::concurrency::internal
         [[nodiscard]] std::unique_ptr<llvm::Module> parseBC(std::string_view llvmBitcode,
                                                             llvm::LLVMContext& context,
                                                             CompileError& error) const override;
+
+        /// Same, naming the buffer, which becomes the module identifier seen in reports.
+        [[nodiscard]] std::unique_ptr<llvm::Module> parseBC(std::string_view llvmBitcode,
+                                                            std::string_view bufferName,
+                                                            llvm::LLVMContext& context,
+                                                            CompileError& error) const;
     };
 } // namespace ctrace::concurrency::internal

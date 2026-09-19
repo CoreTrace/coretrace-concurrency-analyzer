@@ -80,11 +80,37 @@ cache entries stay valid, which is exactly when the reader most needs to be told
 units: 0 compiled, 15 reused, 0 failed
 ```
 
+## Memory
+
+Only the bitcode of a project is held for the whole run. The analysis parses a unit when it
+gets to it and lets the module go once its facts are extracted, so the number of modules in
+memory is bounded by the number of workers — `--max-live-units=N`, one per hardware thread
+by default — rather than by the size of the project. A unit the second pass has to revisit
+is parsed again from the same bytes, with or without a cache on disk, so it sees exactly the
+IR the first pass saw.
+
+The trade is time for memory, and it is explicit: with one live unit the analysis runs
+serially; with as many as there are hardware threads it runs as it did before, with the
+parsing of each unit moved into the worker that analyses it. `--verbose` prints the ceiling
+that was actually reached (`live-units-max`), the bitcode retained (`bitcode-mb`), the time
+spent parsing across all workers (`load-ms`) and the peak resident size of the process
+(`peak-rss-mb`). Measurements are in `performance.md`.
+
+A unit whose bitcode does not parse is named on stderr with the reason, left out of the
+report, and counted as failed; the run then exits non-zero as it does for a unit that did not
+compile. A unit that parsed in the first pass and not in the second is treated the same way,
+and its first-pass conclusions are dropped rather than reported: they are exactly what the
+second pass was about to correct.
+
 ## Limits
 
-- **Analysis is not cached.** It is the larger half of a warm run. Per-unit facts hold pointers
-  into the LLVM module they were built from, so caching them means giving them a serialisable
-  form first.
+- **Analysis is not cached.** It is the larger half of a warm run. Per-unit facts are plain
+  strings and numbers, so caching them is a matter of choosing a serialised form and an
+  invalidation key, not of redesigning them.
+- **Bitcode is held in memory for the whole run.** Modules are bounded; the bitcode they are
+  parsed from is not, and grows with the project (139 MB for the 49-unit workload in
+  `performance.md`). Spilling it to a temporary file would lower that floor without changing
+  the API.
 - **Compilation is serial.** The clang backend relies on process-wide state; a race inside a race
   detector would be a poor trade for the wall-clock it would save.
 - **Lock helper summaries describe one parameter at a time, unconditionally.** A helper that takes
