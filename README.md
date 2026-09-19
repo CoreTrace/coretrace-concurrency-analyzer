@@ -341,6 +341,12 @@ Rendered formats:
 - `json`
 - `sarif`
 
+The JSON report also carries a `functions` array summarising, per function, the shared
+accesses seen, how many were protected, how many were writes, and which thread entries
+reach it. Those counts come from the facts the selected rules asked for: a narrow
+`--rules` run reports what it computed and nothing more, so `--rules=missing-join` alone
+leaves the array without the access counts. `--rules=all` reports everything.
+
 ## Trust Model for `--compile-arg` / `extraCompileArgs`
 
 `extraCompileArgs` are forwarded as raw compiler arguments to `compilerlib::compile(...)`

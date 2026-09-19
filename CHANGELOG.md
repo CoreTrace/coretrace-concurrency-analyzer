@@ -8,6 +8,20 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased
+
+- A unit analysis builds only the facts the selected rules read. `--rules` now
+  decides which collectors run, through one table from rule to fact; the
+  collectors themselves know nothing about rules. On the documented 49-unit
+  workload a `--rules=missing-join` analysis takes 1.9 s instead of 8.6 s and
+  peaks at 464 MB instead of 783 MB; `--rules=all` is unchanged. A project
+  analysis still builds, for every unit, the facts the whole-program index and
+  the second-pass gate read — the entry concurrency, the thread lifecycles and
+  the lock wrapper summaries — whatever the rules select.
+- The JSON `functions` array reports what the selected rules computed, as the
+  diagnostics already did. `--rules=all` is unchanged; a narrow selection omits
+  the counts it did not compute. See `README.md`.
+
 ## Unreleased (next minor)
 
 - **Public API change.** `ProjectConcurrencyAnalyzer::analyze` takes a

@@ -197,6 +197,49 @@ facts. The ceiling above it is roughly 45 MB per live unit on this workload.
 Spilling bitcode to a temporary file would lower the floor without changing the
 API; see `docs/cross-tu-mode.md`.
 
+## Facts per selected rule: follow-up measurement
+
+Measured on 2026-09-19, comparing `9e11a7e` with the rule-aware fact selection,
+same machine, toolchain and Release settings as above. An unrelated process held
+one core throughout, so each figure below is a median of interleaved samples and
+the all-rules row is the control: it must not move.
+
+Analysis requests are counted by a throwaway counter inside
+`LlvmFunctionAnalysisProvider`; they are deterministic and independent of load.
+The unit measured on its own is the largest of the workload
+(`src/analysis/UninitializedVarAnalysis.cpp`, 169 KiB).
+
+| One unit, by selection | Dominator trees | Loop info | Alias analyses | `analysisTimeMs` before | after |
+| --- | --- | --- | --- | --- | --- |
+| `--rules=all` | 45,229 | 26,325 | 5,265 | 1303 | 1327 |
+| `--rules=data-race` | 29,434 | 15,795 | 5,265 | 1204 | 1160 |
+| `--rules=deadlock-lock-order` | 30,295 | 15,795 | 0 | 1350 | **116** |
+| `--rules=missing-join` | 10,530 | 10,530 | 0 | 1289 | **52** |
+| `--rules=condition-wait` | 10,530 | 10,530 | 0 | 1277 | **41** |
+
+Requests are the same before and after for a given selection only where that
+selection needs them: the counts above are what the change now asks for, against
+45,229 / 26,325 / 5,265 for every selection before it.
+
+| 49 units, by selection | `analysis-ms` before | after | Peak RSS before | after |
+| --- | --- | --- | --- | --- |
+| `--rules=all` | 8030, 9324 | 7919 | 784 MB | 784 MB |
+| `--rules=missing-join` | 8610, 9020 | 1937, 2020 | 783 MB | 464 MB |
+| `--rules=deadlock-lock-order` | 9435 | 2032, 2235 | 784 MB | 477 MB |
+
+A narrow run is now proportional to what it asks for: a missing-join analysis of
+the workload takes roughly a quarter of the time and 60% of the memory of the
+same run before, and the all-rules path is unchanged. The floor a narrow project
+run cannot avoid is the cross-unit one: the symbol index and the second-pass gate
+need every unit's entry concurrency, thread lifecycles and lock wrapper summaries
+whatever the rules.
+
+Function summaries follow the same rule as the diagnostics: they report what the
+selected rules computed. On the workload, `--rules=all` lists 880 entries (873
+distinct functions) exactly as before, and `--rules=missing-join` lists 865 — the
+8 it drops are functions no thread reaches, listed before only because they had
+accesses. Every entry present in both is identical.
+
 ## Scaling
 
 After that change, with the cross-TU thread pool active:
@@ -216,8 +259,8 @@ project several times larger will need headroom a small CI runner may not have.
 
 ## Complexity
 
-**Fact building** — `TUFactsBuilder::build`, which runs for every unit whatever
-`--rules` selects, since the rules only consume its output. It makes several
+**Fact building** — `TUFactsBuilder::build`, which builds the facts the selected
+rules read and skips the rest. It makes several
 independent passes over every function and instruction, so it is O(F·I) in the
 size of the module, with a large constant. Twelve distinct sites used to
 construct their own `llvm::DominatorTree` per function, each O(V+E) with LLVM's
@@ -261,9 +304,11 @@ Ranked by measured weight, not by guess.
    above records the effect: modules are bounded by `--max-live-units`, and the
    remaining floor is the bitcode held in memory (138 MB here). Spilling it to
    a temporary file is the next step on this axis.
-4. **Reconsider unconditional fact building.** `--rules=missing-join` pays for
-   every fact the other seven rules need. Building lazily would make narrow runs
-   proportional to what they ask for.
+4. **Reconsider unconditional fact building — completed.** The measurement above
+   records the effect. What remains on this axis is the project-mode floor: the
+   symbol index and the second-pass gate read the entry concurrency, the thread
+   lifecycles and the lock wrapper summaries of every unit whatever the rules,
+   so a narrow project run still pays for those.
 
 ## Machine
 

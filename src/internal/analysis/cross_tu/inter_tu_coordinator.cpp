@@ -4,6 +4,7 @@
 #include "internal/analysis/condition_wait_checker.hpp"
 #include "internal/analysis/process_lifecycle_checker.hpp"
 #include "internal/analysis/data_race_checker.hpp"
+#include "internal/analysis/fact_selection.hpp"
 #include "internal/analysis/facts.hpp"
 #include "internal/analysis/lock_order_analyzer.hpp"
 #include "internal/analysis/missing_join_detector.hpp"
@@ -180,6 +181,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
         std::vector<char> failed(unitCount, 0);
 
         const TUFactsBuilder factsBuilder;
+        const FactSelection selection = FactSelection::forRules(options_.enabledRules, true);
         std::vector<TUFacts> factsByUnit(unitCount);
 
         // Loads a unit, analyses it against `program`, and records a failure to load in place
@@ -204,7 +206,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 return;
             }
 
-            factsByUnit[index] = factsBuilder.build(*unit.module, &program);
+            factsByUnit[index] = factsBuilder.build(*unit.module, selection, &program);
         };
 
         // Pass A: every unit on its own, but already in project mode. A spawn naming a worker
