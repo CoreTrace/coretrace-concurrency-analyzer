@@ -761,6 +761,106 @@ namespace ctrace::concurrency::internal::analysis
         return resolveTrackedRoot(value, nullptr, 0, programDefined);
     }
 
+    namespace
+    {
+        const llvm::Function* calledFunction(const llvm::CallBase& call)
+        {
+            return llvm::dyn_cast<llvm::Function>(
+                call.getCalledOperand()->stripPointerCastsAndAliases());
+        }
+
+        /// Whether a pointer may have come from somewhere the module cannot see: an indirect
+        /// call, or a call whose body is not in the module.
+        ///
+        /// Alias analysis reports may-alias for every pointer it cannot identify, so against a
+        /// global the answer only says something when the pointer could have been handed in
+        /// from outside. A pointer loaded out of a container the module itself built is
+        /// unidentified too, yet it cannot reach a global; accepting the answer for it named
+        /// whichever global the module happened to define.
+        ///
+        /// Calls to defined functions are followed through what they return: nothing was
+        /// inlined at the level analysed, so an accessor is a call rather than the load it
+        /// wraps. A callee returning one of its own parameters is read as the argument it was
+        /// given. A parameter of the function being analysed is not opaque: what it holds is
+        /// decided at its call sites, which is the argument binding's job, not this one's.
+        bool pointerProvenanceIsOpaque(const llvm::Value& pointer,
+                                       llvm::SmallPtrSetImpl<const llvm::Value*>& seen,
+                                       const llvm::CallBase* boundCall)
+        {
+            const llvm::Value* object = llvm::getUnderlyingObject(&pointer);
+            if (object == nullptr || !seen.insert(object).second)
+                return false;
+
+            if (const auto* argument = llvm::dyn_cast<llvm::Argument>(object))
+            {
+                const bool isBoundParameter = boundCall != nullptr &&
+                                              argument->getParent() == calledFunction(*boundCall) &&
+                                              argument->getArgNo() < boundCall->arg_size();
+                if (!isBoundParameter)
+                    return false;
+
+                return pointerProvenanceIsOpaque(*boundCall->getArgOperand(argument->getArgNo()),
+                                                 seen, nullptr);
+            }
+
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(object))
+            {
+                // A local pointer variable is whatever was stored into it. A load from any
+                // other memory is a pointer the module wrote there itself.
+                const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(
+                    llvm::getUnderlyingObject(load->getPointerOperand()));
+                if (slot == nullptr)
+                    return false;
+
+                for (const llvm::User* user : slot->users())
+                {
+                    const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                    if (store == nullptr || store->getPointerOperand() != slot)
+                        continue;
+                    if (pointerProvenanceIsOpaque(*store->getValueOperand(), seen, boundCall))
+                        return true;
+                }
+                return false;
+            }
+
+            if (const auto* phi = llvm::dyn_cast<llvm::PHINode>(object))
+            {
+                for (const llvm::Value* incoming : phi->incoming_values())
+                    if (pointerProvenanceIsOpaque(*incoming, seen, boundCall))
+                        return true;
+                return false;
+            }
+
+            if (const auto* select = llvm::dyn_cast<llvm::SelectInst>(object))
+            {
+                return pointerProvenanceIsOpaque(*select->getTrueValue(), seen, boundCall) ||
+                       pointerProvenanceIsOpaque(*select->getFalseValue(), seen, boundCall);
+            }
+
+            const auto* call = llvm::dyn_cast<llvm::CallBase>(object);
+            if (call == nullptr)
+                return false;
+
+            const llvm::Function* callee = calledFunction(*call);
+            if (callee == nullptr)
+                return true;
+            if (callee->isIntrinsic())
+                return false;
+            if (callee->isDeclaration())
+                return true;
+
+            for (const llvm::BasicBlock& block : *callee)
+            {
+                const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator());
+                if (ret == nullptr || ret->getReturnValue() == nullptr)
+                    continue;
+                if (pointerProvenanceIsOpaque(*ret->getReturnValue(), seen, call))
+                    return true;
+            }
+            return false;
+        }
+    } // namespace
+
     std::optional<AliasResolvedGlobal>
     resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
                        const std::vector<const llvm::GlobalVariable*>& candidateGlobals,
@@ -824,6 +924,12 @@ namespace ctrace::concurrency::internal::analysis
 
         if (!hasAmbiguousMayAlias && mayAliasSymbol.has_value())
         {
+            // With a lone candidate the ambiguity check above cannot fail, so the may-alias
+            // answer must be qualified by where the pointer came from.
+            llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+            if (!pointerProvenanceIsOpaque(*accessLocation->Ptr, seen, nullptr))
+                return std::nullopt;
+
             return AliasResolvedGlobal{
                 .symbol = *mayAliasSymbol,
                 .global = mayAliasGlobal,

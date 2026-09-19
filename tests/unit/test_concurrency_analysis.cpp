@@ -835,6 +835,9 @@ namespace
              .intent = "atomic operations never race with each other"},
             {.path = "tests/fixtures/concurrency/data-race/cpp_condition_variable_no_fp.cpp",
              .intent = "a textbook wait/notify pair is synchronized"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_alias_sole_global_untouched_no_fp.cpp",
+             .intent = "an unresolved container element is not the module's only global"},
 
             // --- data race: regressions fixed, must be reported ---------------------------
             {.path = "tests/fixtures/concurrency/data-race/data_race_main_thread_vs_worker.c",
