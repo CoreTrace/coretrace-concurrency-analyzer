@@ -8,6 +8,28 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased (next minor)
+
+- **Public API change.** `ProjectConcurrencyAnalyzer::analyze` takes a
+  `ProjectUnitSource` — the program as bitcode buffers it opens and closes on
+  demand — instead of a vector of live `llvm::Module` pointers. Callers that
+  compiled units themselves add each unit's bitcode with an identifier; the
+  analysis parses a unit when it gets to it and releases it afterwards.
+  `ProjectAnalysisReport` gains `failedUnits` (units whose bitcode did not
+  parse, with the error), `peakLiveUnits` and `loadMilliseconds`, and
+  `AnalysisOptions::maxLiveUnits` bounds how many units are in memory at once.
+  `SingleTUConcurrencyAnalyzer` is unchanged.
+- Project analysis holds at most `--max-live-units` modules in memory (one per
+  hardware thread by default) instead of every module of the project. On the
+  documented 49-unit workload peak RSS falls from about 1.0 GB to about 0.75 GB
+  at eight live units and about 0.44 GB at one, at the cost of parsing each unit
+  inside its worker; `docs/performance.md` records the measurements and
+  `docs/cross-tu-mode.md` the model. A unit that fails to parse is named,
+  reported as failed and left out, and the run exits non-zero.
+- The second cross-TU pass is decided from the facts of the first alone; nothing
+  reads a module back once its facts exist. `--verbose` prints `peak-rss-mb`,
+  `live-units-max`, `bitcode-mb` and `load-ms`.
+
 ## v0.2.3
 
 - Memoize concurrency-symbol classification by resolved callee within each

@@ -6,7 +6,6 @@
 #include "internal/diagnostics/diagnostic_builder.hpp"
 
 #include <llvm/IR/Function.h>
-#include <llvm/IR/Module.h>
 
 #include <algorithm>
 #include <cstdint>
@@ -368,9 +367,8 @@ namespace ctrace::concurrency::internal::analysis
 
     } // namespace
 
-    DiagnosticReport DataRaceChecker::run(const llvm::Module& module, const TUFacts& facts) const
+    DiagnosticReport DataRaceChecker::run(const TUFacts& facts) const
     {
-        (void)module;
         const std::unordered_map<std::string, ThreadEntrySet>& reachableEntriesByFunction =
             facts.reachableThreadEntriesByFunction;
         static const EntrySet emptyEntries;

@@ -11,6 +11,9 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <sys/resource.h>
+
+#include <charconv>
 #include <chrono>
 #include <optional>
 #include <memory>
@@ -41,6 +44,8 @@ namespace
             << "  --compile-commands=PATH  Analyse a whole project from a compile_commands.json\n"
             << "                           instead of a single file (implies --analyze)\n"
             << "  --no-cache               Recompile every unit instead of reusing cached IR\n"
+            << "  --max-live-units=N       Most units held in memory at once during a project\n"
+            << "                           analysis (default: one per hardware thread)\n"
             << "\n"
             << "Sources are always compiled unoptimized: the analysis describes the program as\n"
             << "written, and an optimizer removes the very structure the rules read.\n"
@@ -118,6 +123,20 @@ namespace
         stream << "request.extra-args-count: " << request.extraCompileArgs.size() << "\n";
         for (const std::string& arg : request.extraCompileArgs)
             stream << "request.extra-arg: " << arg << "\n";
+    }
+
+    /// Peak resident set size of this process so far, in megabytes. What `/usr/bin/time`
+    /// reports from outside, made available from inside so a run can state its own ceiling.
+    long peakResidentMegabytes()
+    {
+        rusage usage{};
+        if (getrusage(RUSAGE_SELF, &usage) != 0)
+            return -1;
+#if defined(__APPLE__)
+        return usage.ru_maxrss / (1024 * 1024); // bytes
+#else
+        return usage.ru_maxrss / 1024; // kibibytes
+#endif
     }
 
     std::size_t countDefinedFunctions(const llvm::Module& module)
@@ -412,16 +431,6 @@ namespace
         return report;
     }
 
-    /// One compiled unit, kept alive for the whole project analysis. Each unit gets its own
-    /// context: contexts are not thread-safe, and nothing in the analysis compares type pointers
-    /// across modules.
-    struct CompiledUnit
-    {
-        std::unique_ptr<llvm::LLVMContext> context;
-        std::string bitcode;
-        std::unique_ptr<llvm::Module> module;
-    };
-
     int analyzeProject(const std::string& databasePath,
                        const ctrace::concurrency::AnalysisOptions& analysisOptions,
                        ctrace::concurrency::OutputFormat outputFormat, bool verbose, bool useCache,
@@ -462,36 +471,33 @@ namespace
                                             ".coretrace-ir-cache");
         }
 
+        // Only the bitcode is kept from this loop. The analysis parses each unit when it gets
+        // to it and lets the module go afterwards, so the number of modules in memory is bound
+        // by the number of workers rather than by the size of the project.
         ctrace::concurrency::InMemoryIRCompiler compiler;
         internal::LLVMIRLoader irLoader;
-        std::vector<CompiledUnit> units;
+        ctrace::concurrency::ProjectUnitSource units;
         std::vector<std::string> failedSources;
         std::size_t reusedUnits = 0;
         std::size_t compiledUnits = 0;
 
         for (const internal::CompileCommand& command : commands)
         {
-            CompiledUnit unit;
-            unit.context = std::make_unique<llvm::LLVMContext>();
-
             if (cache.has_value())
             {
                 if (std::optional<std::string> cached = cache->lookup(command))
                 {
+                    // Parsed once here to prove the entry readable, then dropped: an entry
+                    // that does not parse is unusable, not a sign that the unit is broken, so
+                    // it falls through to compilation exactly as before.
+                    llvm::LLVMContext probeContext;
                     ctrace::concurrency::CompileError parseError;
-                    unit.bitcode = std::move(*cached);
-                    unit.module = irLoader.parseBC(unit.bitcode, *unit.context, parseError);
-                    if (unit.module != nullptr)
+                    if (irLoader.parseBC(*cached, probeContext, parseError) != nullptr)
                     {
                         ++reusedUnits;
-                        units.push_back(std::move(unit));
+                        units.add(command.file, std::move(*cached));
                         continue;
                     }
-
-                    // Unreadable bitcode means the entry is unusable, not that the unit is
-                    // broken: fall through and compile it.
-                    unit.bitcode.clear();
-                    unit.context = std::make_unique<llvm::LLVMContext>();
                 }
             }
 
@@ -509,7 +515,10 @@ namespace
                 request.extraCompileArgs.push_back(depfile.string());
             }
 
-            ctrace::concurrency::CompileResult result = compiler.compile(request, *unit.context);
+            // The compiler parses into this context to validate its output; both are released
+            // at the end of the iteration.
+            llvm::LLVMContext compileContext;
+            ctrace::concurrency::CompileResult result = compiler.compile(request, compileContext);
             if (!result.success || result.module == nullptr)
             {
                 failedSources.push_back(command.file);
@@ -527,27 +536,22 @@ namespace
                 std::filesystem::remove(depfile, removeError);
             }
 
-            // parseBC keeps a non-owning view over the bitcode buffer.
-            unit.bitcode = std::move(result.llvmBitcode);
-            unit.module = std::move(result.module);
+            // The module the compiler parsed reads from the bitcode buffer, so it goes first;
+            // the analysis parses the same bytes again when it reaches this unit.
+            result.module.reset();
             ++compiledUnits;
-            units.push_back(std::move(unit));
+            units.add(command.file, std::move(result.llvmBitcode));
         }
 
-        if (units.empty())
+        if (units.size() == 0)
         {
             llvm::errs() << "no unit of '" << databasePath << "' could be compiled\n";
             return 1;
         }
 
-        std::vector<const llvm::Module*> modules;
-        modules.reserve(units.size());
-        for (const CompiledUnit& unit : units)
-            modules.push_back(unit.module.get());
-
         const auto compiledAt = std::chrono::steady_clock::now();
         const ctrace::concurrency::ProjectAnalysisReport analysis =
-            ctrace::concurrency::ProjectConcurrencyAnalyzer(analysisOptions).analyze(modules);
+            ctrace::concurrency::ProjectConcurrencyAnalyzer(analysisOptions).analyze(units);
         const auto finishedAt = std::chrono::steady_clock::now();
 
         if (verbose)
@@ -560,15 +564,26 @@ namespace
             // build reads as fully healthy for as long as its cache entries stay valid, which is
             // exactly when the reader most needs to be told otherwise.
             llvm::errs() << "units: " << compiledUnits << " compiled, " << reusedUnits
-                         << " reused, " << failedSources.size() << " failed\n"
+                         << " reused, " << failedSources.size() + analysis.failedUnits.size()
+                         << " failed\n"
                          << "compile-ms: " << milliseconds(startedAt, compiledAt) << "\n"
                          << "analysis-ms: " << milliseconds(compiledAt, finishedAt) << "\n"
-                         << "reanalyzed-units: " << analysis.reanalyzedUnitCount << "\n";
+                         << "load-ms: " << analysis.loadMilliseconds << "\n"
+                         << "reanalyzed-units: " << analysis.reanalyzedUnitCount << "\n"
+                         << "live-units-max: " << analysis.peakLiveUnits << "\n"
+                         << "bitcode-mb: " << units.bitcodeBytes() / (1024 * 1024) << "\n"
+                         << "peak-rss-mb: " << peakResidentMegabytes() << "\n";
         }
 
         // A partial project yields partial conclusions; saying so is part of the result.
         for (const std::string& source : failedSources)
             llvm::errs() << "skipped (compilation failed): " << source << "\n";
+
+        for (const ctrace::concurrency::FailedUnit& unit : analysis.failedUnits)
+        {
+            llvm::errs() << "skipped (bitcode failed to load): " << unit.identifier << ": "
+                         << unit.error.message << "\n";
+        }
 
         for (const std::string& module : analysis.skippedIncompatibleModules)
             llvm::errs() << "skipped (target ABI differs from the project): " << module << "\n";
@@ -578,7 +593,7 @@ namespace
         emitStructuredReport(analysis.report, makeRenderContext(databasePath, duration),
                              outputFormat);
 
-        if (!failedSources.empty())
+        if (!failedSources.empty() || !analysis.complete())
             return 1;
 
         return gateExitCode(failOn, analysis.report.diagnosticsSummary);
@@ -648,6 +663,23 @@ int main(int argc, char** argv)
                 llvm::errs() << "Unsupported --ir-format value: " << std::string(arg) << "\n";
                 return 1;
             }
+            continue;
+        }
+
+        constexpr std::string_view maxLiveUnitsPrefix = "--max-live-units=";
+        if (arg.rfind(maxLiveUnitsPrefix, 0) == 0)
+        {
+            const std::string_view value = arg.substr(maxLiveUnitsPrefix.size());
+            std::size_t parsed = 0;
+            const auto [end, errc] =
+                std::from_chars(value.data(), value.data() + value.size(), parsed);
+            if (errc != std::errc{} || end != value.data() + value.size() || parsed == 0)
+            {
+                llvm::errs() << "Unsupported --max-live-units value: " << std::string(arg)
+                             << " (expected a positive integer)\n";
+                return 1;
+            }
+            analysisOptions.maxLiveUnits = parsed;
             continue;
         }
 

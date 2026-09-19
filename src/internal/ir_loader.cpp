@@ -46,8 +46,17 @@ namespace ctrace::concurrency::internal
                                                         llvm::LLVMContext& context,
                                                         CompileError& error) const
     {
+        return parseBC(llvmBitcode, "in_memory_bc", context, error);
+    }
+
+    std::unique_ptr<llvm::Module> LLVMIRLoader::parseBC(std::string_view llvmBitcode,
+                                                        std::string_view bufferName,
+                                                        llvm::LLVMContext& context,
+                                                        CompileError& error) const
+    {
         const llvm::MemoryBufferRef bufferRef(
-            llvm::StringRef(llvmBitcode.data(), llvmBitcode.size()), "in_memory_bc");
+            llvm::StringRef(llvmBitcode.data(), llvmBitcode.size()),
+            llvm::StringRef(bufferName.data(), bufferName.size()));
 
         auto parsedBitcode = llvm::parseBitcodeFile(bufferRef, context);
         if (parsedBitcode)

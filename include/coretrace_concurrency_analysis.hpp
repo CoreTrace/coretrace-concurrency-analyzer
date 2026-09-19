@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 #pragma once
 
+#include "coretrace_concurrency_error.hpp"
+
+#include <cstddef>
 #include <cstdint>
 #include <initializer_list>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -12,6 +16,7 @@
 
 namespace llvm
 {
+    class LLVMContext;
     class Module;
 } // namespace llvm
 
@@ -143,6 +148,10 @@ namespace ctrace::concurrency
             RuleId::DataRaceGlobal,          RuleId::MissingJoin,
             RuleId::DeadlockLockOrder,       RuleId::ConditionWaitWithoutPredicate,
             RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess};
+        /// Most units of a project held in memory at once during a project analysis. Zero
+        /// means one per hardware thread. Peak memory grows with this number; wall time
+        /// shrinks with it until the hardware runs out of threads.
+        std::size_t maxLiveUnits = 0;
 
         [[nodiscard]] bool isEnabled(RuleId ruleId) const
         {
@@ -164,13 +173,93 @@ namespace ctrace::concurrency
         }
     };
 
+    /// One unit's IR, owned for exactly as long as the analysis holds it. The context is
+    /// declared first so the module is destroyed before the context it lives in; assignment is
+    /// not offered because the generated one would replace the context under a live module.
+    struct LoadedUnit
+    {
+        std::unique_ptr<llvm::LLVMContext> context;
+        std::unique_ptr<llvm::Module> module;
+
+        LoadedUnit();
+        LoadedUnit(std::unique_ptr<llvm::LLVMContext> context,
+                   std::unique_ptr<llvm::Module> module);
+        ~LoadedUnit();
+        LoadedUnit(LoadedUnit&&) noexcept;
+        LoadedUnit& operator=(LoadedUnit&&) = delete;
+        LoadedUnit(const LoadedUnit&) = delete;
+        LoadedUnit& operator=(const LoadedUnit&) = delete;
+
+        [[nodiscard]] bool ok() const noexcept
+        {
+            return module != nullptr;
+        }
+    };
+
+    /// The program as bitcode the analysis opens and closes on demand, so that only as many
+    /// units as it is working on are live at once. Every load parses the same bytes into a
+    /// fresh context: a unit analysed a second time sees exactly the IR it saw the first time,
+    /// with or without a cache on disk.
+    class ProjectUnitSource
+    {
+      public:
+        /// `identifier` names the unit in reports (typically its source path); it becomes the
+        /// module identifier and plays no part in symbol identity, which comes from the
+        /// `source_filename` the bitcode carries.
+        void add(std::string identifier, std::string bitcode);
+
+        [[nodiscard]] std::size_t size() const noexcept
+        {
+            return units_.size();
+        }
+        [[nodiscard]] const std::string& identifier(std::size_t index) const
+        {
+            return units_.at(index).identifier;
+        }
+        /// Bytes of bitcode held for the whole analysis: the memory floor of a project.
+        [[nodiscard]] std::size_t bitcodeBytes() const noexcept;
+
+        /// Parses unit `index` into a context of its own. On failure the result holds no
+        /// module and `error` says why. Safe to call from several threads at once.
+        [[nodiscard]] LoadedUnit load(std::size_t index, CompileError& error) const;
+
+      private:
+        struct Unit
+        {
+            std::string identifier;
+            std::string bitcode;
+        };
+        std::vector<Unit> units_;
+    };
+
+    /// A unit the analysis could not open. Its conclusions are missing from the report.
+    struct FailedUnit
+    {
+        std::string identifier;
+        CompileError error;
+    };
+
     struct ProjectAnalysisReport
     {
         DiagnosticReport report;
-        /// Modules left out because their target ABI differs from the rest of the project.
+        /// Units left out because their target ABI differs from the rest of the project.
         std::vector<std::string> skippedIncompatibleModules;
         /// Units the whole-program view forced through a second analysis.
         std::size_t reanalyzedUnitCount = 0;
+        /// Units that failed to load in either pass. A unit that loaded in the first pass but
+        /// not in the second is listed here and its first-pass conclusions are dropped: they
+        /// are exactly what the second pass was going to correct.
+        std::vector<FailedUnit> failedUnits;
+        /// Most units held in memory at any one moment, as observed.
+        std::size_t peakLiveUnits = 0;
+        /// Wall time spent parsing bitcode, summed over every load on every thread.
+        std::int64_t loadMilliseconds = 0;
+
+        /// True when every unit contributed to the report.
+        [[nodiscard]] bool complete() const noexcept
+        {
+            return failedUnits.empty();
+        }
     };
 
     /// Analyses a whole program, so that a thread spawned in one translation unit is related to
@@ -181,8 +270,7 @@ namespace ctrace::concurrency
       public:
         explicit ProjectConcurrencyAnalyzer(AnalysisOptions options = {});
 
-        [[nodiscard]] ProjectAnalysisReport
-        analyze(const std::vector<const llvm::Module*>& modules) const;
+        [[nodiscard]] ProjectAnalysisReport analyze(const ProjectUnitSource& units) const;
 
       private:
         AnalysisOptions options_;
