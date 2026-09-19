@@ -145,7 +145,8 @@ Compile only:
 ./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --ir-format=bc
 ```
 
-Analyze with all available rules enabled by default:
+Analyze with the default rule selection — every rule except `thread-arg-escape` and
+`unsafe-signal-handler`, which `--rules=all` adds:
 
 ```bash
 ./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --format=human
@@ -176,7 +177,7 @@ Supported CLI options:
 - `--compile-arg=<arg>` repeatable
 - `--instrument`
 - `--analyze`
-- `--rules=data-race|missing-join|deadlock-lock-order|all`
+- `--rules=<comma-separated>|all` using the names in the table above
 - `--format=human|json|sarif`
 - `--verbose`
 - `--` to forward all trailing compiler args
