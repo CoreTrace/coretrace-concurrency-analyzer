@@ -163,9 +163,9 @@ namespace ctrace::concurrency::internal::analysis
                                       const std::string& cycleStartLock, const TUFacts& facts,
                                       std::unordered_set<std::string>& emittedCycleKeys)
         {
-            const auto cycleBegin = std::find_if(path.begin(), path.end(),
-                                                 [&](const LockOrderFact* edge)
-                                                 { return edge->firstLockId == cycleStartLock; });
+            const auto cycleBegin =
+                std::find_if(path.begin(), path.end(), [&](const LockOrderFact* edge)
+                             { return edge->firstLockId == cycleStartLock; });
             if (cycleBegin == path.end())
                 return;
 
