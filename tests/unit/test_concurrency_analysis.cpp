@@ -849,6 +849,10 @@ namespace
             {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_posix.c",
              .intent = "a helper called from main and from a worker races with itself",
              .dataRace = 1, .racingSymbol = "buffer_index"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_lambda_trampoline_thread_entry.cpp",
+             .intent = "a captureless lambda converted to a function pointer is a thread entry",
+             .dataRace = 1, .racingSymbol = "shared_counter"},
 
             // --- deadlock -----------------------------------------------------------------
             {.path = "tests/fixtures/concurrency/deadlock/deadlock_through_lock_wrappers.c",
