@@ -137,11 +137,12 @@ namespace
             ok = assertTrue(result.exitCode == 0, "--help should exit with code 0") && ok;
             ok = assertContains(result.output, "Usage:", "--help output") && ok;
             ok = assertContains(result.output, "--analyze", "--help output") && ok;
-            ok = assertContains(result.output,
-                                "--rules=data-race|missing-join|deadlock-lock-order|all",
-                                "--help output") &&
+            ok = assertContains(result.output, "--rules=<comma-separated>|all", "--help output") &&
                  ok;
-            ok = assertContains(result.output, "default: all available rules", "--help output") &&
+            // Every rule the option accepts is named, and the default says which are off.
+            ok = assertContains(result.output, "unsafe-signal-handler", "--help output") && ok;
+            ok = assertContains(result.output, "default: every rule except thread-arg-escape and",
+                                "--help output") &&
                  ok;
             ok = assertContains(result.output, "--format=human|json|sarif", "--help output") && ok;
             ok = assertContains(result.output, "--verbose", "--help output") && ok;
