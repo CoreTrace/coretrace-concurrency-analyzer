@@ -10,10 +10,7 @@
 
 namespace llvm
 {
-    class Function;
     class GlobalValue;
-    class GlobalVariable;
-    class Module;
 } // namespace llvm
 
 namespace ctrace::concurrency::internal::analysis
@@ -34,23 +31,26 @@ namespace ctrace::concurrency::internal::analysis
     /// defined elsewhere, or reads a global declared `extern` here and defined there. Both are
     /// dropped by the single-unit analysis, which is right on its own and wrong for a project.
     /// This index carries just enough across the boundary to repair those two blind spots.
+    ///
+    /// It is built from facts alone and answers by program symbol, so a unit's module may be
+    /// gone by the time its facts are indexed or queried.
     class ProgramSymbolIndex
     {
       public:
-        /// Records what `module` defines and what it spawns, reading the spawn counts from the
-        /// facts its own single-unit analysis produced. Safe to call per module in any order;
-        /// the result does not depend on it.
-        void addModule(const llvm::Module& module, const TUFacts& facts);
+        /// Records what a unit defines and what it spawns, reading the spawn counts from the
+        /// facts its own single-unit analysis produced. Safe to call per unit in any order; the
+        /// result does not depend on it.
+        void addUnit(const TUFacts& facts);
 
         /// True when some translation unit passes this function to a thread creation API, even
         /// if the spawn site is in another unit.
-        [[nodiscard]] bool isThreadEntry(const llvm::Function& function) const;
+        [[nodiscard]] bool isThreadEntry(const std::string& symbol) const;
 
         /// Instances that can run at once program-wide, and whether any spawn sits in a loop.
         /// Two threads running the same entry race with each other, and that fact may only be
         /// visible from the unit holding `main`.
-        [[nodiscard]] std::size_t spawnCount(const llvm::Function& function) const;
-        [[nodiscard]] bool spawnedInLoop(const llvm::Function& function) const;
+        [[nodiscard]] std::size_t spawnCount(const std::string& symbol) const;
+        [[nodiscard]] bool spawnedInLoop(const std::string& symbol) const;
 
         /// True when some unit of the program starts a thread. A `fork` is judged against the
         /// whole program, not against the unit it happens to sit in: the unit that forks and the
@@ -62,15 +62,15 @@ namespace ctrace::concurrency::internal::analysis
 
         /// True when a global declared here has a definition in another unit, so accesses to it
         /// describe real shared state rather than an unresolved symbol.
-        [[nodiscard]] bool isDefinedSomewhere(const llvm::GlobalVariable& global) const;
+        [[nodiscard]] bool isDefinedSomewhere(const std::string& symbol) const;
 
         /// Lock effects of a helper defined in some other unit, or null when no unit
         /// summarises it.
         [[nodiscard]] const std::vector<ParameterLockEffect>*
-        lockSummaryFor(const llvm::Function& function) const;
+        lockSummaryFor(const std::string& symbol) const;
 
         /// True when some unit joins or detaches the thread handle held in this global.
-        [[nodiscard]] bool resolvesHandleElsewhere(const llvm::GlobalVariable& handle) const;
+        [[nodiscard]] bool resolvesHandleElsewhere(const std::string& symbol) const;
 
         [[nodiscard]] const ProgramDefinedGlobals& definedGlobals() const noexcept
         {

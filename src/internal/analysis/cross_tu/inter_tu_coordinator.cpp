@@ -5,15 +5,12 @@
 #include "internal/analysis/process_lifecycle_checker.hpp"
 #include "internal/analysis/data_race_checker.hpp"
 #include "internal/analysis/facts.hpp"
-#include "internal/analysis/ir_utils.hpp"
 #include "internal/analysis/lock_order_analyzer.hpp"
 #include "internal/analysis/missing_join_detector.hpp"
 #include "internal/analysis/report_builder.hpp"
 #include "internal/analysis/tu_facts_builder.hpp"
 #include "program_symbol_index.hpp"
 
-#include <llvm/IR/Function.h>
-#include <llvm/IR/GlobalVariable.h>
 #include <llvm/IR/Module.h>
 #include <llvm/Support/ThreadPool.h>
 
@@ -44,14 +41,16 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
         }
 
         /// True when the program-wide view contradicts what this unit concluded alone. Only these
-        /// units are worth analysing a second time.
-        bool crossTUChangesFacts(const llvm::Module& module, const TUFacts& facts,
-                                 const ProgramSymbolIndex& index)
+        /// units are worth analysing a second time. Decided from the facts alone: the unit's
+        /// module need not be live.
+        bool crossTUChangesFacts(const TUFacts& facts, const ProgramSymbolIndex& index)
         {
+            const ProgramSymbolFacts& program = facts.program;
+
             // An `extern` this unit dropped as unresolved turns out to name real storage.
-            for (const llvm::GlobalVariable& global : module.globals())
+            for (const std::string& global : program.declaredGlobals)
             {
-                if (global.isDeclaration() && index.isDefinedSomewhere(global))
+                if (index.isDefinedSomewhere(global))
                     return true;
             }
 
@@ -68,30 +67,32 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 if (fact.action != ThreadLifecycleAction::Create)
                     continue;
 
-                const llvm::GlobalVariable* handle =
-                    globalOfStorageGroupId(module, fact.handleGroupId);
-                if (handle != nullptr && index.resolvesHandleElsewhere(*handle))
+                const auto handle = program.handleSymbolsByGroupId.find(fact.handleGroupId);
+                if (handle != program.handleSymbolsByGroupId.end() &&
+                    index.resolvesHandleElsewhere(handle->second))
+                {
                     return true;
+                }
             }
 
             // A helper this unit only sees declared turns out to take a lock for its caller.
-            for (const llvm::Function& function : module)
+            for (const std::string& function : program.declaredFunctions)
             {
-                if (function.isDeclaration() && index.lockSummaryFor(function) != nullptr)
+                if (index.lockSummaryFor(function) != nullptr)
                     return true;
             }
 
-            for (const llvm::Function& function : module)
+            for (const auto& [id, symbol] : program.functionSymbolsById)
             {
-                if (function.isDeclaration() || !index.isThreadEntry(function))
+                if (program.declaredFunctions.contains(symbol) || !index.isThreadEntry(symbol))
                     continue;
 
-                const auto it = facts.entryConcurrency.find(functionId(function));
+                const auto it = facts.entryConcurrency.find(id);
                 if (it == facts.entryConcurrency.end())
                     return true;
 
-                if (index.spawnCount(function) > it->second.staticSpawnCount ||
-                    (index.spawnedInLoop(function) && !it->second.hasSpawnInLoop))
+                if (index.spawnCount(symbol) > it->second.staticSpawnCount ||
+                    (index.spawnedInLoop(symbol) && !it->second.hasSpawnInLoop))
                 {
                     return true;
                 }
@@ -158,8 +159,8 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
         }
 
         ProgramSymbolIndex programIndex;
-        for (std::size_t index = 0; index < compatible.size(); ++index)
-            programIndex.addModule(*compatible[index], factsByModule[index]);
+        for (const TUFacts& facts : factsByModule)
+            programIndex.addUnit(facts);
 
         // Pass B: only the units whose conclusions the program-wide view changes.
         {
@@ -169,7 +170,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
             llvm::DefaultThreadPool pool;
             for (std::size_t index = 0; index < compatible.size(); ++index)
             {
-                if (!crossTUChangesFacts(*compatible[index], factsByModule[index], programIndex))
+                if (!crossTUChangesFacts(factsByModule[index], programIndex))
                     continue;
 
                 ++analysis.reanalyzedUnitCount;
@@ -181,7 +182,6 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
         std::set<std::string> reportedDiagnostics;
         for (std::size_t index = 0; index < compatible.size(); ++index)
         {
-            const llvm::Module& module = *compatible[index];
             const TUFacts& facts = factsByModule[index];
 
             DiagnosticReport moduleReport;
@@ -193,7 +193,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
             };
 
             if (options_.isEnabled(RuleId::DataRaceGlobal))
-                append(DataRaceChecker().run(module, facts));
+                append(DataRaceChecker().run(facts));
 
             if (options_.isEnabled(RuleId::DeadlockLockOrder))
                 append(LockOrderAnalyzer().run(facts));

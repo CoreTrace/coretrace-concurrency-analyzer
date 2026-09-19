@@ -53,7 +53,7 @@ namespace ctrace::concurrency
         if (options_.isEnabled(RuleId::DataRaceGlobal))
         {
             internal::analysis::DataRaceChecker dataRaceChecker;
-            appendDiagnostics(report, dataRaceChecker.run(module, facts));
+            appendDiagnostics(report, dataRaceChecker.run(facts));
         }
 
         if (options_.isEnabled(RuleId::DeadlockLockOrder))

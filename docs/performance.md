@@ -13,7 +13,9 @@ threads. Fixtures are too small to show anything.
 Timings come from the analyzer's own `--verbose` output, which separates
 `compile-ms` from `analysis-ms`. The IR cache is warm in every measurement, so
 `analysis-ms` is analysis alone. Profiles are 20-second samples attributed to
-self time. Memory is peak RSS from `/usr/bin/time -l`.
+self time. Memory is peak RSS from `/usr/bin/time -l`; `--verbose` now also
+prints the same figure from inside the process as `peak-rss-mb` (`getrusage`),
+and the two agree to the megabyte on a given run.
 
 ## Where the time goes
 
@@ -123,8 +125,9 @@ order above, retaining stdout and stderr separately for every run:
 ```
 
 `time -l` reports RSS in bytes on macOS; on Linux use `/usr/bin/time -v` and
-convert its maximum RSS from KiB. Compare `analysis-ms`, not total wall time,
-and check `0 compiled, 49 reused, 0 failed` before accepting a timed run.
+convert its maximum RSS from KiB, or read `peak-rss-mb` from the log, which is
+already normalised. Compare `analysis-ms`, not total wall time, and check
+`0 compiled, 49 reused, 0 failed` before accepting a timed run.
 
 ## Dominator-tree sharing: follow-up measurement
 

@@ -11,6 +11,8 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <sys/resource.h>
+
 #include <chrono>
 #include <optional>
 #include <memory>
@@ -118,6 +120,20 @@ namespace
         stream << "request.extra-args-count: " << request.extraCompileArgs.size() << "\n";
         for (const std::string& arg : request.extraCompileArgs)
             stream << "request.extra-arg: " << arg << "\n";
+    }
+
+    /// Peak resident set size of this process so far, in megabytes. What `/usr/bin/time`
+    /// reports from outside, made available from inside so a run can state its own ceiling.
+    long peakResidentMegabytes()
+    {
+        rusage usage{};
+        if (getrusage(RUSAGE_SELF, &usage) != 0)
+            return -1;
+#if defined(__APPLE__)
+        return usage.ru_maxrss / (1024 * 1024); // bytes
+#else
+        return usage.ru_maxrss / 1024; // kibibytes
+#endif
     }
 
     std::size_t countDefinedFunctions(const llvm::Module& module)
@@ -563,7 +579,8 @@ namespace
                          << " reused, " << failedSources.size() << " failed\n"
                          << "compile-ms: " << milliseconds(startedAt, compiledAt) << "\n"
                          << "analysis-ms: " << milliseconds(compiledAt, finishedAt) << "\n"
-                         << "reanalyzed-units: " << analysis.reanalyzedUnitCount << "\n";
+                         << "reanalyzed-units: " << analysis.reanalyzedUnitCount << "\n"
+                         << "peak-rss-mb: " << peakResidentMegabytes() << "\n";
         }
 
         // A partial project yields partial conclusions; saying so is part of the result.
