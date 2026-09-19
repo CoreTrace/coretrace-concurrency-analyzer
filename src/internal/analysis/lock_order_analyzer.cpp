@@ -2,7 +2,6 @@
 #include "lock_order_analyzer.hpp"
 
 #include "fact_queries.hpp"
-#include "report_builder.hpp"
 #include "internal/diagnostics/diagnostic_builder.hpp"
 
 #include <algorithm>
@@ -164,9 +163,9 @@ namespace ctrace::concurrency::internal::analysis
                                       const std::string& cycleStartLock, const TUFacts& facts,
                                       std::unordered_set<std::string>& emittedCycleKeys)
         {
-            const auto cycleBegin =
-                std::find_if(path.begin(), path.end(), [&](const LockOrderFact* edge)
-                             { return edge->firstLockId == cycleStartLock; });
+            const auto cycleBegin = std::find_if(path.begin(), path.end(),
+                                                 [&](const LockOrderFact* edge)
+                                                 { return edge->firstLockId == cycleStartLock; });
             if (cycleBegin == path.end())
                 return;
 
@@ -291,7 +290,6 @@ namespace ctrace::concurrency::internal::analysis
             explore(lockId);
         }
 
-        finalizeReport(report, facts);
         return report;
     }
 } // namespace ctrace::concurrency::internal::analysis

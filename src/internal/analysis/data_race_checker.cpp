@@ -3,7 +3,6 @@
 
 #include "fact_queries.hpp"
 #include "ir_utils.hpp"
-#include "report_builder.hpp"
 #include "internal/diagnostics/diagnostic_builder.hpp"
 
 #include <llvm/IR/Function.h>
@@ -535,7 +534,6 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
-        finalizeReport(report, facts);
         return report;
     }
 } // namespace ctrace::concurrency::internal::analysis

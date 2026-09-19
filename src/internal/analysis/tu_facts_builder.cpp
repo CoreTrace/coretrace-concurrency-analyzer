@@ -469,12 +469,15 @@ namespace ctrace::concurrency::internal::analysis
         // each analysing its own module.
         LlvmFunctionAnalysisProvider analyses;
 
-        ThreadSpawnDetector spawnDetector(classifier, analyses);
-        const bool crossTU = program != nullptr;
-        ThreadSpawnCollection spawnFacts = spawnDetector.collect(module, crossTU);
-        ThreadLifecycleCollector threadLifecycleCollector(classifier, analyses);
+        // Resolved once per unit and handed to every collector that follows calls: the spawn
+        // detector, the context propagator and the builder itself used to walk them apart.
         const std::vector<DirectCallSite> directCallSites =
             collectDirectCallSites(module, classifier, analyses);
+
+        ThreadSpawnDetector spawnDetector(classifier, analyses);
+        const bool crossTU = program != nullptr;
+        ThreadSpawnCollection spawnFacts = spawnDetector.collect(module, directCallSites, crossTU);
+        ThreadLifecycleCollector threadLifecycleCollector(classifier, analyses);
 
         // An `extern` declared here is real shared state only if the program defines it; a unit
         // on its own cannot tell that from an unresolved symbol.
@@ -541,7 +544,7 @@ namespace ctrace::concurrency::internal::analysis
             heldLocksByAccess.insert(functionLocks.begin(), functionLocks.end());
         }
 
-        ThreadContextPropagator threadContextPropagator(classifier, analyses);
+        ThreadContextPropagator threadContextPropagator(classifier);
         const TaskConcurrencyAnalyzer taskConcurrencyAnalyzer(classifier, analyses);
         const TaskConcurrencyResult taskConcurrency =
             taskConcurrencyAnalyzer.analyze(module, directCallSites, crossTU);
@@ -583,7 +586,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         facts.reachableThreadEntriesByFunction =
-            threadContextPropagator.collect(module, facts.entryConcurrency);
+            threadContextPropagator.collect(module, directCallSites, facts.entryConcurrency);
 
         std::unordered_map<std::string, std::vector<ThreadLifecycleFact>> lifecycleFactsByFunction;
         std::unordered_set<std::string> lifecycleFactKeys;

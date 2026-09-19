@@ -2,7 +2,6 @@
 #include "process_lifecycle_checker.hpp"
 
 #include "internal/diagnostics/diagnostic_builder.hpp"
-#include "report_builder.hpp"
 
 namespace ctrace::concurrency::internal::analysis
 {
@@ -90,7 +89,6 @@ namespace ctrace::concurrency::internal::analysis
                 .emit();
         }
 
-        finalizeReport(report, facts);
         return report;
     }
 } // namespace ctrace::concurrency::internal::analysis

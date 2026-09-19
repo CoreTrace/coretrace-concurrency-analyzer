@@ -214,9 +214,9 @@ Ranked by measured weight, not by guess.
    its effect. Profile the remaining cache misses before choosing a separate
    `StringSwitch` or `constexpr std::string_view` table change.
 2. **Share the dominator trees — completed.** The measurement above records
-   its effect: 90.5% fewer constructions on the 49-unit workload. The three
-   `collectDirectCallSites` walks per unit remain and are the next duplication
-   to remove on this path.
+   its effect: 90.5% fewer constructions on the 49-unit workload. The call
+   sites of a unit are now resolved once and shared, where three collectors
+   each walked them before.
 3. **Bound memory in cross-TU mode.** Peak RSS above 1 GB at 49 units is the
    figure most likely to stop a large project outright, and it is structural:
    modules are all live at once. Releasing a unit's module once its facts are

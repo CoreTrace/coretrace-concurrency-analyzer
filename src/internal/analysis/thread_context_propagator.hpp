@@ -2,6 +2,7 @@
 #pragma once
 
 #include "facts.hpp"
+#include "interprocedural_bindings.hpp"
 
 #include <unordered_map>
 
@@ -13,20 +14,17 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
-    class LlvmFunctionAnalysisProvider;
 
     class ThreadContextPropagator
     {
       public:
-        explicit ThreadContextPropagator(const ConcurrencySymbolClassifier& classifier,
-                                         LlvmFunctionAnalysisProvider& analyses);
+        explicit ThreadContextPropagator(const ConcurrencySymbolClassifier& classifier);
 
         [[nodiscard]] std::unordered_map<std::string, ThreadEntrySet> collect(
-            const llvm::Module& module,
+            const llvm::Module& module, const std::vector<DirectCallSite>& directCallSites,
             const std::unordered_map<std::string, EntryConcurrencyInfo>& entryConcurrency) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
-        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "missing_join_detector.hpp"
 
-#include "report_builder.hpp"
 #include "internal/diagnostics/diagnostic_builder.hpp"
 
 #include <algorithm>
@@ -222,7 +221,6 @@ namespace ctrace::concurrency::internal::analysis
                 .emit();
         }
 
-        finalizeReport(report, facts);
         return report;
     }
 } // namespace ctrace::concurrency::internal::analysis
