@@ -326,6 +326,39 @@ namespace ctrace::concurrency::internal::analysis
             walk.byteOffset += offset.getSExtValue();
         }
 
+        /// Resolves a call result only when every normal return names the same function.
+        /// This includes lambda conversion operators without depending on their ABI names.
+        /// Arguments and other computed returns stay unresolved: they belong to the callee's
+        /// context and cannot be treated as values in the caller without substitution.
+        const llvm::Function* constantReturnedFunction(const llvm::CallBase& call)
+        {
+            const auto* callee = llvm::dyn_cast<llvm::Function>(
+                call.getCalledOperand()->stripPointerCastsAndAliases());
+            if (callee == nullptr || callee->isDeclaration() || callee->isInterposable())
+                return nullptr;
+
+            const llvm::Function* result = nullptr;
+            for (const llvm::BasicBlock& block : *callee)
+            {
+                const auto* ret = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator());
+                if (ret == nullptr)
+                    continue;
+
+                const llvm::Value* returnedValue = ret->getReturnValue();
+                if (returnedValue == nullptr)
+                    return nullptr;
+
+                const auto* candidate =
+                    llvm::dyn_cast<llvm::Function>(returnedValue->stripPointerCastsAndAliases());
+                if (candidate == nullptr || (result != nullptr && result != candidate))
+                    return nullptr;
+
+                result = candidate;
+            }
+
+            return result;
+        }
+
         const llvm::Value* resolveCopiedValue(const llvm::Value& value,
                                               llvm::SmallPtrSetImpl<const llvm::Value*>& seen,
                                               AccessPathWalk* walk = nullptr)
@@ -363,6 +396,9 @@ namespace ctrace::concurrency::internal::analysis
 
                 if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(current))
                     return followLocalPointerCopy(*load, seen);
+
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(current))
+                    return constantReturnedFunction(*call);
 
                 return nullptr;
             }
