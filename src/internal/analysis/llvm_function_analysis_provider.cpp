@@ -2,6 +2,8 @@
 #include "llvm_function_analysis_provider.hpp"
 
 #include <llvm/Analysis/AliasAnalysis.h>
+#include <llvm/Analysis/LoopInfo.h>
+#include <llvm/IR/Dominators.h>
 #include <llvm/IR/PassManager.h>
 #include <llvm/Passes/PassBuilder.h>
 
@@ -37,6 +39,19 @@ namespace ctrace::concurrency::internal::analysis
     llvm::AAResults& LlvmFunctionAnalysisProvider::getAAResults(const llvm::Function& function)
     {
         return impl_->functionAnalysisManager.getResult<llvm::AAManager>(
+            const_cast<llvm::Function&>(function));
+    }
+
+    const llvm::DominatorTree&
+    LlvmFunctionAnalysisProvider::getDominatorTree(const llvm::Function& function)
+    {
+        return impl_->functionAnalysisManager.getResult<llvm::DominatorTreeAnalysis>(
+            const_cast<llvm::Function&>(function));
+    }
+
+    const llvm::LoopInfo& LlvmFunctionAnalysisProvider::getLoopInfo(const llvm::Function& function)
+    {
+        return impl_->functionAnalysisManager.getResult<llvm::LoopAnalysis>(
             const_cast<llvm::Function&>(function));
     }
 } // namespace ctrace::concurrency::internal::analysis

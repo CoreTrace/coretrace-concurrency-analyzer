@@ -13,9 +13,13 @@ namespace llvm
 
 namespace ctrace::concurrency::internal::analysis
 {
+    class LlvmFunctionAnalysisProvider;
+
     class SharedAccessCollector
     {
       public:
+        explicit SharedAccessCollector(LlvmFunctionAnalysisProvider& analyses);
+
         /// `programDefined` names the globals the whole program defines, so an `extern`
         /// declared here and defined in another unit is followed instead of dropped. Null when
         /// only this unit is under analysis.
@@ -25,5 +29,8 @@ namespace ctrace::concurrency::internal::analysis
         [[nodiscard]] std::vector<PendingAccess>
         collect(const llvm::Module& module, const ProgramDefinedGlobals* programDefined = nullptr,
                 const std::unordered_set<std::string>* sharedObjectIds = nullptr) const;
+
+      private:
+        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

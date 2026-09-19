@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 #include "lock_effect_application.hpp"
 
 #include <llvm/IR/Dominators.h>
@@ -63,9 +64,11 @@ namespace ctrace::concurrency::internal::analysis
     } // namespace
 
     LockOrderCollector::LockOrderCollector(const ConcurrencySymbolClassifier& classifier,
+                                           LlvmFunctionAnalysisProvider& analyses,
                                            const LockWrapperSummaries* summaries,
                                            const SharedObjectBindings* sharedObjects)
-        : classifier_(classifier), summaries_(summaries), sharedObjects_(sharedObjects)
+        : classifier_(classifier), analyses_(analyses), summaries_(summaries),
+          sharedObjects_(sharedObjects)
     {
     }
 
@@ -93,8 +96,7 @@ namespace ctrace::concurrency::internal::analysis
         const FunctionLockEffects lockEffects =
             collectFunctionLockEffects(function, effectResolver);
 
-        llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-        llvm::DominatorTree dominatorTree(mutableFunction);
+        const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
 
         std::vector<const llvm::BasicBlock*> reachableBlocks;
         for (const llvm::BasicBlock& block : function)

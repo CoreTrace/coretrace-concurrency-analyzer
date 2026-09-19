@@ -14,6 +14,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
 
     struct DirectCallSite
     {
@@ -27,5 +28,6 @@ namespace ctrace::concurrency::internal::analysis
 
     [[nodiscard]] std::vector<DirectCallSite>
     collectDirectCallSites(const llvm::Module& module,
-                           const ConcurrencySymbolClassifier& classifier);
+                           const ConcurrencySymbolClassifier& classifier,
+                           LlvmFunctionAnalysisProvider& analyses);
 } // namespace ctrace::concurrency::internal::analysis

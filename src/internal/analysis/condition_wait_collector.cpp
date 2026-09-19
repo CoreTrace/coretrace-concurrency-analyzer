@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/IR/BasicBlock.h>
@@ -13,8 +14,9 @@
 
 namespace ctrace::concurrency::internal::analysis
 {
-    ConditionWaitCollector::ConditionWaitCollector(const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+    ConditionWaitCollector::ConditionWaitCollector(const ConcurrencySymbolClassifier& classifier,
+                                                   LlvmFunctionAnalysisProvider& analyses)
+        : classifier_(classifier), analyses_(analyses)
     {
     }
 
@@ -27,9 +29,8 @@ namespace ctrace::concurrency::internal::analysis
             if (function.isDeclaration())
                 continue;
 
-            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-            const llvm::DominatorTree dominatorTree(mutableFunction);
-            const llvm::LoopInfo loopInfo(dominatorTree);
+            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
+            const llvm::LoopInfo& loopInfo = analyses_.getLoopInfo(function);
 
             for (const llvm::BasicBlock& block : function)
             {

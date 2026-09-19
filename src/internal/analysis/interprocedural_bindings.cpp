@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/IR/Dominators.h>
@@ -14,7 +15,8 @@ namespace ctrace::concurrency::internal::analysis
 {
     std::vector<DirectCallSite>
     collectDirectCallSites(const llvm::Module& module,
-                           const ConcurrencySymbolClassifier& classifier)
+                           const ConcurrencySymbolClassifier& classifier,
+                           LlvmFunctionAnalysisProvider& analyses)
     {
         std::vector<DirectCallSite> sites;
 
@@ -23,9 +25,8 @@ namespace ctrace::concurrency::internal::analysis
             if (function.isDeclaration())
                 continue;
 
-            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-            llvm::DominatorTree dominatorTree(mutableFunction);
-            llvm::LoopInfo loopInfo(dominatorTree);
+            const llvm::DominatorTree& dominatorTree = analyses.getDominatorTree(function);
+            const llvm::LoopInfo& loopInfo = analyses.getLoopInfo(function);
 
             for (const llvm::BasicBlock& block : function)
             {

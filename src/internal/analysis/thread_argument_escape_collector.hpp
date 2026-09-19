@@ -11,6 +11,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
 
     /// Finds threads handed a pointer into the frame that created them.
     ///
@@ -21,12 +22,14 @@ namespace ctrace::concurrency::internal::analysis
     class ThreadArgumentEscapeCollector
     {
       public:
-        explicit ThreadArgumentEscapeCollector(const ConcurrencySymbolClassifier& classifier);
+        explicit ThreadArgumentEscapeCollector(const ConcurrencySymbolClassifier& classifier,
+                                               LlvmFunctionAnalysisProvider& analyses);
 
         [[nodiscard]] std::vector<ThreadArgumentEscapeFact>
         collect(const llvm::Module& module) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

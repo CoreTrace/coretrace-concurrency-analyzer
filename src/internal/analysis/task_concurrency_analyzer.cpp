@@ -4,6 +4,7 @@
 #include "concurrency_symbol_classifier.hpp"
 #include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Dominators.h>
@@ -187,8 +188,9 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    TaskConcurrencyAnalyzer::TaskConcurrencyAnalyzer(const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+    TaskConcurrencyAnalyzer::TaskConcurrencyAnalyzer(const ConcurrencySymbolClassifier& classifier,
+                                                     LlvmFunctionAnalysisProvider& analyses)
+        : classifier_(classifier), analyses_(analyses)
     {
     }
 
@@ -216,8 +218,7 @@ namespace ctrace::concurrency::internal::analysis
                 continue;
             }
 
-            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-            const llvm::DominatorTree dominatorTree(mutableFunction);
+            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
 
             for (const llvm::BasicBlock& block : function)
             {
@@ -286,8 +287,7 @@ namespace ctrace::concurrency::internal::analysis
             if (sitesIt == sitesByFunction.end() || sitesIt->second.spawns.empty())
                 continue;
 
-            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-            const llvm::DominatorTree dominatorTree(mutableFunction);
+            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
 
             for (const SpawnSite& spawn : sitesIt->second.spawns)
             {
@@ -358,8 +358,7 @@ namespace ctrace::concurrency::internal::analysis
             if (function.isDeclaration())
                 continue;
 
-            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-            const llvm::DominatorTree dominatorTree(mutableFunction);
+            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
 
             for (const llvm::BasicBlock& block : function)
             {

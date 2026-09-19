@@ -14,6 +14,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
     struct DirectCallSite;
 
     /// The object a thread entry receives, when the program proves that object is shared.
@@ -41,7 +42,8 @@ namespace ctrace::concurrency::internal::analysis
     class SharedObjectBindingCollector
     {
       public:
-        explicit SharedObjectBindingCollector(const ConcurrencySymbolClassifier& classifier);
+        explicit SharedObjectBindingCollector(const ConcurrencySymbolClassifier& classifier,
+                                              LlvmFunctionAnalysisProvider& analyses);
 
         /// `directCallSites` lets an object known only as a parameter be traced back to the
         /// caller that owns it: an object whose constructor starts its own thread hands `this`
@@ -52,5 +54,6 @@ namespace ctrace::concurrency::internal::analysis
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

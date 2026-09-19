@@ -9,8 +9,9 @@
 
 namespace ctrace::concurrency::internal::analysis
 {
-    ThreadContextPropagator::ThreadContextPropagator(const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+    ThreadContextPropagator::ThreadContextPropagator(const ConcurrencySymbolClassifier& classifier,
+                                                     LlvmFunctionAnalysisProvider& analyses)
+        : classifier_(classifier), analyses_(analyses)
     {
     }
 
@@ -18,7 +19,8 @@ namespace ctrace::concurrency::internal::analysis
         const llvm::Module& module,
         const std::unordered_map<std::string, EntryConcurrencyInfo>& entryConcurrency) const
     {
-        const std::vector<DirectCallSite> callSites = collectDirectCallSites(module, classifier_);
+        const std::vector<DirectCallSite> callSites =
+            collectDirectCallSites(module, classifier_, analyses_);
 
         std::unordered_map<std::string, std::vector<std::string>> calleesByFunction;
         for (const DirectCallSite& site : callSites)

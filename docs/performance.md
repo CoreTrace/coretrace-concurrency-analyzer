@@ -126,6 +126,37 @@ order above, retaining stdout and stderr separately for every run:
 convert its maximum RSS from KiB. Compare `analysis-ms`, not total wall time,
 and check `0 compiled, 49 reused, 0 failed` before accepting a timed run.
 
+## Dominator-tree sharing: follow-up measurement
+
+Measured on 2026-09-19, comparing `fbd89db` (v0.2.3) with the shared-provider
+change on the same machine, toolchain and Release settings as above, and the
+same `coretrace-stack-analyzer` workload (`0 compiled, 49 reused, 0 failed` on
+every run).
+
+Construction counts come from a throwaway counter at each of the twelve sites
+in the baseline and inside `LlvmFunctionAnalysisProvider::getDominatorTree` in
+the change; they are deterministic and do not depend on machine load.
+
+| | Baseline | Shared provider |
+| --- | --- | --- |
+| Dominator-tree requests, 49 units | 756,947 | 756,947 |
+| Dominator trees built, 49 units | 756,947 | 71,747 |
+| Dominator trees built, `data_race_basic.c` alone | 23 | 2 |
+
+Requests are unchanged, which confirms every site was converted without
+altering the analysis paths; constructions fall by **90.5%** (10.6×). Reports
+were identical on the workload, and the CTest and human-output suites passed.
+
+Timing was measured in the alternating order **A B B A B A A B** twice, but the
+one-minute load average stayed between 7.2 and 10.5 on the eight-core machine
+and an unrelated process held one core at 100% throughout, so the `analysis-ms`
+readings (first series: A 7744 / 6795 / 6917 / 6926, B 9472 / 6837 / 6823 / 6603;
+second series drifting monotonically from 5416 to 8166 across both binaries)
+are not conclusive. No regression is visible; no speedup is claimed. Peak RSS
+readings ranged 0.95–1.22 GB for both binaries with no separable difference,
+as expected: a cached tree lives only for its unit's `TUFactsBuilder::build`
+call and is small next to the parsed module.
+
 ## Scaling
 
 After that change, with the cross-TU thread pool active:
@@ -148,9 +179,11 @@ project several times larger will need headroom a small CI runner may not have.
 **Fact building** — `TUFactsBuilder::build`, which runs for every unit whatever
 `--rules` selects, since the rules only consume its output. It makes several
 independent passes over every function and instruction, so it is O(F·I) in the
-size of the module, with a large constant: **12 distinct sites construct their
-own `llvm::DominatorTree` per function**, each O(V+E) with LLVM's own allocation
-cost. Nothing shares them.
+size of the module, with a large constant. Twelve distinct sites used to
+construct their own `llvm::DominatorTree` per function, each O(V+E) with LLVM's
+own allocation cost; they now ask one `LlvmFunctionAnalysisProvider` per unit,
+which computes each function's tree (and loop info) once and hands out the same
+result to every collector. The measurement below records the effect.
 
 **Symbol classification** — the cascade of ~31 predicates and canonical-name
 construction now run once per distinct resolved callee per classifier instance.
@@ -180,9 +213,10 @@ Ranked by measured weight, not by guess.
 1. **Memoise symbol classification — completed.** The measurement above records
    its effect. Profile the remaining cache misses before choosing a separate
    `StringSwitch` or `constexpr std::string_view` table change.
-2. **Share the dominator trees.** Twelve sites build their own per function.
-   Building each once and passing it through the facts would remove eleven
-   redundant constructions per function.
+2. **Share the dominator trees — completed.** The measurement above records
+   its effect: 90.5% fewer constructions on the 49-unit workload. The three
+   `collectDirectCallSites` walks per unit remain and are the next duplication
+   to remove on this path.
 3. **Bound memory in cross-TU mode.** Peak RSS above 1 GB at 49 units is the
    figure most likely to stop a large project outright, and it is structural:
    modules are all live at once. Releasing a unit's module once its facts are

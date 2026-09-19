@@ -13,6 +13,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
 
     /// Finds condition-variable waits that check nothing when they wake.
     ///
@@ -24,11 +25,13 @@ namespace ctrace::concurrency::internal::analysis
     class ConditionWaitCollector
     {
       public:
-        explicit ConditionWaitCollector(const ConcurrencySymbolClassifier& classifier);
+        explicit ConditionWaitCollector(const ConcurrencySymbolClassifier& classifier,
+                                        LlvmFunctionAnalysisProvider& analyses);
 
         [[nodiscard]] std::vector<ConditionWaitFact> collect(const llvm::Module& module) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

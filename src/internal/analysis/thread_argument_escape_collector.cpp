@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/BasicBlock.h>
@@ -63,8 +64,8 @@ namespace ctrace::concurrency::internal::analysis
     } // namespace
 
     ThreadArgumentEscapeCollector::ThreadArgumentEscapeCollector(
-        const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+        const ConcurrencySymbolClassifier& classifier, LlvmFunctionAnalysisProvider& analyses)
+        : classifier_(classifier), analyses_(analyses)
     {
     }
 
@@ -112,8 +113,7 @@ namespace ctrace::concurrency::internal::analysis
             if (creations.empty())
                 continue;
 
-            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-            const llvm::DominatorTree dominatorTree(mutableFunction);
+            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
 
             for (const llvm::CallBase* creation : creations)
             {
