@@ -2,6 +2,7 @@
 #include "lock_wrapper_summaries.hpp"
 
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 #include "lock_effect_application.hpp"
 #include "synchronization_effects.hpp"
 
@@ -97,6 +98,7 @@ namespace ctrace::concurrency::internal::analysis
 
     LockWrapperSummaries collectLockWrapperSummaries(const llvm::Module& module,
                                                      const ConcurrencySymbolClassifier& classifier,
+                                                     LlvmFunctionAnalysisProvider& analyses,
                                                      const llvm::DataLayout& layout)
     {
         LockWrapperSummaries summaries;
@@ -118,8 +120,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (effects.effectsByInstruction.empty())
                     continue;
 
-                llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-                const llvm::DominatorTree dominatorTree(mutableFunction);
+                const llvm::DominatorTree& dominatorTree = analyses.getDominatorTree(function);
 
                 std::vector<ParameterLockEffect> parameterEffects;
                 for (const llvm::Argument& argument : function.args())

@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/ADT/SmallPtrSet.h>
@@ -272,8 +273,8 @@ namespace ctrace::concurrency::internal::analysis
     } // namespace
 
     ThreadLifecycleCollector::ThreadLifecycleCollector(
-        const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+        const ConcurrencySymbolClassifier& classifier, LlvmFunctionAnalysisProvider& analyses)
+        : classifier_(classifier), analyses_(analyses)
     {
     }
 
@@ -291,9 +292,8 @@ namespace ctrace::concurrency::internal::analysis
             if (function.isDeclaration())
                 continue;
 
-            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-            llvm::DominatorTree dominatorTree(mutableFunction);
-            const llvm::LoopInfo loopInfo(dominatorTree);
+            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
+            const llvm::LoopInfo& loopInfo = analyses_.getLoopInfo(function);
 
             std::vector<const llvm::BasicBlock*> returnBlocks;
             for (const llvm::BasicBlock& block : function)

@@ -14,6 +14,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
 
     struct ThreadSpawnCollection
     {
@@ -24,7 +25,8 @@ namespace ctrace::concurrency::internal::analysis
     class ThreadSpawnDetector
     {
       public:
-        explicit ThreadSpawnDetector(const ConcurrencySymbolClassifier& classifier);
+        explicit ThreadSpawnDetector(const ConcurrencySymbolClassifier& classifier,
+                                     LlvmFunctionAnalysisProvider& analyses);
 
         /// `includeExternalEntries` keeps spawns whose entry is only declared here. A
         /// single-unit run drops them: nothing can be said about a body it cannot see. A
@@ -34,5 +36,6 @@ namespace ctrace::concurrency::internal::analysis
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

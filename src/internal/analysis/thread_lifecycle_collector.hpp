@@ -13,15 +13,18 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
 
     class ThreadLifecycleCollector
     {
       public:
-        explicit ThreadLifecycleCollector(const ConcurrencySymbolClassifier& classifier);
+        explicit ThreadLifecycleCollector(const ConcurrencySymbolClassifier& classifier,
+                                          LlvmFunctionAnalysisProvider& analyses);
 
         [[nodiscard]] std::vector<ThreadLifecycleFact> collect(const llvm::Module& module) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

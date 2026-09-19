@@ -14,6 +14,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
 
     /// A lock effect a function has on one of its parameters, surviving the call.
     struct ParameterLockEffect
@@ -36,8 +37,7 @@ namespace ctrace::concurrency::internal::analysis
 
     /// Summarises every function of the module, resolving wrappers that call other wrappers by
     /// repeating until nothing new is learned.
-    [[nodiscard]] LockWrapperSummaries
-    collectLockWrapperSummaries(const llvm::Module& module,
-                                const ConcurrencySymbolClassifier& classifier,
-                                const llvm::DataLayout& layout);
+    [[nodiscard]] LockWrapperSummaries collectLockWrapperSummaries(
+        const llvm::Module& module, const ConcurrencySymbolClassifier& classifier,
+        LlvmFunctionAnalysisProvider& analyses, const llvm::DataLayout& layout);
 } // namespace ctrace::concurrency::internal::analysis

@@ -16,6 +16,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
     struct DirectCallSite;
 
     struct TaskConcurrencyResult
@@ -44,7 +45,8 @@ namespace ctrace::concurrency::internal::analysis
     class TaskConcurrencyAnalyzer
     {
       public:
-        explicit TaskConcurrencyAnalyzer(const ConcurrencySymbolClassifier& classifier);
+        explicit TaskConcurrencyAnalyzer(const ConcurrencySymbolClassifier& classifier,
+                                         LlvmFunctionAnalysisProvider& analyses);
 
         /// `includeExternalEntries` mirrors ThreadSpawnDetector: a project-wide run must decide
         /// whether two instances of an entry overlap even when its body lives in another unit,
@@ -55,5 +57,6 @@ namespace ctrace::concurrency::internal::analysis
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

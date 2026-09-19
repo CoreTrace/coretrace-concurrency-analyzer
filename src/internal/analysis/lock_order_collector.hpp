@@ -17,6 +17,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
 
     class LockOrderCollector
     {
@@ -28,6 +29,7 @@ namespace ctrace::concurrency::internal::analysis
         /// they are given, so a lock taken inside a helper still protects the code after the
         /// call. Null leaves those calls opaque, as before.
         explicit LockOrderCollector(const ConcurrencySymbolClassifier& classifier,
+                                    LlvmFunctionAnalysisProvider& analyses,
                                     const LockWrapperSummaries* summaries = nullptr,
                                     const SharedObjectBindings* sharedObjects = nullptr);
 
@@ -37,6 +39,7 @@ namespace ctrace::concurrency::internal::analysis
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        LlvmFunctionAnalysisProvider& analyses_;
         const LockWrapperSummaries* summaries_ = nullptr;
         const SharedObjectBindings* sharedObjects_ = nullptr;
     };

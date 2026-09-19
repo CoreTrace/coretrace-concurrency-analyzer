@@ -13,11 +13,13 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    class LlvmFunctionAnalysisProvider;
 
     class ThreadContextPropagator
     {
       public:
-        explicit ThreadContextPropagator(const ConcurrencySymbolClassifier& classifier);
+        explicit ThreadContextPropagator(const ConcurrencySymbolClassifier& classifier,
+                                         LlvmFunctionAnalysisProvider& analyses);
 
         [[nodiscard]] std::unordered_map<std::string, ThreadEntrySet> collect(
             const llvm::Module& module,
@@ -25,5 +27,6 @@ namespace ctrace::concurrency::internal::analysis
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
+        LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis

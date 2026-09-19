@@ -5,6 +5,7 @@
 #include "condition_wait_collector.hpp"
 #include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 #include "lock_order_collector.hpp"
 #include "lock_scope_tracker.hpp"
 #include "lock_state_propagator.hpp"
@@ -462,13 +463,18 @@ namespace ctrace::concurrency::internal::analysis
                                   const ProgramSymbolIndex* program) const
     {
         const ConcurrencySymbolClassifier classifier;
+        // One set of LLVM function analyses for this unit, shared by every collector below.
+        // The module is never modified during the analysis, so nothing computed here goes
+        // stale; the provider lives on this frame because a builder is shared across threads,
+        // each analysing its own module.
+        LlvmFunctionAnalysisProvider analyses;
 
-        ThreadSpawnDetector spawnDetector(classifier);
+        ThreadSpawnDetector spawnDetector(classifier, analyses);
         const bool crossTU = program != nullptr;
         ThreadSpawnCollection spawnFacts = spawnDetector.collect(module, crossTU);
-        ThreadLifecycleCollector threadLifecycleCollector(classifier);
+        ThreadLifecycleCollector threadLifecycleCollector(classifier, analyses);
         const std::vector<DirectCallSite> directCallSites =
-            collectDirectCallSites(module, classifier);
+            collectDirectCallSites(module, classifier, analyses);
 
         // An `extern` declared here is real shared state only if the program defines it; a unit
         // on its own cannot tell that from an unresolved symbol.
@@ -478,7 +484,7 @@ namespace ctrace::concurrency::internal::analysis
         // Resolved once for the whole unit: a wrapper's effect on the lock it is handed does not
         // depend on which caller is being looked at.
         LockWrapperSummaries lockWrapperSummaries =
-            collectLockWrapperSummaries(module, classifier, module.getDataLayout());
+            collectLockWrapperSummaries(module, classifier, analyses, module.getDataLayout());
 
         // A helper defined in another unit is only a declaration here, so its body cannot be
         // summarised; the program supplies the summary the other unit produced.
@@ -501,13 +507,13 @@ namespace ctrace::concurrency::internal::analysis
         // Computed before the accesses are gathered: the thread that hands an object over keeps
         // reaching it through the same slot, so its own accesses need the identity too.
         const SharedObjectBindings sharedObjectBindings =
-            SharedObjectBindingCollector(classifier).collect(module, directCallSites);
+            SharedObjectBindingCollector(classifier, analyses).collect(module, directCallSites);
 
         std::unordered_set<std::string> sharedObjectIds;
         for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
             sharedObjectIds.insert(binding.objectId);
 
-        SharedAccessCollector accessCollector;
+        SharedAccessCollector accessCollector(analyses);
         std::vector<PendingAccess> pendingAccesses =
             accessCollector.collect(module, programDefined, &sharedObjectIds);
 
@@ -521,7 +527,8 @@ namespace ctrace::concurrency::internal::analysis
             functionsById[pendingAccess.fact.functionId] = pendingAccess.function;
         }
 
-        LockScopeTracker lockScopeTracker(classifier, &lockWrapperSummaries, &sharedObjectBindings);
+        LockScopeTracker lockScopeTracker(classifier, analyses, &lockWrapperSummaries,
+                                          &sharedObjectBindings);
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;
         for (const auto& [functionKey, trackedAccesses] : trackedAccessesByFunction)
         {
@@ -534,8 +541,8 @@ namespace ctrace::concurrency::internal::analysis
             heldLocksByAccess.insert(functionLocks.begin(), functionLocks.end());
         }
 
-        ThreadContextPropagator threadContextPropagator(classifier);
-        const TaskConcurrencyAnalyzer taskConcurrencyAnalyzer(classifier);
+        ThreadContextPropagator threadContextPropagator(classifier, analyses);
+        const TaskConcurrencyAnalyzer taskConcurrencyAnalyzer(classifier, analyses);
         const TaskConcurrencyResult taskConcurrency =
             taskConcurrencyAnalyzer.analyze(module, directCallSites, crossTU);
 
@@ -643,7 +650,8 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
-        facts.threadArgumentEscapes = ThreadArgumentEscapeCollector(classifier).collect(module);
+        facts.threadArgumentEscapes =
+            ThreadArgumentEscapeCollector(classifier, analyses).collect(module);
         facts.signalHandlers = SignalHandlerCollector(classifier).collect(module, directCallSites);
 
         // A fork whose child goes on to replace its process image inherits nothing that
@@ -686,7 +694,7 @@ namespace ctrace::concurrency::internal::analysis
         // that is where the missing loop has to be written.
         {
             std::unordered_map<std::string, ConditionWaitFact> unguardedByFunction;
-            const ConditionWaitCollector conditionWaitCollector(classifier);
+            const ConditionWaitCollector conditionWaitCollector(classifier, analyses);
             for (const ConditionWaitFact& fact : conditionWaitCollector.collect(module))
             {
                 if (!fact.guardedByLoop)
@@ -799,12 +807,12 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_map<std::string, std::vector<ParameterizedAccess>> summariesByFunction;
         std::unordered_map<std::string, std::unordered_set<std::string>> summaryKeysByFunction;
 
-        LockStatePropagator lockStatePropagator(classifier, &lockWrapperSummaries,
+        LockStatePropagator lockStatePropagator(classifier, analyses, &lockWrapperSummaries,
                                                 &sharedObjectBindings);
         const LockPropagationResult lockPropagation =
             lockStatePropagator.collect(module, directCallSites);
 
-        LockOrderCollector lockOrderCollector(classifier, &lockWrapperSummaries,
+        LockOrderCollector lockOrderCollector(classifier, analyses, &lockWrapperSummaries,
                                               &sharedObjectBindings);
         for (const llvm::Function& function : module)
         {

@@ -267,6 +267,11 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
+    SharedAccessCollector::SharedAccessCollector(LlvmFunctionAnalysisProvider& analyses)
+        : analyses_(analyses)
+    {
+    }
+
     std::vector<PendingAccess>
     SharedAccessCollector::collect(const llvm::Module& module,
                                    const ProgramDefinedGlobals* programDefined,
@@ -281,7 +286,6 @@ namespace ctrace::concurrency::internal::analysis
                 trackedGlobals.push_back(&global);
         }
 
-        LlvmFunctionAnalysisProvider analysisProvider;
         ConcurrencySymbolClassifier classifier;
         AtomicOnlyCache atomicOnlyCache;
         const llvm::DataLayout& layout = module.getDataLayout();
@@ -295,7 +299,7 @@ namespace ctrace::concurrency::internal::analysis
             if (function.isDeclaration())
                 continue;
 
-            llvm::AAResults& aaResults = analysisProvider.getAAResults(function);
+            llvm::AAResults& aaResults = analyses_.getAAResults(function);
 
             for (const llvm::BasicBlock& block : function)
             {

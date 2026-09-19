@@ -4,6 +4,7 @@
 #include "concurrency_symbol_classifier.hpp"
 #include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
+#include "llvm_function_analysis_provider.hpp"
 
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/IR/Dominators.h>
@@ -160,8 +161,9 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    ThreadSpawnDetector::ThreadSpawnDetector(const ConcurrencySymbolClassifier& classifier)
-        : classifier_(classifier)
+    ThreadSpawnDetector::ThreadSpawnDetector(const ConcurrencySymbolClassifier& classifier,
+                                             LlvmFunctionAnalysisProvider& analyses)
+        : classifier_(classifier), analyses_(analyses)
     {
     }
 
@@ -178,9 +180,8 @@ namespace ctrace::concurrency::internal::analysis
             if (function.isDeclaration())
                 continue;
 
-            llvm::Function& mutableFunction = const_cast<llvm::Function&>(function);
-            llvm::DominatorTree dominatorTree(mutableFunction);
-            llvm::LoopInfo loopInfo(dominatorTree);
+            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
+            const llvm::LoopInfo& loopInfo = analyses_.getLoopInfo(function);
 
             for (const llvm::BasicBlock& block : function)
             {
@@ -226,7 +227,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         const std::vector<DirectFunctionCallBinding> directCallBindings =
-            buildDirectCallBindings(collectDirectCallSites(module, classifier_));
+            buildDirectCallBindings(collectDirectCallSites(module, classifier_, analyses_));
 
         bool changed = true;
         while (changed)
