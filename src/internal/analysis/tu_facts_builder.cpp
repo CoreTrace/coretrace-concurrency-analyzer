@@ -464,6 +464,7 @@ namespace ctrace::concurrency::internal::analysis
                                                      const TUFacts& facts)
         {
             ProgramSymbolFacts program;
+            program.abiKey = module.getTargetTriple() + '|' + module.getDataLayoutStr();
             for (const llvm::GlobalVariable& global : module.globals())
             {
                 (global.isDeclaration() ? program.declaredGlobals : program.definedGlobals)

@@ -295,6 +295,9 @@ namespace ctrace::concurrency::internal::analysis
     /// `static int counter` in different files apart.
     struct ProgramSymbolFacts
     {
+        /// Target triple and data layout. Two units may only exchange byte offsets and lock
+        /// identities when both were compiled against the same ones.
+        std::string abiKey;
         /// Globals this unit defines, and globals it only declares.
         std::unordered_set<std::string> definedGlobals;
         std::unordered_set<std::string> declaredGlobals;

@@ -2,9 +2,12 @@
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
 
+#include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/raw_ostream.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <iostream>
 #include <memory>
@@ -16,14 +19,18 @@
 
 namespace
 {
+    using ctrace::concurrency::AnalysisOptions;
+    using ctrace::concurrency::CompileError;
     using ctrace::concurrency::CompileRequest;
     using ctrace::concurrency::CompileResult;
     using ctrace::concurrency::Diagnostic;
     using ctrace::concurrency::DiagnosticReport;
     using ctrace::concurrency::InMemoryIRCompiler;
     using ctrace::concurrency::IRFormat;
+    using ctrace::concurrency::LoadedUnit;
     using ctrace::concurrency::ProjectAnalysisReport;
     using ctrace::concurrency::ProjectConcurrencyAnalyzer;
+    using ctrace::concurrency::ProjectUnitSource;
     using ctrace::concurrency::RuleId;
     using ctrace::concurrency::SingleTUConcurrencyAnalyzer;
 
@@ -43,7 +50,8 @@ namespace
         return false;
     }
 
-    /// Owns every compiled unit of a project so the modules outlive the analysis that reads them.
+    /// Compiles the units of a project into the bitcode source the project analysis reads, and
+    /// keeps the compiled modules alongside for the single-unit comparisons.
     class CompiledProject
     {
       public:
@@ -62,20 +70,17 @@ namespace
                 return false;
             }
 
-            // parseBC keeps a non-owning view over the bitcode buffer, so it must stay alive too.
+            // parseBC keeps a non-owning view over the bitcode buffer, so the copy the module
+            // reads stays alive here; the source gets its own copy to parse on demand.
+            units_.add(request.inputFile, result.llvmBitcode);
             bitcodes_.push_back(std::move(result.llvmBitcode));
             modules_.push_back(std::move(result.module));
             return true;
         }
 
-        [[nodiscard]] std::vector<const llvm::Module*> modules() const
+        [[nodiscard]] const ProjectUnitSource& units() const noexcept
         {
-            std::vector<const llvm::Module*> pointers;
-            pointers.reserve(modules_.size());
-            for (const std::unique_ptr<llvm::Module>& module : modules_)
-                pointers.push_back(module.get());
-
-            return pointers;
+            return units_;
         }
 
         [[nodiscard]] const llvm::Module& moduleAt(std::size_t index) const
@@ -83,8 +88,14 @@ namespace
             return *modules_.at(index);
         }
 
+        [[nodiscard]] const std::string& bitcodeAt(std::size_t index) const
+        {
+            return bitcodes_.at(index);
+        }
+
       private:
         llvm::LLVMContext context_;
+        ProjectUnitSource units_;
         std::vector<std::string> bitcodes_;
         std::vector<std::unique_ptr<llvm::Module>> modules_;
     };
@@ -129,7 +140,7 @@ namespace
         }
 
         const ProjectAnalysisReport analysis =
-            ProjectConcurrencyAnalyzer().analyze(project.modules());
+            ProjectConcurrencyAnalyzer().analyze(project.units());
 
         return assertTrue(countRacesOn(analysis.report, "shared_counter") > 0,
                           "cross-TU project should report the race on shared_counter") &&
@@ -165,9 +176,8 @@ namespace
             return false;
         }
 
-        const ProjectAnalysisReport first = ProjectConcurrencyAnalyzer().analyze(forward.modules());
-        const ProjectAnalysisReport second =
-            ProjectConcurrencyAnalyzer().analyze(reversed.modules());
+        const ProjectAnalysisReport first = ProjectConcurrencyAnalyzer().analyze(forward.units());
+        const ProjectAnalysisReport second = ProjectConcurrencyAnalyzer().analyze(reversed.units());
 
         return assertTrue(countRacesOn(first.report, "shared_counter") ==
                               countRacesOn(second.report, "shared_counter"),
@@ -185,11 +195,11 @@ namespace
             return false;
         }
 
-        std::vector<const llvm::Module*> modules = project.modules();
-        const ProjectAnalysisReport once = ProjectConcurrencyAnalyzer().analyze(modules);
+        const ProjectAnalysisReport once = ProjectConcurrencyAnalyzer().analyze(project.units());
 
-        modules.push_back(&project.moduleAt(1));
-        const ProjectAnalysisReport twice = ProjectConcurrencyAnalyzer().analyze(modules);
+        ProjectUnitSource repeated = project.units();
+        repeated.add(repeated.identifier(1), project.bitcodeAt(1));
+        const ProjectAnalysisReport twice = ProjectConcurrencyAnalyzer().analyze(repeated);
 
         return assertTrue(countRacesOn(once.report, "shared_counter") ==
                               countRacesOn(twice.report, "shared_counter"),
@@ -209,7 +219,7 @@ namespace
         }
 
         const ProjectAnalysisReport analysis =
-            ProjectConcurrencyAnalyzer().analyze(project.modules());
+            ProjectConcurrencyAnalyzer().analyze(project.units());
 
         return assertTrue(countRacesOn(analysis.report, "g_shared_state") > 0,
                           "a global defined in another unit must still be tracked");
@@ -253,7 +263,7 @@ namespace
         }
 
         const ProjectAnalysisReport analysis =
-            ProjectConcurrencyAnalyzer().analyze(project.modules());
+            ProjectConcurrencyAnalyzer().analyze(project.units());
 
         return assertTrue(countDeadlocks(analysis.report) > 0,
                           "an inversion through helpers defined elsewhere must be reported");
@@ -297,7 +307,7 @@ namespace
         }
 
         const ProjectAnalysisReport analysis =
-            ProjectConcurrencyAnalyzer().analyze(project.modules());
+            ProjectConcurrencyAnalyzer().analyze(project.units());
 
         return assertTrue(countMissingJoins(analysis.report) == 0,
                           "a handle joined in another unit must not be reported as outstanding");
@@ -349,8 +359,9 @@ namespace
             }
 
             const DiagnosticReport alone = SingleTUConcurrencyAnalyzer().analyze(*compiled.module);
-            const ProjectAnalysisReport asProject =
-                ProjectConcurrencyAnalyzer().analyze({compiled.module.get()});
+            ProjectUnitSource single;
+            single.add(request.inputFile, compiled.llvmBitcode);
+            const ProjectAnalysisReport asProject = ProjectConcurrencyAnalyzer().analyze(single);
 
             ok = assertTrue(asProject.report.diagnostics.size() >= alone.diagnostics.size(),
                             std::string("project mode keeps every finding of ") +
@@ -406,7 +417,7 @@ namespace
         }
 
         const ProjectAnalysisReport analysis =
-            ProjectConcurrencyAnalyzer().analyze(project.modules());
+            ProjectConcurrencyAnalyzer().analyze(project.units());
 
         return assertTrue(countRule(analysis.report, RuleId::ForkAfterThreadCreation) == 1,
                           "the fork is unsafe because another unit starts a thread") &&
@@ -445,7 +456,7 @@ namespace
         }
 
         const ProjectAnalysisReport analysis =
-            ProjectConcurrencyAnalyzer().analyze(project.modules());
+            ProjectConcurrencyAnalyzer().analyze(project.units());
 
         // `Worker::stop` writes `_running` while `Worker::loop` reads it, neither under a lock.
         // Seeing it needs an identity for a field reached through `this`, and a thread entry
@@ -465,10 +476,209 @@ namespace
                           "a loop around a bare wait is still taken at face value");
     }
 
+    /// Everything a diagnostic says, in a form two reports can be compared by.
+    std::vector<std::string> diagnosticLines(const DiagnosticReport& report)
+    {
+        std::vector<std::string> lines;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+        {
+            lines.push_back(diagnostic.id + '|' + diagnostic.location.file + ':' +
+                            std::to_string(diagnostic.location.line) + ':' +
+                            std::to_string(diagnostic.location.column) + '|' + diagnostic.message +
+                            '|' + symbolOf(diagnostic).value_or(""));
+        }
+        std::sort(lines.begin(), lines.end());
+        return lines;
+    }
+
+    /// Four units with findings that cross the program: enough to exercise a bound below the
+    /// unit count, and a mix of rules.
+    bool addFourUnitProject(CompiledProject& project)
+    {
+        return project.add("cross-tu-data-race/main.c") &&
+               project.add("cross-tu-data-race/worker.c") &&
+               project.add("cross-tu-lock-wrapper/sync.c") &&
+               project.add("cross-tu-lock-wrapper/workers.c");
+    }
+
+    /// A unit that does not parse is named, its error kept, and the rest of the project is
+    /// still analysed: the report says what it covers instead of failing as a whole.
+    bool testUnreadableUnitIsReportedAndTheRestAnalysed()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-data-race/main.c") ||
+            !project.add("cross-tu-data-race/worker.c"))
+        {
+            return false;
+        }
+
+        ProjectUnitSource units = project.units();
+        const std::string& worker = project.bitcodeAt(1);
+        units.add("truncated-worker.c", worker.substr(0, worker.size() / 2));
+        units.add("not-bitcode.c", "this is not bitcode");
+
+        const ProjectAnalysisReport analysis = ProjectConcurrencyAnalyzer().analyze(units);
+
+        return assertTrue(analysis.failedUnits.size() == 2, "both unreadable units are reported") &&
+               assertTrue(analysis.failedUnits.size() == 2 &&
+                              analysis.failedUnits[0].identifier == "truncated-worker.c" &&
+                              analysis.failedUnits[1].identifier == "not-bitcode.c",
+                          "failed units are named by identifier, in unit order") &&
+               assertTrue(analysis.failedUnits.size() == 2 &&
+                              analysis.failedUnits[0].error.hasError() &&
+                              analysis.failedUnits[1].error.hasError(),
+                          "each failed unit carries the load error") &&
+               assertTrue(!analysis.complete(), "a report missing a unit is not complete") &&
+               assertTrue(countRacesOn(analysis.report, "shared_counter") > 0,
+                          "the readable units are still analysed together");
+    }
+
+    /// Loading the same bytes twice yields the same program: same source file, same functions,
+    /// same identities for local symbols. This is what lets the second pass trust the first.
+    bool testReloadingAUnitYieldsTheSameProgram()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-lock-wrapper/sync.c"))
+            return false;
+
+        const auto identities = [](const LoadedUnit& unit)
+        {
+            std::vector<std::string> names;
+            for (const llvm::Function& function : *unit.module)
+                names.push_back(function.getGlobalIdentifier());
+            std::sort(names.begin(), names.end());
+            return names;
+        };
+
+        CompileError firstError;
+        CompileError secondError;
+        const LoadedUnit first = project.units().load(0, firstError);
+        const LoadedUnit second = project.units().load(0, secondError);
+        if (!assertTrue(first.ok() && second.ok(), "the unit loads twice"))
+            return false;
+
+        const ProjectAnalysisReport once = ProjectConcurrencyAnalyzer().analyze(project.units());
+        const ProjectAnalysisReport again = ProjectConcurrencyAnalyzer().analyze(project.units());
+
+        return assertTrue(first.module->getSourceFileName() == second.module->getSourceFileName(),
+                          "the source file name survives a reload") &&
+               assertTrue(first.module->getModuleIdentifier() == project.units().identifier(0),
+                          "the unit identifier becomes the module identifier") &&
+               assertTrue(identities(first) == identities(second),
+                          "every function keeps its program identity across a reload") &&
+               assertTrue(first.context.get() != second.context.get(),
+                          "each load owns a context of its own") &&
+               assertTrue(diagnosticLines(once.report) == diagnosticLines(again.report),
+                          "analysing the same source twice yields the same report");
+    }
+
+    /// The bound is a ceiling on units in memory, observed rather than promised, and it does
+    /// not change what the analysis finds.
+    bool testLiveUnitBoundIsRespected()
+    {
+        CompiledProject project;
+        if (!addFourUnitProject(project))
+            return false;
+
+        AnalysisOptions one;
+        one.maxLiveUnits = 1;
+        AnalysisOptions two;
+        two.maxLiveUnits = 2;
+
+        const ProjectAnalysisReport serial =
+            ProjectConcurrencyAnalyzer(one).analyze(project.units());
+        const ProjectAnalysisReport paired =
+            ProjectConcurrencyAnalyzer(two).analyze(project.units());
+        const ProjectAnalysisReport unbounded =
+            ProjectConcurrencyAnalyzer().analyze(project.units());
+
+        return assertTrue(serial.peakLiveUnits == 1, "a bound of one keeps one unit live") &&
+               assertTrue(paired.peakLiveUnits >= 1 && paired.peakLiveUnits <= 2,
+                          "a bound of two keeps at most two units live") &&
+               assertTrue(unbounded.peakLiveUnits >= 1 && unbounded.peakLiveUnits <= 4,
+                          "the default never exceeds the unit count") &&
+               assertTrue(!serial.report.diagnostics.empty(), "the bounded run still reports") &&
+               assertTrue(diagnosticLines(serial.report) == diagnosticLines(unbounded.report),
+                          "the bound does not change the diagnostics");
+    }
+
+    /// A unit compiled for another target is set aside by name, whichever order it arrives
+    /// in, and the rest of the project is analysed as before.
+    bool testUnitWithAnotherAbiIsSkippedByName()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-data-race/main.c") ||
+            !project.add("cross-tu-data-race/worker.c"))
+        {
+            return false;
+        }
+
+        // The same worker, re-targeted: valid bitcode whose ABI key differs from the rest.
+        std::string foreignBitcode;
+        {
+            CompileError error;
+            const LoadedUnit worker = project.units().load(1, error);
+            if (!assertTrue(worker.ok(), "the worker loads"))
+                return false;
+            worker.module->setTargetTriple("mips64-unknown-linux-gnuabi64");
+            llvm::raw_string_ostream stream(foreignBitcode);
+            llvm::WriteBitcodeToFile(*worker.module, stream);
+        }
+
+        ProjectUnitSource last = project.units();
+        last.add("foreign-worker.c", foreignBitcode);
+        ProjectUnitSource first;
+        first.add("foreign-worker.c", foreignBitcode);
+        first.add(project.units().identifier(0), project.bitcodeAt(0));
+        first.add(project.units().identifier(1), project.bitcodeAt(1));
+
+        const ProjectAnalysisReport lastReport = ProjectConcurrencyAnalyzer().analyze(last);
+        const ProjectAnalysisReport firstReport = ProjectConcurrencyAnalyzer().analyze(first);
+
+        return assertTrue(lastReport.skippedIncompatibleModules ==
+                              std::vector<std::string>{"foreign-worker.c"},
+                          "the foreign unit is skipped and named") &&
+               assertTrue(firstReport.skippedIncompatibleModules ==
+                              lastReport.skippedIncompatibleModules,
+                          "the choice does not depend on unit order") &&
+               assertTrue(lastReport.complete() && firstReport.complete(),
+                          "a skipped unit is not a failed one") &&
+               assertTrue(countRacesOn(lastReport.report, "shared_counter") > 0 &&
+                              diagnosticLines(lastReport.report) ==
+                                  diagnosticLines(firstReport.report),
+                          "the compatible units are analysed together either way");
+    }
+
+    /// How many units are analysed at once is a resource choice, not an analysis one.
+    bool testConcurrencyDoesNotChangeTheReport()
+    {
+        CompiledProject project;
+        if (!addFourUnitProject(project))
+            return false;
+
+        AnalysisOptions one;
+        one.maxLiveUnits = 1;
+        AnalysisOptions four;
+        four.maxLiveUnits = 4;
+
+        const ProjectAnalysisReport serial =
+            ProjectConcurrencyAnalyzer(one).analyze(project.units());
+        const ProjectAnalysisReport parallel =
+            ProjectConcurrencyAnalyzer(four).analyze(project.units());
+
+        return assertTrue(diagnosticLines(serial.report) == diagnosticLines(parallel.report),
+                          "one worker and four workers report the same diagnostics") &&
+               assertTrue(serial.report.functions.size() == parallel.report.functions.size(),
+                          "and the same function summaries") &&
+               assertTrue(serial.reanalyzedUnitCount == parallel.reanalyzedUnitCount,
+                          "and re-analyse the same units");
+    }
+
     /// An empty project is a valid input, not a crash.
     bool testEmptyProjectIsAnEmptyReport()
     {
-        const ProjectAnalysisReport analysis = ProjectConcurrencyAnalyzer().analyze({});
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(ProjectUnitSource{});
         return assertTrue(analysis.report.diagnostics.empty(),
                           "an empty project reports nothing") &&
                assertTrue(analysis.skippedIncompatibleModules.empty(),
@@ -494,6 +704,11 @@ int main()
     ok = testWorkerUnitWithoutTheHelpersReportsNoCycle() && ok;
     ok = testProjectModeKeepsEverySingleUnitFinding() && ok;
     ok = testEmptyProjectIsAnEmptyReport() && ok;
+    ok = testUnreadableUnitIsReportedAndTheRestAnalysed() && ok;
+    ok = testReloadingAUnitYieldsTheSameProgram() && ok;
+    ok = testLiveUnitBoundIsRespected() && ok;
+    ok = testUnitWithAnotherAbiIsSkippedByName() && ok;
+    ok = testConcurrencyDoesNotChangeTheReport() && ok;
 
     if (!ok)
         return 1;
