@@ -167,8 +167,10 @@ namespace ctrace::concurrency::internal::analysis
     {
     }
 
-    ThreadSpawnCollection ThreadSpawnDetector::collect(const llvm::Module& module,
-                                                       bool includeExternalEntries) const
+    ThreadSpawnCollection
+    ThreadSpawnDetector::collect(const llvm::Module& module,
+                                 const std::vector<DirectCallSite>& directCallSites,
+                                 bool includeExternalEntries) const
     {
         ThreadSpawnCollection collection;
         std::unordered_set<std::string> concreteSpawnKeys;
@@ -227,7 +229,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         const std::vector<DirectFunctionCallBinding> directCallBindings =
-            buildDirectCallBindings(collectDirectCallSites(module, classifier_, analyses_));
+            buildDirectCallBindings(directCallSites);
 
         bool changed = true;
         while (changed)

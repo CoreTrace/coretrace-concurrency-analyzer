@@ -9,21 +9,17 @@
 
 namespace ctrace::concurrency::internal::analysis
 {
-    ThreadContextPropagator::ThreadContextPropagator(const ConcurrencySymbolClassifier& classifier,
-                                                     LlvmFunctionAnalysisProvider& analyses)
-        : classifier_(classifier), analyses_(analyses)
+    ThreadContextPropagator::ThreadContextPropagator(const ConcurrencySymbolClassifier& classifier)
+        : classifier_(classifier)
     {
     }
 
     std::unordered_map<std::string, ThreadEntrySet> ThreadContextPropagator::collect(
-        const llvm::Module& module,
+        const llvm::Module& module, const std::vector<DirectCallSite>& directCallSites,
         const std::unordered_map<std::string, EntryConcurrencyInfo>& entryConcurrency) const
     {
-        const std::vector<DirectCallSite> callSites =
-            collectDirectCallSites(module, classifier_, analyses_);
-
         std::unordered_map<std::string, std::vector<std::string>> calleesByFunction;
-        for (const DirectCallSite& site : callSites)
+        for (const DirectCallSite& site : directCallSites)
             calleesByFunction[site.callerFunctionId].push_back(site.calleeFunctionId);
 
         std::unordered_map<std::string, ThreadEntrySet> reachableEntriesByFunction;

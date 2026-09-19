@@ -254,9 +254,9 @@ Ranked by measured weight, not by guess.
    its effect. Profile the remaining cache misses before choosing a separate
    `StringSwitch` or `constexpr std::string_view` table change.
 2. **Share the dominator trees — completed.** The measurement above records
-   its effect: 90.5% fewer constructions on the 49-unit workload. The three
-   `collectDirectCallSites` walks per unit remain and are the next duplication
-   to remove on this path.
+   its effect: 90.5% fewer constructions on the 49-unit workload. The call
+   sites of a unit are now resolved once and shared, where three collectors
+   each walked them before.
 3. **Bound memory in cross-TU mode — completed for modules.** The measurement
    above records the effect: modules are bounded by `--max-live-units`, and the
    remaining floor is the bitcode held in memory (138 MB here). Spilling it to

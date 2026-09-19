@@ -2,7 +2,6 @@
 #include "lock_order_analyzer.hpp"
 
 #include "fact_queries.hpp"
-#include "report_builder.hpp"
 #include "internal/diagnostics/diagnostic_builder.hpp"
 
 #include <algorithm>
@@ -291,7 +290,6 @@ namespace ctrace::concurrency::internal::analysis
             explore(lockId);
         }
 
-        finalizeReport(report, facts);
         return report;
     }
 } // namespace ctrace::concurrency::internal::analysis
