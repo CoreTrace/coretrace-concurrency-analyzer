@@ -8,7 +8,7 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
-## Unreleased (next minor)
+## v0.3.0
 
 - **Public API change.** `ProjectConcurrencyAnalyzer::analyze` takes a
   `ProjectUnitSource` — the program as bitcode buffers it opens and closes on
@@ -29,6 +29,25 @@ still change between minor releases.
 - The second cross-TU pass is decided from the facts of the first alone; nothing
   reads a module back once its facts exist. `--verbose` prints `peak-rss-mb`,
   `live-units-max`, `bitcode-mb` and `load-ms`.
+- A captureless lambda passed to `pthread_create` is resolved as a thread entry:
+  the copy walk now follows a call whose every return names the same function,
+  which is what the lambda's conversion operator is. Races inside such workers
+  were never reported before.
+- An access the analysis cannot resolve is no longer attributed to whichever
+  global the module happens to define. The may-alias fallback is kept only when
+  the pointer could have come from outside the module; a pointer into a
+  container the module built itself cannot reach a global. On a real project
+  this removed 25 false `DataRaceGlobal` errors, all on an LLVM ABI guard nothing
+  ever touched.
+- Each function's dominator tree and loop info are computed once per unit and
+  shared by every collector, through the analysis provider that already served
+  alias analysis: 756,947 constructions became 71,747 on the 49-unit workload.
+  A unit's call sites are likewise resolved once instead of three times, and
+  each checker no longer builds the function summaries the caller rebuilt.
+- The LLVM installer is downloaded with one bounded retry policy on every CI
+  runner and in both container images (`docker/wgetrc`), so a transient
+  apt.llvm.org failure is retried and a persistent one fails with the reason in
+  the log.
 
 ## v0.2.3
 
