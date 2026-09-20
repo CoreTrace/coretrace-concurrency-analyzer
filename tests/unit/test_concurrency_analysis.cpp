@@ -1302,38 +1302,49 @@ namespace
                 AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}})
                 .analyze(*compiled->module);
 
+        // Written as loops rather than std::any_of with a multi-line lambda: clang-format
+        // releases disagree on how to break the latter, and the CI check is a different build
+        // from the one on a developer's machine.
         const auto countedSomething = [](const DiagnosticReport& report)
         {
-            return std::any_of(report.functions.begin(), report.functions.end(),
-                               [](const FunctionSummary& function)
-                               {
-                                   return function.sharedAccessCount.has_value() &&
-                                          *function.sharedAccessCount > 0;
-                               });
+            for (const FunctionSummary& function : report.functions)
+            {
+                if (function.sharedAccessCount.value_or(0) > 0)
+                    return true;
+            }
+            return false;
         };
         const auto everyCountAbsent = [](const DiagnosticReport& report)
         {
-            return std::all_of(report.functions.begin(), report.functions.end(),
-                               [](const FunctionSummary& function)
-                               {
-                                   return !function.sharedAccessCount.has_value() &&
-                                          !function.protectedAccessCount.has_value() &&
-                                          !function.writeAccessCount.has_value();
-                               });
+            for (const FunctionSummary& function : report.functions)
+            {
+                if (function.sharedAccessCount.has_value() ||
+                    function.protectedAccessCount.has_value() ||
+                    function.writeAccessCount.has_value())
+                {
+                    return false;
+                }
+            }
+            return true;
         };
         // The fixture locks both mutexes around its accesses, so a genuine zero is available:
-        // accesses were counted, and none of them is a write to shared state left unprotected.
+        // the accesses were counted, and every one of them was protected.
         const auto hasGenuineZero = [](const DiagnosticReport& report)
         {
-            return std::any_of(report.functions.begin(), report.functions.end(),
-                               [](const FunctionSummary& function)
-                               {
-                                   return function.sharedAccessCount.has_value() &&
-                                          function.writeAccessCount.has_value() &&
-                                          *function.sharedAccessCount > 0 &&
-                                          *function.protectedAccessCount ==
-                                              *function.sharedAccessCount;
-                               });
+            for (const FunctionSummary& function : report.functions)
+            {
+                if (!function.sharedAccessCount.has_value() ||
+                    !function.writeAccessCount.has_value())
+                {
+                    continue;
+                }
+                if (*function.sharedAccessCount > 0 &&
+                    *function.protectedAccessCount == *function.sharedAccessCount)
+                {
+                    return true;
+                }
+            }
+            return false;
         };
 
         return assertTrue(!withAccesses.functions.empty() && !withoutAccesses.functions.empty(),
