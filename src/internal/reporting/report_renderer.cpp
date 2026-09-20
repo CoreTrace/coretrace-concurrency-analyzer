@@ -324,16 +324,23 @@ namespace ctrace::concurrency::internal::reporting
                 for (const std::string& entry : function.threadEntries)
                     thread_entries.emplace_back(entry);
 
-                functions.emplace_back(llvm::json::Object{
+                llvm::json::Object entry{
                     {"file", function.file.empty() ? context.inputFile : function.file},
                     {"name", function.name},
                     {"threadReachable", function.threadReachable},
                     {"threadEntries", std::move(thread_entries)},
-                    {"sharedAccessCount", static_cast<int64_t>(function.sharedAccessCount)},
-                    {"protectedAccessCount", static_cast<int64_t>(function.protectedAccessCount)},
-                    {"writeAccessCount", static_cast<int64_t>(function.writeAccessCount)},
                     {"hasDiagnostics", function.hasDiagnostics},
-                });
+                };
+                // Counts nobody took are left out rather than rendered as zero: a reader would
+                // take a zero for an answer.
+                if (function.sharedAccessCount.has_value())
+                {
+                    entry["sharedAccessCount"] = static_cast<int64_t>(*function.sharedAccessCount);
+                    entry["protectedAccessCount"] =
+                        static_cast<int64_t>(*function.protectedAccessCount);
+                    entry["writeAccessCount"] = static_cast<int64_t>(*function.writeAccessCount);
+                }
+                functions.emplace_back(std::move(entry));
             }
 
             llvm::json::Array diagnostics;

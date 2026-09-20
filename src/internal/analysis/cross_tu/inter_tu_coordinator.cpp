@@ -319,7 +319,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 append(processReport);
             }
 
-            finalizeReport(moduleReport, facts);
+            finalizeReport(moduleReport, facts, selection.accesses);
 
             for (Diagnostic& diagnostic : moduleReport.diagnostics)
             {

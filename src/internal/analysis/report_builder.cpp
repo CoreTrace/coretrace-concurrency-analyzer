@@ -62,7 +62,8 @@ namespace ctrace::concurrency::internal::analysis
     }
 
     std::vector<FunctionSummary> buildFunctionSummaries(const TUFacts& facts,
-                                                        const std::vector<Diagnostic>& diagnostics)
+                                                        const std::vector<Diagnostic>& diagnostics,
+                                                        bool accessesWereComputed)
     {
         std::map<std::string, FunctionSummary> functions;
 
@@ -83,11 +84,11 @@ namespace ctrace::concurrency::internal::analysis
             if (summary.file.empty() && !access.userLocation.file.empty())
                 summary.file = access.userLocation.file;
 
-            ++summary.sharedAccessCount;
+            summary.sharedAccessCount = summary.sharedAccessCount.value_or(0) + 1;
             if (!access.heldLocks.empty())
-                ++summary.protectedAccessCount;
+                summary.protectedAccessCount = summary.protectedAccessCount.value_or(0) + 1;
             if (access.kind == AccessKind::Write)
-                ++summary.writeAccessCount;
+                summary.writeAccessCount = summary.writeAccessCount.value_or(0) + 1;
         }
 
         for (const LockOrderFact& lockOrder : facts.lockOrders)
@@ -109,6 +110,19 @@ namespace ctrace::concurrency::internal::analysis
         for (const Diagnostic& diagnostic : diagnostics)
             markDiagnosticFunctions(functions, diagnostic);
 
+        // A count is zero when the accesses were collected and this function had none of that
+        // kind, and absent when nothing collected them. Filled here rather than where the
+        // summaries are created, because any of the loops above can create one.
+        if (accessesWereComputed)
+        {
+            for (auto& [_, summary] : functions)
+            {
+                summary.sharedAccessCount = summary.sharedAccessCount.value_or(0);
+                summary.protectedAccessCount = summary.protectedAccessCount.value_or(0);
+                summary.writeAccessCount = summary.writeAccessCount.value_or(0);
+            }
+        }
+
         std::vector<FunctionSummary> ordered;
         ordered.reserve(functions.size());
         for (auto& [_, summary] : functions)
@@ -120,7 +134,7 @@ namespace ctrace::concurrency::internal::analysis
         return ordered;
     }
 
-    void finalizeReport(DiagnosticReport& report, const TUFacts& facts)
+    void finalizeReport(DiagnosticReport& report, const TUFacts& facts, bool accessesWereComputed)
     {
         std::sort(report.diagnostics.begin(), report.diagnostics.end(),
                   [](const Diagnostic& lhs, const Diagnostic& rhs)
@@ -134,7 +148,7 @@ namespace ctrace::concurrency::internal::analysis
         for (std::size_t index = 0; index < report.diagnostics.size(); ++index)
             report.diagnostics[index].id = "diag-" + std::to_string(index + 1);
 
-        report.functions = buildFunctionSummaries(facts, report.diagnostics);
+        report.functions = buildFunctionSummaries(facts, report.diagnostics, accessesWereComputed);
         report.diagnosticsSummary = computeSummary(report.diagnostics);
     }
 } // namespace ctrace::concurrency::internal::analysis

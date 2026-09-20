@@ -238,7 +238,8 @@ Function summaries follow the same rule as the diagnostics: they report what the
 selected rules computed. On the workload, `--rules=all` lists 880 entries (873
 distinct functions) exactly as before, and `--rules=missing-join` lists 865 — the
 8 it drops are functions no thread reaches, listed before only because they had
-accesses. Every entry present in both is identical.
+accesses. An entry a narrow run does keep carries no access counts at all rather
+than zeros, since nothing counted them.
 
 ## Scaling
 

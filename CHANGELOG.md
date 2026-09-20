@@ -19,8 +19,11 @@ still change between minor releases.
   the second-pass gate read — the entry concurrency, the thread lifecycles and
   the lock wrapper summaries — whatever the rules select.
 - The JSON `functions` array reports what the selected rules computed, as the
-  diagnostics already did. `--rules=all` is unchanged; a narrow selection omits
-  the counts it did not compute. See `README.md`.
+  diagnostics already did. `--rules=all` is unchanged; under a selection that
+  reads no shared accesses, `sharedAccessCount`, `protectedAccessCount` and
+  `writeAccessCount` are absent from an entry instead of rendered as zero, so a
+  count nobody took is not mistaken for a count of none. `FunctionSummary` holds
+  them as `std::optional<std::size_t>` accordingly. See `README.md`.
 
 ## v0.3.0
 

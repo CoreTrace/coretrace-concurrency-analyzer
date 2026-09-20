@@ -384,6 +384,37 @@ namespace
             ok = assertContains(result.output, "\"startColumn\": 23", "json analyze output") && ok;
         }
 
+        // What a JSON consumer is told about counts nobody took. Under a selection that reads
+        // the shared accesses the counts are there, zeros included; under one that does not,
+        // the fields are absent rather than zero, which would read as an answer.
+        {
+            const RunResult counted =
+                runAnalyzer({fixturePath("concurrency/deadlock/deadlock_basic.c").string(),
+                             "--analyze", "--rules=data-race", "--format=json"});
+            const RunResult uncounted =
+                runAnalyzer({fixturePath("concurrency/deadlock/deadlock_basic.c").string(),
+                             "--analyze", "--rules=deadlock-lock-order", "--format=json"});
+
+            ok = assertTrue(counted.exitCode == 0 && uncounted.exitCode == 0,
+                            "both rule selections analyse deadlock_basic") &&
+                 ok;
+            ok = assertContains(counted.output, "\"sharedAccessCount\"",
+                                "json output of a run that read the accesses") &&
+                 ok;
+            ok = assertContains(uncounted.output, "\"functions\"",
+                                "json output of a run that did not read the accesses") &&
+                 ok;
+            ok = assertNotContains(uncounted.output, "\"sharedAccessCount\"",
+                                   "json output of a run that did not read the accesses") &&
+                 ok;
+            ok = assertNotContains(uncounted.output, "\"protectedAccessCount\"",
+                                   "json output of a run that did not read the accesses") &&
+                 ok;
+            ok = assertNotContains(uncounted.output, "\"writeAccessCount\"",
+                                   "json output of a run that did not read the accesses") &&
+                 ok;
+        }
+
         {
             const RunResult result = runAnalyzer(
                 {fixturePath("concurrency/data-race/cpp_move_semantics_race.cpp").string(),

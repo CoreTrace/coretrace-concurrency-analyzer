@@ -86,8 +86,9 @@ namespace ctrace::concurrency
     DiagnosticReport SingleTUConcurrencyAnalyzer::analyze(const llvm::Module& module) const
     {
         internal::analysis::TUFactsBuilder factsBuilder;
-        const internal::analysis::TUFacts facts = factsBuilder.build(
-            module, internal::analysis::FactSelection::forRules(options_.enabledRules, false));
+        const internal::analysis::FactSelection selection =
+            internal::analysis::FactSelection::forRules(options_.enabledRules, false);
+        const internal::analysis::TUFacts facts = factsBuilder.build(module, selection);
 
         auto appendDiagnostics = [](DiagnosticReport& report,
                                     const DiagnosticReport& partialReport) -> void
@@ -133,7 +134,7 @@ namespace ctrace::concurrency
             appendDiagnostics(report, processReport);
         }
 
-        internal::analysis::finalizeReport(report, facts);
+        internal::analysis::finalizeReport(report, facts, selection.accesses);
         return report;
     }
 } // namespace ctrace::concurrency
