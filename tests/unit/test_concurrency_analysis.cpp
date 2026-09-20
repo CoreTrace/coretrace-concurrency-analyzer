@@ -1138,6 +1138,19 @@ namespace
                        "on",
              .countsAreMinimums = true},
 
+
+            // --- imported condition-variable fixtures (Nihil, 91e7431; #4) ---
+            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_destructor_race.cpp",
+             .intent = "resetting the shared condition-variable pointer races; destruction safety is not modeled",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_lost_wakeup.c",
+             .intent = "waiting without a predicate can lose a notification",
+             .conditionWait = 1},
+            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_no_predicate_recheck.c",
+             .intent = "broadcast consumers must recheck the predicate after waking",
+             .conditionWait = 1},
+
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
              .intent = "kept to exercise the compile failure path",
