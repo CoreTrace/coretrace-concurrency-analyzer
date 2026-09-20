@@ -1138,6 +1138,16 @@ namespace
                        "on",
              .countsAreMinimums = true},
 
+
+            // --- imported thread-escape fixtures (Nihil, 91e7431; #4) ---
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_loop_variable.c",
+             .intent = "workers receive the loop-variable address; #39 tracks the additional join-loop warning",
+             .missingJoin = 1,
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_stack_ptr.c",
+             .intent = "a global handle survives the helper frame whose local it references",
+             .threadArgumentEscape = 1},
+
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
              .intent = "kept to exercise the compile failure path",
