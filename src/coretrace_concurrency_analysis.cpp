@@ -5,6 +5,7 @@
 #include "internal/analysis/process_lifecycle_checker.hpp"
 #include "internal/analysis/cross_tu/inter_tu_coordinator.hpp"
 #include "internal/analysis/data_race_checker.hpp"
+#include "internal/analysis/fact_selection.hpp"
 #include "internal/analysis/lock_order_analyzer.hpp"
 #include "internal/analysis/missing_join_detector.hpp"
 #include "internal/analysis/report_builder.hpp"
@@ -85,7 +86,9 @@ namespace ctrace::concurrency
     DiagnosticReport SingleTUConcurrencyAnalyzer::analyze(const llvm::Module& module) const
     {
         internal::analysis::TUFactsBuilder factsBuilder;
-        const internal::analysis::TUFacts facts = factsBuilder.build(module);
+        const internal::analysis::FactSelection selection =
+            internal::analysis::FactSelection::forRules(options_.enabledRules, false);
+        const internal::analysis::TUFacts facts = factsBuilder.build(module, selection);
 
         auto appendDiagnostics = [](DiagnosticReport& report,
                                     const DiagnosticReport& partialReport) -> void
@@ -131,7 +134,7 @@ namespace ctrace::concurrency
             appendDiagnostics(report, processReport);
         }
 
-        internal::analysis::finalizeReport(report, facts);
+        internal::analysis::finalizeReport(report, facts, selection.accesses);
         return report;
     }
 } // namespace ctrace::concurrency

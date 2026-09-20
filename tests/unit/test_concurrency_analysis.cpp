@@ -3,11 +3,13 @@
 #include "coretrace_concurrency_analyzer.hpp"
 
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/IR/Module.h>
 
 #include <algorithm>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -22,6 +24,7 @@ namespace
     using ctrace::concurrency::ConfidenceLevel;
     using ctrace::concurrency::Diagnostic;
     using ctrace::concurrency::DiagnosticReport;
+    using ctrace::concurrency::FunctionSummary;
     using ctrace::concurrency::InMemoryIRCompiler;
     using ctrace::concurrency::IRFormat;
     using ctrace::concurrency::RuleId;
@@ -155,6 +158,99 @@ namespace
         return static_cast<std::size_t>(std::count_if(
             report.diagnostics.begin(), report.diagnostics.end(),
             [ruleId](const Diagnostic& diagnostic) { return diagnostic.ruleId == ruleId; }));
+    }
+
+    std::string describeLocation(const ctrace::concurrency::SourceLocation& location)
+    {
+        return location.file + ':' + std::to_string(location.line) + ':' +
+               std::to_string(location.column) + '-' + std::to_string(location.endLine) + ':' +
+               std::to_string(location.endColumn) + '@' + location.function;
+    }
+
+    std::string describeProperty(const ctrace::concurrency::DiagnosticPropertyValue& value)
+    {
+        if (const auto* flag = std::get_if<bool>(&value))
+            return *flag ? "true" : "false";
+        if (const auto* number = std::get_if<std::int64_t>(&value))
+            return std::to_string(*number);
+        if (const auto* text = std::get_if<std::string>(&value))
+            return *text;
+
+        std::string joined;
+        for (const std::string& item : std::get<std::vector<std::string>>(value))
+            joined += item + '\x1f';
+        return joined;
+    }
+
+    /// Everything a diagnostic says, except the `id`. Ids are positions in the emitted list
+    /// (`diag-1`, `diag-2`, ...), so they differ whenever the list differs and say nothing
+    /// about the finding itself. Every other field is part of what the tool reports, down to
+    /// the confidence, the taxonomies, the related locations, the notes and the properties.
+    std::string describeDiagnostic(const Diagnostic& diagnostic)
+    {
+        std::string description;
+        description += std::to_string(static_cast<int>(diagnostic.severity)) + '|';
+        description += std::to_string(static_cast<int>(diagnostic.ruleId)) + '|';
+        description += diagnostic.confidence.has_value()
+                           ? std::to_string(static_cast<int>(*diagnostic.confidence))
+                           : "-";
+        description += '|' + describeLocation(diagnostic.location);
+        description += '|' + diagnostic.message;
+        for (const ctrace::concurrency::TaxonomyRef& taxonomy : diagnostic.taxonomies)
+            description += "|tax:" + taxonomy.scheme + '/' + taxonomy.id + '/' + taxonomy.title;
+        for (const ctrace::concurrency::RelatedLocation& related : diagnostic.relatedLocations)
+            description += "|rel:" + related.label + '@' + describeLocation(related.location);
+        for (const ctrace::concurrency::DiagnosticNote& note : diagnostic.notes)
+            description += "|note:" + note.text;
+        for (const auto& [key, value] : diagnostic.properties)
+            description += "|prop:" + key + '=' + describeProperty(value);
+        return description;
+    }
+
+    /// The diagnostics of one rule, fully described and in a canonical order. The order of the
+    /// emitted list is not part of what the tool promises — `finalizeReport` sorts it, and the
+    /// sort key is not a total order — so it is normalised away here; nothing else is.
+    std::vector<std::string> describedDiagnosticsForRule(const DiagnosticReport& report,
+                                                         RuleId ruleId)
+    {
+        std::vector<std::string> described;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+        {
+            if (diagnostic.ruleId == ruleId)
+                described.push_back(describeDiagnostic(diagnostic));
+        }
+        std::sort(described.begin(), described.end());
+        return described;
+    }
+
+    /// Holds a compiled fixture so several rule selections can be analysed without compiling
+    /// it again; the context has to outlive the module it owns.
+    struct CompiledFixture
+    {
+        std::unique_ptr<llvm::LLVMContext> context;
+        std::unique_ptr<llvm::Module> module;
+    };
+
+    std::optional<CompiledFixture> compileFixture(std::string_view relativePath,
+                                                  std::vector<std::string> extraCompileArgs = {})
+    {
+        CompiledFixture compiled;
+        compiled.context = std::make_unique<llvm::LLVMContext>();
+
+        CompileRequest request;
+        request.inputFile = fixturePath(relativePath).string();
+        request.extraCompileArgs = std::move(extraCompileArgs);
+        request.format = IRFormat::BC;
+
+        CompileResult result = InMemoryIRCompiler().compile(request, *compiled.context);
+        if (!result.success || result.module == nullptr)
+        {
+            std::cerr << "[FAIL] fixture compile failed for " << relativePath << "\n";
+            return std::nullopt;
+        }
+
+        compiled.module = std::move(result.module);
+        return compiled;
     }
 
     bool testDataRaceBasicIsReported()
@@ -1113,6 +1209,155 @@ namespace
         return ok;
     }
 
+    /// Selecting one rule must report exactly what an all-rules run reports for that rule —
+    /// every field of every diagnostic, not just how many.
+    ///
+    /// The facts a unit analysis builds now depend on the selection, so "the checkers are
+    /// independent" stopped being an observation about the checkers and became a claim about
+    /// the fact selection: a rule that reads a fact nobody else asked for must still get it,
+    /// and a fact left out must not be one it needed. This compares the eight selections
+    /// against the single all-rules run the table above already performs.
+    bool checkEveryRuleAloneMatchesAllRules(const FixtureExpectation& expectation)
+    {
+        std::vector<std::string> compileArgs;
+        if (expectation.requiresCxx20)
+            compileArgs.emplace_back(kCxx20Standard);
+
+        // Compiled once; only the analysis is repeated per selection.
+        const std::optional<CompiledFixture> compiled =
+            compileFixture(expectation.path, std::move(compileArgs));
+        if (!compiled.has_value())
+            return false;
+
+        const DiagnosticReport everything =
+            SingleTUConcurrencyAnalyzer(AnalysisOptions::allAvailable()).analyze(*compiled->module);
+
+        constexpr RuleId kRules[] = {
+            RuleId::DataRaceGlobal,
+            RuleId::MissingJoin,
+            RuleId::DeadlockLockOrder,
+            RuleId::ConditionWaitWithoutPredicate,
+            RuleId::ForkAfterThreadCreation,
+            RuleId::UnreapedChildProcess,
+            RuleId::ThreadArgumentEscapesFrame,
+            RuleId::UnsafeSignalHandler,
+        };
+
+        bool ok = true;
+        for (const RuleId rule : kRules)
+        {
+            const DiagnosticReport alone =
+                SingleTUConcurrencyAnalyzer(AnalysisOptions{.enabledRules = {rule}})
+                    .analyze(*compiled->module);
+
+            const std::vector<std::string> expected = describedDiagnosticsForRule(everything, rule);
+            const std::vector<std::string> actual = describedDiagnosticsForRule(alone, rule);
+            if (expected == actual)
+            {
+                // And nothing belonging to another rule may appear in a run that excluded it.
+                if (alone.diagnostics.size() == actual.size())
+                    continue;
+
+                std::cerr << "[FAIL] " << expectation.path << " (" << expectation.intent
+                          << "): selecting one rule reported " << alone.diagnostics.size()
+                          << " diagnostic(s), " << actual.size() << " of them its own\n";
+                ok = false;
+                continue;
+            }
+
+            std::cerr << "[FAIL] " << expectation.path << " (" << expectation.intent << "): rule "
+                      << static_cast<int>(rule) << " alone reported " << actual.size()
+                      << " diagnostic(s), the all-rules run " << expected.size() << "\n";
+            for (const std::string& description : expected)
+            {
+                if (std::find(actual.begin(), actual.end(), description) == actual.end())
+                    std::cerr << "         only in the all-rules run: " << description << "\n";
+            }
+            for (const std::string& description : actual)
+            {
+                if (std::find(expected.begin(), expected.end(), description) == expected.end())
+                    std::cerr << "         only in the single-rule run: " << description << "\n";
+            }
+            ok = false;
+        }
+
+        return ok;
+    }
+
+    /// An access count that was never taken is absent, and a count of zero means the accesses
+    /// were examined and there were none. Reporting zero for both would answer a question
+    /// nobody asked, and a reader cannot tell the two apart afterwards.
+    bool testAccessCountsDistinguishNotComputedFromZero()
+    {
+        const std::optional<CompiledFixture> compiled =
+            compileFixture("tests/fixtures/concurrency/deadlock/deadlock_basic.c");
+        if (!compiled.has_value())
+            return false;
+
+        const DiagnosticReport withAccesses =
+            SingleTUConcurrencyAnalyzer(AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}})
+                .analyze(*compiled->module);
+        const DiagnosticReport withoutAccesses =
+            SingleTUConcurrencyAnalyzer(
+                AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}})
+                .analyze(*compiled->module);
+
+        // Written as loops rather than std::any_of with a multi-line lambda: clang-format
+        // releases disagree on how to break the latter, and the CI check is a different build
+        // from the one on a developer's machine.
+        const auto countedSomething = [](const DiagnosticReport& report)
+        {
+            for (const FunctionSummary& function : report.functions)
+            {
+                if (function.sharedAccessCount.value_or(0) > 0)
+                    return true;
+            }
+            return false;
+        };
+        const auto everyCountAbsent = [](const DiagnosticReport& report)
+        {
+            for (const FunctionSummary& function : report.functions)
+            {
+                if (function.sharedAccessCount.has_value() ||
+                    function.protectedAccessCount.has_value() ||
+                    function.writeAccessCount.has_value())
+                {
+                    return false;
+                }
+            }
+            return true;
+        };
+        // The fixture locks both mutexes around its accesses, so a genuine zero is available:
+        // the accesses were counted, and every one of them was protected.
+        const auto hasGenuineZero = [](const DiagnosticReport& report)
+        {
+            for (const FunctionSummary& function : report.functions)
+            {
+                if (!function.sharedAccessCount.has_value() ||
+                    !function.writeAccessCount.has_value())
+                {
+                    continue;
+                }
+                if (*function.sharedAccessCount > 0 &&
+                    *function.protectedAccessCount == *function.sharedAccessCount)
+                {
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        return assertTrue(!withAccesses.functions.empty() && !withoutAccesses.functions.empty(),
+                          "both selections summarise the functions they know about") &&
+               assertTrue(countedSomething(withAccesses),
+                          "a selection that reads the accesses reports how many it found") &&
+               assertTrue(hasGenuineZero(withAccesses),
+                          "a count the analysis did take is reported even when it is not news") &&
+               assertTrue(everyCountAbsent(withoutAccesses),
+                          "a selection that never read the accesses reports no count at all, "
+                          "rather than zero");
+    }
+
     /// The optimization level a caller asks for must not change what is reported.
     ///
     /// This is a regression, not a hypothetical: a project whose compilation database said -O3
@@ -1166,6 +1411,7 @@ namespace
                 continue;
 
             ok = checkFixtureExpectation(expectation) && ok;
+            ok = checkEveryRuleAloneMatchesAllRules(expectation) && ok;
         }
 
         return ok;
@@ -1260,6 +1506,7 @@ int main()
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
+    ok = testAccessCountsDistinguishNotComputedFromZero() && ok;
     ok = testOptimizationRequestDoesNotChangeFindings() && ok;
     ok = testFixtureExpectationTable() && ok;
     ok = testEveryConcurrencyFixtureIsCovered() && ok;

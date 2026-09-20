@@ -476,12 +476,17 @@ namespace
                           "a loop around a bare wait is still taken at face value");
     }
 
-    /// Everything a diagnostic says, in a form two reports can be compared by.
-    std::vector<std::string> diagnosticLines(const DiagnosticReport& report)
+    /// Everything a diagnostic says, in a form two reports can be compared by. With a rule,
+    /// only that rule's diagnostics, so a narrow run can be compared against a full one.
+    std::vector<std::string> diagnosticLines(const DiagnosticReport& report,
+                                             std::optional<RuleId> onlyRule = std::nullopt)
     {
         std::vector<std::string> lines;
         for (const Diagnostic& diagnostic : report.diagnostics)
         {
+            if (onlyRule.has_value() && diagnostic.ruleId != *onlyRule)
+                continue;
+
             lines.push_back(diagnostic.id + '|' + diagnostic.location.file + ':' +
                             std::to_string(diagnostic.location.line) + ':' +
                             std::to_string(diagnostic.location.column) + '|' + diagnostic.message +
@@ -674,6 +679,55 @@ namespace
                           "and re-analyse the same units");
     }
 
+    /// A narrow `--rules` selection must reach the same conclusions about the program as a
+    /// full run does. What crosses a unit boundary is not a rule's private business: the
+    /// spawn in one unit and the worker body in another, or the handle created here and
+    /// joined there, are established by the whole-program passes, which run whatever the
+    /// rules select. Asserted through the conclusions, so that how the facts are arranged
+    /// underneath stays free to change.
+    bool testNarrowRuleSelectionKeepsCrossUnitConclusions()
+    {
+        CompiledProject race;
+        CompiledProject lifecycle;
+        if (!race.add("cross-tu-data-race/main.c") || !race.add("cross-tu-data-race/worker.c") ||
+            !lifecycle.add("cross-tu-handle-lifecycle/start.c") ||
+            !lifecycle.add("cross-tu-handle-lifecycle/stop.c") ||
+            !lifecycle.add("cross-tu-handle-lifecycle/main.c"))
+        {
+            return false;
+        }
+
+        const AnalysisOptions raceOnly{.enabledRules = {RuleId::DataRaceGlobal}};
+        const AnalysisOptions joinOnly{.enabledRules = {RuleId::MissingJoin}};
+
+        // The spawn is in main.c and the racing body in worker.c: neither unit holds both
+        // halves, so this race exists only for a reader of the whole program.
+        const ProjectAnalysisReport raceNarrow =
+            ProjectConcurrencyAnalyzer(raceOnly).analyze(race.units());
+        const ProjectAnalysisReport raceFull = ProjectConcurrencyAnalyzer().analyze(race.units());
+
+        // The handle is created in start.c and joined in stop.c: only the program resolves it,
+        // and a unit analysis that lost that would report a join that is right there.
+        const ProjectAnalysisReport joinNarrow =
+            ProjectConcurrencyAnalyzer(joinOnly).analyze(lifecycle.units());
+        const ProjectAnalysisReport joinFull =
+            ProjectConcurrencyAnalyzer().analyze(lifecycle.units());
+
+        return assertTrue(countRacesOn(raceNarrow.report, "shared_counter") ==
+                              countRacesOn(raceFull.report, "shared_counter"),
+                          "a data-race-only run reports the cross-unit race the full run does") &&
+               assertTrue(countRacesOn(raceNarrow.report, "shared_counter") > 0,
+                          "and that race is actually reported") &&
+               assertTrue(diagnosticLines(raceNarrow.report) ==
+                              diagnosticLines(raceFull.report, RuleId::DataRaceGlobal),
+                          "with the same diagnostics, not merely the same count") &&
+               assertTrue(countMissingJoins(joinNarrow.report) == 0,
+                          "a missing-join-only run still sees the join in the other unit") &&
+               assertTrue(countMissingJoins(joinFull.report) == 0, "as the full run does") &&
+               assertTrue(joinNarrow.complete() && raceNarrow.complete(),
+                          "a narrow selection analyses every unit of the project");
+    }
+
     /// An empty project is a valid input, not a crash.
     bool testEmptyProjectIsAnEmptyReport()
     {
@@ -703,6 +757,7 @@ int main()
     ok = testLockWrapperDefinedInAnotherUnitClosesTheCycle() && ok;
     ok = testWorkerUnitWithoutTheHelpersReportsNoCycle() && ok;
     ok = testProjectModeKeepsEverySingleUnitFinding() && ok;
+    ok = testNarrowRuleSelectionKeepsCrossUnitConclusions() && ok;
     ok = testEmptyProjectIsAnEmptyReport() && ok;
     ok = testUnreadableUnitIsReportedAndTheRestAnalysed() && ok;
     ok = testReloadingAUnitYieldsTheSameProgram() && ok;

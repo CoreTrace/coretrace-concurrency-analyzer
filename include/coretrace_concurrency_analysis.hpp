@@ -127,9 +127,12 @@ namespace ctrace::concurrency
         std::string name;
         bool threadReachable = false;
         std::vector<std::string> threadEntries;
-        std::size_t sharedAccessCount = 0;
-        std::size_t protectedAccessCount = 0;
-        std::size_t writeAccessCount = 0;
+        /// Absent when no selected rule read the shared accesses, so nothing counted them.
+        /// Zero means the accesses were examined and this function has none of that kind —
+        /// a different statement, and the one a reader would otherwise assume.
+        std::optional<std::size_t> sharedAccessCount;
+        std::optional<std::size_t> protectedAccessCount;
+        std::optional<std::size_t> writeAccessCount;
         bool hasDiagnostics = false;
     };
 

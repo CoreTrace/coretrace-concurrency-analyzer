@@ -15,6 +15,7 @@
 #include "shared_object_binding_collector.hpp"
 #include "signal_handler_collector.hpp"
 #include "cross_tu/program_symbol_index.hpp"
+#include "fact_selection.hpp"
 #include "task_concurrency_analyzer.hpp"
 #include "thread_lifecycle_collector.hpp"
 #include "thread_spawn_detector.hpp"
@@ -502,7 +503,7 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    TUFacts TUFactsBuilder::build(const llvm::Module& module,
+    TUFacts TUFactsBuilder::build(const llvm::Module& module, const FactSelection& selection,
                                   const ProgramSymbolIndex* program) const
     {
         const ConcurrencySymbolClassifier classifier;
@@ -514,13 +515,19 @@ namespace ctrace::concurrency::internal::analysis
 
         // Resolved once per unit and handed to every collector that follows calls: the spawn
         // detector, the context propagator and the builder itself used to walk them apart.
+        // Every step below is gated on the facts the selected rules read; a skipped step leaves
+        // its output empty, and nothing downstream of it runs either.
         const std::vector<DirectCallSite> directCallSites =
-            collectDirectCallSites(module, classifier, analyses);
+            selection.directCallSites() ? collectDirectCallSites(module, classifier, analyses)
+                                        : std::vector<DirectCallSite>{};
 
-        ThreadSpawnDetector spawnDetector(classifier, analyses);
         const bool crossTU = program != nullptr;
-        ThreadSpawnCollection spawnFacts = spawnDetector.collect(module, directCallSites, crossTU);
-        ThreadLifecycleCollector threadLifecycleCollector(classifier, analyses);
+        ThreadSpawnCollection spawnFacts;
+        if (selection.spawns())
+        {
+            spawnFacts =
+                ThreadSpawnDetector(classifier, analyses).collect(module, directCallSites, crossTU);
+        }
 
         // An `extern` declared here is real shared state only if the program defines it; a unit
         // on its own cannot tell that from an unresolved symbol.
@@ -529,12 +536,16 @@ namespace ctrace::concurrency::internal::analysis
 
         // Resolved once for the whole unit: a wrapper's effect on the lock it is handed does not
         // depend on which caller is being looked at.
-        LockWrapperSummaries lockWrapperSummaries =
-            collectLockWrapperSummaries(module, classifier, analyses, module.getDataLayout());
+        LockWrapperSummaries lockWrapperSummaries;
+        if (selection.lockWrapperSummaries())
+        {
+            lockWrapperSummaries =
+                collectLockWrapperSummaries(module, classifier, analyses, module.getDataLayout());
+        }
 
         // A helper defined in another unit is only a declaration here, so its body cannot be
         // summarised; the program supplies the summary the other unit produced.
-        if (crossTU)
+        if (crossTU && selection.lockWrapperSummaries())
         {
             for (const llvm::Function& function : module)
             {
@@ -552,45 +563,53 @@ namespace ctrace::concurrency::internal::analysis
 
         // Computed before the accesses are gathered: the thread that hands an object over keeps
         // reaching it through the same slot, so its own accesses need the identity too.
-        const SharedObjectBindings sharedObjectBindings =
-            SharedObjectBindingCollector(classifier, analyses).collect(module, directCallSites);
-
+        SharedObjectBindings sharedObjectBindings;
         std::unordered_set<std::string> sharedObjectIds;
-        for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
-            sharedObjectIds.insert(binding.objectId);
-
-        SharedAccessCollector accessCollector(analyses);
-        std::vector<PendingAccess> pendingAccesses =
-            accessCollector.collect(module, programDefined, &sharedObjectIds);
-
-        std::unordered_map<std::string, std::unordered_set<const llvm::Instruction*>>
-            trackedAccessesByFunction;
-        std::unordered_map<std::string, const llvm::Function*> functionsById;
-        for (const PendingAccess& pendingAccess : pendingAccesses)
+        if (selection.lockState())
         {
-            trackedAccessesByFunction[pendingAccess.fact.functionId].insert(
-                pendingAccess.instruction);
-            functionsById[pendingAccess.fact.functionId] = pendingAccess.function;
+            sharedObjectBindings =
+                SharedObjectBindingCollector(classifier, analyses).collect(module, directCallSites);
+            for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
+                sharedObjectIds.insert(binding.objectId);
         }
 
-        LockScopeTracker lockScopeTracker(classifier, analyses, &lockWrapperSummaries,
-                                          &sharedObjectBindings);
+        std::vector<PendingAccess> pendingAccesses;
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;
-        for (const auto& [functionKey, trackedAccesses] : trackedAccessesByFunction)
+        if (selection.accesses)
         {
-            const llvm::Function* function = functionsById[functionKey];
-            if (function == nullptr)
-                continue;
+            pendingAccesses =
+                SharedAccessCollector(analyses).collect(module, programDefined, &sharedObjectIds);
 
-            std::unordered_map<const llvm::Instruction*, std::set<std::string>> functionLocks =
-                lockScopeTracker.collectHeldLocks(*function, trackedAccesses);
-            heldLocksByAccess.insert(functionLocks.begin(), functionLocks.end());
+            std::unordered_map<std::string, std::unordered_set<const llvm::Instruction*>>
+                trackedAccessesByFunction;
+            std::unordered_map<std::string, const llvm::Function*> functionsById;
+            for (const PendingAccess& pendingAccess : pendingAccesses)
+            {
+                trackedAccessesByFunction[pendingAccess.fact.functionId].insert(
+                    pendingAccess.instruction);
+                functionsById[pendingAccess.fact.functionId] = pendingAccess.function;
+            }
+
+            LockScopeTracker lockScopeTracker(classifier, analyses, &lockWrapperSummaries,
+                                              &sharedObjectBindings);
+            for (const auto& [functionKey, trackedAccesses] : trackedAccessesByFunction)
+            {
+                const llvm::Function* function = functionsById[functionKey];
+                if (function == nullptr)
+                    continue;
+
+                std::unordered_map<const llvm::Instruction*, std::set<std::string>> functionLocks =
+                    lockScopeTracker.collectHeldLocks(*function, trackedAccesses);
+                heldLocksByAccess.insert(functionLocks.begin(), functionLocks.end());
+            }
         }
 
-        ThreadContextPropagator threadContextPropagator(classifier);
-        const TaskConcurrencyAnalyzer taskConcurrencyAnalyzer(classifier, analyses);
-        const TaskConcurrencyResult taskConcurrency =
-            taskConcurrencyAnalyzer.analyze(module, directCallSites, crossTU);
+        TaskConcurrencyResult taskConcurrency;
+        if (selection.taskConcurrency())
+        {
+            taskConcurrency = TaskConcurrencyAnalyzer(classifier, analyses)
+                                  .analyze(module, directCallSites, crossTU);
+        }
 
         TUFacts facts;
         facts.spawns = std::move(spawnFacts.spawns);
@@ -600,13 +619,17 @@ namespace ctrace::concurrency::internal::analysis
 
         // Replace the raw spawn-site count by the number of instances that can actually be alive at
         // once: two spawn sites on mutually exclusive branches, or a spawn/join pair repeated
-        // sequentially, never yield two concurrent instances.
-        for (auto& [entryId, concurrency] : facts.entryConcurrency)
+        // sequentially, never yield two concurrent instances. Only meaningful once the task
+        // analysis has run, which is exactly when the entry concurrency is read.
+        if (selection.threadEntries)
         {
-            if (concurrency.staticSpawnCount >= 2 &&
-                !taskConcurrency.overlappingSpawnEntries.contains(entryId))
+            for (auto& [entryId, concurrency] : facts.entryConcurrency)
             {
-                concurrency.staticSpawnCount = 1;
+                if (concurrency.staticSpawnCount >= 2 &&
+                    !taskConcurrency.overlappingSpawnEntries.contains(entryId))
+                {
+                    concurrency.staticSpawnCount = 1;
+                }
             }
         }
 
@@ -632,18 +655,26 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
-        facts.reachableThreadEntriesByFunction =
-            threadContextPropagator.collect(module, directCallSites, facts.entryConcurrency);
+        if (selection.threadEntries)
+        {
+            facts.reachableThreadEntriesByFunction =
+                ThreadContextPropagator(classifier)
+                    .collect(module, directCallSites, facts.entryConcurrency);
+        }
 
         std::unordered_map<std::string, std::vector<ThreadLifecycleFact>> lifecycleFactsByFunction;
         std::unordered_set<std::string> lifecycleFactKeys;
-        for (ThreadLifecycleFact fact : threadLifecycleCollector.collect(module))
+        if (selection.threadLifecycles)
         {
-            addLifecycleFact(facts.threadLifecycles, lifecycleFactKeys, lifecycleFactsByFunction,
-                             std::move(fact));
+            for (ThreadLifecycleFact fact :
+                 ThreadLifecycleCollector(classifier, analyses).collect(module))
+            {
+                addLifecycleFact(facts.threadLifecycles, lifecycleFactKeys,
+                                 lifecycleFactsByFunction, std::move(fact));
+            }
         }
 
-        bool lifecycleChanged = true;
+        bool lifecycleChanged = selection.threadLifecycles;
         while (lifecycleChanged)
         {
             lifecycleChanged = false;
@@ -700,13 +731,21 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
-        facts.threadArgumentEscapes =
-            ThreadArgumentEscapeCollector(classifier, analyses).collect(module);
-        facts.signalHandlers = SignalHandlerCollector(classifier).collect(module, directCallSites);
+        if (selection.threadArgumentEscapes)
+        {
+            facts.threadArgumentEscapes =
+                ThreadArgumentEscapeCollector(classifier, analyses).collect(module);
+        }
+        if (selection.signalHandlers)
+        {
+            facts.signalHandlers =
+                SignalHandlerCollector(classifier).collect(module, directCallSites);
+        }
 
         // A fork whose child goes on to replace its process image inherits nothing that
         // outlives the exec, so neither question this analysis asks about a fork applies to it.
         // Reachability runs over direct calls, the same way the wait obligation travels.
+        if (selection.processLifecycle)
         {
             const ProcessLifecycleCollector processCollector(classifier);
             ProcessLifecycleCollection processes = processCollector.collect(module);
@@ -742,6 +781,7 @@ namespace ctrace::concurrency::internal::analysis
         // a bare wait belongs to whoever called it — and keeps travelling outwards until some
         // caller does loop. Only the outermost function still carrying it is worth reporting:
         // that is where the missing loop has to be written.
+        if (selection.conditionWaits)
         {
             std::unordered_map<std::string, ConditionWaitFact> unguardedByFunction;
             const ConditionWaitCollector conditionWaitCollector(classifier, analyses);
@@ -858,16 +898,19 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_map<std::string, std::vector<ParameterizedAccess>> summariesByFunction;
         std::unordered_map<std::string, std::unordered_set<std::string>> summaryKeysByFunction;
 
-        LockStatePropagator lockStatePropagator(classifier, analyses, &lockWrapperSummaries,
-                                                &sharedObjectBindings);
-        const LockPropagationResult lockPropagation =
-            lockStatePropagator.collect(module, directCallSites);
+        LockPropagationResult lockPropagation;
+        if (selection.lockState())
+        {
+            lockPropagation = LockStatePropagator(classifier, analyses, &lockWrapperSummaries,
+                                                  &sharedObjectBindings)
+                                  .collect(module, directCallSites);
+        }
 
         LockOrderCollector lockOrderCollector(classifier, analyses, &lockWrapperSummaries,
                                               &sharedObjectBindings);
         for (const llvm::Function& function : module)
         {
-            if (function.isDeclaration())
+            if (!selection.lockOrders || function.isDeclaration())
                 continue;
 
             std::set<std::string> functionEntryLocks;
@@ -889,7 +932,15 @@ namespace ctrace::concurrency::internal::analysis
                                     functionLockOrders.end());
         }
 
-        facts.recursiveLockIds = collectRecursiveLockIds(module, classifier);
+        if (selection.recursiveLockIds)
+            facts.recursiveLockIds = collectRecursiveLockIds(module, classifier);
+
+        // Reads the lifecycle facts, not the accesses, so it can precede them; the rest of this
+        // function is the access pipeline, which only a rule reading accesses pays for.
+        if (selection.program)
+            facts.program = collectProgramSymbolFacts(module, facts);
+        if (!selection.accesses)
+            return facts;
 
         for (PendingAccess& pendingAccess : pendingAccesses)
         {
@@ -1079,7 +1130,6 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         facts.accesses = filterProjectedConcreteAccesses(std::move(concreteAccesses));
-        facts.program = collectProgramSymbolFacts(module, facts);
         return facts;
     }
 } // namespace ctrace::concurrency::internal::analysis
