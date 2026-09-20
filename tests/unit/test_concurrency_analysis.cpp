@@ -1138,6 +1138,20 @@ namespace
                        "on",
              .countsAreMinimums = true},
 
+
+            // --- imported missing-join fixtures (Nihil, 91e7431; #4) ---
+            {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join_scope_exit.cpp",
+             .intent = "an early return abandons a joinable C++ thread",
+             .missingJoin = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/missing-join/missing_join_early_return.c",
+             .intent = "the error return bypasses the pthread join",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/missing_join_overwritten_handle.c",
+             .intent = "reusing one handle loses earlier threads; unresolved array indices also report a race",
+             .dataRace = 1,
+             .missingJoin = 1},
+
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
              .intent = "kept to exercise the compile failure path",
