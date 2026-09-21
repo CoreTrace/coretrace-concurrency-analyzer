@@ -16,6 +16,7 @@
 #include "signal_handler_collector.hpp"
 #include "cross_tu/program_symbol_index.hpp"
 #include "fact_selection.hpp"
+#include "thread_completion_analysis.hpp"
 #include "task_concurrency_analyzer.hpp"
 #include "thread_lifecycle_collector.hpp"
 #include "thread_spawn_detector.hpp"
@@ -604,11 +605,15 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        const ThreadCompletionMap completions =
+            selection.taskConcurrency() || selection.threadLifecycles
+                ? collectThreadCompletions(module, classifier, analyses)
+                : ThreadCompletionMap{};
         TaskConcurrencyResult taskConcurrency;
         if (selection.taskConcurrency())
         {
             taskConcurrency = TaskConcurrencyAnalyzer(classifier, analyses)
-                                  .analyze(module, directCallSites, crossTU);
+                                  .analyze(module, directCallSites, completions, crossTU);
         }
 
         TUFacts facts;
@@ -667,7 +672,7 @@ namespace ctrace::concurrency::internal::analysis
         if (selection.threadLifecycles)
         {
             for (ThreadLifecycleFact fact :
-                 ThreadLifecycleCollector(classifier, analyses).collect(module))
+                 ThreadLifecycleCollector(classifier, analyses).collect(module, completions))
             {
                 addLifecycleFact(facts.threadLifecycles, lifecycleFactKeys,
                                  lifecycleFactsByFunction, std::move(fact));

@@ -2,6 +2,7 @@
 #pragma once
 
 #include "facts.hpp"
+#include "thread_completion_analysis.hpp"
 
 #include <vector>
 
@@ -21,7 +22,8 @@ namespace ctrace::concurrency::internal::analysis
         explicit ThreadLifecycleCollector(const ConcurrencySymbolClassifier& classifier,
                                           LlvmFunctionAnalysisProvider& analyses);
 
-        [[nodiscard]] std::vector<ThreadLifecycleFact> collect(const llvm::Module& module) const;
+        [[nodiscard]] std::vector<ThreadLifecycleFact>
+        collect(const llvm::Module& module, const ThreadCompletionMap& completions) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;

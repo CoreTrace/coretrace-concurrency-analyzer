@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "thread_lifecycle_collector.hpp"
+#include "thread_completion_analysis.hpp"
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
@@ -279,7 +280,8 @@ namespace ctrace::concurrency::internal::analysis
     }
 
     std::vector<ThreadLifecycleFact>
-    ThreadLifecycleCollector::collect(const llvm::Module& module) const
+    ThreadLifecycleCollector::collect(const llvm::Module& module,
+                                      const ThreadCompletionMap& completions) const
     {
         std::vector<ThreadLifecycleFact> facts;
         std::unordered_set<std::string> factKeys;
@@ -429,6 +431,11 @@ namespace ctrace::concurrency::internal::analysis
                         fact.insideLoop = !createdDetached && isCreatedInLoopWithoutInnerResolution(
                                                                   instruction, *handleGroupId,
                                                                   resolutionSites, loopInfo);
+                        if (completions.contains(call))
+                        {
+                            fact.resolvedOnAllPaths = true;
+                            fact.insideLoop = false;
+                        }
                         fact.escapedToUntrackedStorage = escapedGroups.contains(*handleGroupId);
                     }
 
