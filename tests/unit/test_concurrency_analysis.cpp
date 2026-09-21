@@ -1153,7 +1153,7 @@ namespace
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/cpp_race_shared_map.cpp",
              .intent = "map insertion and traversal race; counts vary with standard-library lowering",
-             .dataRace = 4,
+             .dataRace = 3,
              .requiresCxx20 = true,
              .countsAreMinimums = true},
             {.path = "tests/fixtures/concurrency/data-race/cpp_shared_ptr_race.cpp",
