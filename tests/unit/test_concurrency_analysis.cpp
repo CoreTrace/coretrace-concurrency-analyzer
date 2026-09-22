@@ -1121,6 +1121,18 @@ namespace
                        "unverified",
              .conditionWait = 1},
 
+            // --- imported condition-variable fixtures (Nihil, 91e7431; #4) ---
+            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_destructor_race.cpp",
+             .intent = "resetting the shared condition-variable pointer races; destruction safety is not modeled",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_lost_wakeup.c",
+             .intent = "waiting without a predicate can lose a notification",
+             .conditionWait = 1},
+            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_no_predicate_recheck.c",
+             .intent = "broadcast consumers must recheck the predicate after waking",
+             .conditionWait = 1},
+
             // --- rules that do not exist yet: pinned as silent -----------------------------
             {.path = "tests/fixtures/concurrency/memory-barrier/missing_memory_barrier.c",
              .intent = "no rule models memory ordering yet; the plain accesses still race",
@@ -1138,18 +1150,6 @@ namespace
                        "on",
              .countsAreMinimums = true},
 
-
-            // --- imported condition-variable fixtures (Nihil, 91e7431; #4) ---
-            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_destructor_race.cpp",
-             .intent = "resetting the shared condition-variable pointer races; destruction safety is not modeled",
-             .dataRace = 1,
-             .requiresCxx20 = true},
-            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_lost_wakeup.c",
-             .intent = "waiting without a predicate can lose a notification",
-             .conditionWait = 1},
-            {.path = "tests/fixtures/concurrency/condition-variable/condition_variable_no_predicate_recheck.c",
-             .intent = "broadcast consumers must recheck the predicate after waking",
-             .conditionWait = 1},
             // --- contained thread phases (#39) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_seq_join_inside_helper.c",
              .intent = "two calls bind different entries and each joins before returning"},
