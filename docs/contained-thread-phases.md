@@ -28,6 +28,6 @@ LLVM 20 documentation consulted:
 
 ## Regression matrix
 
-Silent: scalar helpers, nested parameterized helpers, distinct template trampolines. Array/vector phases retain races between workers **within** each phase while losing only the cross-phase race. Positive controls: no join, detach, conditional join, shorter join range, early break, overwritten handle, and an extra overlapping invocation of an otherwise contained entry.
+Silent: scalar helpers, nested parameterized helpers, distinct template trampolines. Array/vector phases retain races between workers **within** each phase while losing only the cross-phase race. Positive controls: no join, detach, conditional join, shorter join range, early break, overwritten handle, opaque handle mutation, mismatched dynamic indices, and an extra overlapping invocation of an otherwise contained entry.
 
 The old loop reproduction starts two workers per phase which both increment the same global. It is not a wholly race-free program: expecting zero races would weaken the test. Its correct race count is two (one per phase), with no MissingJoin warning.

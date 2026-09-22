@@ -1184,6 +1184,13 @@ namespace
              .dataRace = 3,
              .missingJoin = 1},
 
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_handle_mutation.c",
+             .intent = "an opaque call can replace the handle before its join; containment is unknown",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_dynamic_handle_index.c",
+             .intent = "wildcard storage-group indices do not prove the same handle was joined",
+             .dataRace = 1},
+
             // --- imported signal-handler fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/signal-handler/signal_handler_data_race_global.c",
              .intent = "handler printf is unsafe; global signal-state modeling remains outside this rule (#54)",
