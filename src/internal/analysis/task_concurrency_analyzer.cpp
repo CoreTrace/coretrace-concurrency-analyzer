@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "task_concurrency_analyzer.hpp"
+#include "contained_entry_analysis.hpp"
+#include "thread_completion_analysis.hpp"
 
 #include "concurrency_symbol_classifier.hpp"
 #include "interprocedural_bindings.hpp"
@@ -194,13 +196,15 @@ namespace ctrace::concurrency::internal::analysis
     {
     }
 
-    TaskConcurrencyResult
-    TaskConcurrencyAnalyzer::analyze(const llvm::Module& module,
-                                     const std::vector<DirectCallSite>& directCallSites,
-                                     bool includeExternalEntries) const
+    TaskConcurrencyResult TaskConcurrencyAnalyzer::analyze(
+        const llvm::Module& module, const std::vector<DirectCallSite>& directCallSites,
+        const ThreadCompletionMap& completions, bool includeExternalEntries) const
     {
         TaskConcurrencyResult result;
         result.rootTaskFunctions = collectRootTaskFunctions(module, directCallSites);
+        const auto containedPairs = collectContainedEntryPairs(module, directCallSites, completions,
+                                                               classifier_, analyses_);
+        result.sequencedEntryPairs.insert(containedPairs.begin(), containedPairs.end());
 
         std::unordered_map<std::string, FunctionLifecycleSites> sitesByFunction;
 
