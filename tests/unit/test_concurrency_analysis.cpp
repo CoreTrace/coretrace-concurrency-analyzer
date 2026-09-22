@@ -1032,6 +1032,21 @@ namespace
             {.path = "tests/fixtures/concurrency/deadlock/cpp_recursive_mutex_no_diagnostic.cpp",
              .intent = "std::recursive_mutex is designed to be relocked"},
 
+            // --- imported deadlock fixtures (Nihil, 91e7431; #4) ---
+            {.path = "tests/fixtures/concurrency/deadlock/cpp_deadlock_self_lock.cpp",
+             .intent = "a nonrecursive mutex is acquired again through a nested helper",
+             .deadlock = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/cpp_future_mutex_deadlock.cpp",
+             .intent = "known gap #54: future waits are not lock-order edges; std::async lowering varies by library",
+             .requiresCxx20 = true, .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/deadlock/cpp_scoped_lock_order.cpp",
+             .intent = "opposite lock_guard acquisition orders form a cycle",
+             .deadlock = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_condvar_wrong_mutex.c",
+             .intent = "negative control: wait releases mutex_b and notifier never acquires mutex_a"},
+
             // --- missing join --------------------------------------------------------------
             {.path = "tests/fixtures/concurrency/missing-join/missing_join_basic.c",
              .intent = "a created handle is never joined",
