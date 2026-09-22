@@ -1184,6 +1184,13 @@ namespace
              .dataRace = 3,
              .missingJoin = 1},
 
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_handle_mutation.c",
+             .intent = "an opaque call can replace the handle before its join; containment is unknown",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_dynamic_handle_index.c",
+             .intent = "wildcard storage-group indices do not prove the same handle was joined",
+             .dataRace = 1},
+
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
              .intent = "kept to exercise the compile failure path",
