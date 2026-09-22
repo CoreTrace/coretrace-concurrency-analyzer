@@ -1128,6 +1128,23 @@ namespace
             {.path = "tests/fixtures/concurrency/signal/signal_handler_flag_only_no_fp.c",
              .intent = "writing a volatile sig_atomic_t flag is the shape the standard allows"},
 
+            // --- imported signal-handler fixtures (Nihil, 91e7431; #4) ---
+            {.path = "tests/fixtures/concurrency/signal-handler/signal_handler_data_race_global.c",
+             .intent = "handler printf is unsafe; global signal-state modeling remains outside this rule (#54)",
+             .unsafeSignalHandler = 1},
+            {.path = "tests/fixtures/concurrency/signal-handler/signal_handler_longjmp.c",
+             .intent = "siglongjmp is not blanket-unsafe; interrupted-operation restrictions are not modeled (#54)"},
+            {.path = "tests/fixtures/concurrency/signal-handler/signal_handler_non_safe_func.c",
+             .intent = "unsafe allocation and stdio calls produce one aggregated handler diagnostic",
+             .unsafeSignalHandler = 1},
+            {.path = "tests/fixtures/concurrency/signal-handler/signal_mutex_deadlock.c",
+             .intent = "mutex operations are not async-signal-safe",
+             .unsafeSignalHandler = 1},
+            {.path = "tests/fixtures/concurrency/signal-handler/signal_reentrant_function.c",
+             .intent = "known gap #54: handler calls to nonreentrant strtok are not classified"},
+            {.path = "tests/fixtures/concurrency/signal-handler/signal_thread_mask.c",
+             .intent = "known gap #54: signal delivery is not modeled; the full join loop completes the workers"},
+
             // --- thread arguments ----------------------------------------------------------
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_stack_escape.c",
              .intent = "a detached thread keeps reading a frame that is already gone",
