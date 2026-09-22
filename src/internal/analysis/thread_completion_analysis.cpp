@@ -139,6 +139,8 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         const auto kind = classifier.classify(*call);
                         if (kind != CallKind::PThreadCreate && kind != CallKind::PThreadJoin &&
+                            kind != CallKind::StdThreadCtor && kind != CallKind::StdThreadJoin &&
+                            kind != CallKind::StdThreadDtor &&
                             !llvm::isa<llvm::IntrinsicInst>(call))
                             return false;
                     }
@@ -161,8 +163,10 @@ namespace ctrace::concurrency::internal::analysis
                     }
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                     {
+                        const auto kind = classifier.classify(*call);
                         if (llvm::isa<llvm::DbgInfoIntrinsic>(call) ||
-                            classifier.classify(*call) == CallKind::PThreadJoin)
+                            kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin ||
+                            (kind == CallKind::StdThreadDtor && dominators.dominates(&join, call)))
                             continue;
                         for (const auto& argument : call->args())
                             if (argument->getType()->isPointerTy() &&
@@ -567,12 +571,24 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
                     const auto first = canonicalStorageGroupId(*create->getArgOperand(0));
                     const auto second = canonicalStorageGroupId(*join->getArgOperand(0));
+                    const auto* createAddress = handleAddress(*create, false);
+                    const auto* joinAddress =
+                        handleAddress(*join, classifier.classify(*join) == CallKind::PThreadJoin);
+                    // Wildcard storage-group indices cannot establish handle identity.
+                    bool sameAddress = createAddress && createAddress == joinAddress;
+                    const auto* createGep =
+                        llvm::dyn_cast_or_null<llvm::GEPOperator>(createAddress);
+                    const auto* joinGep = llvm::dyn_cast_or_null<llvm::GEPOperator>(joinAddress);
+                    if (createGep && joinGep && createGep->hasAllConstantIndices() &&
+                        joinGep->hasAllConstantIndices() && first && first == second)
+                        sameAddress = true;
                     bool overwritten = false;
                     for (const auto* other : creates)
                         if (other != create && !other->arg_empty() &&
                             canonicalStorageGroupId(*other->getArgOperand(0)) == first)
                             overwritten = true;
-                    if (!overwritten && first && first == second &&
+                    if (!overwritten && sameAddress && first && first == second &&
+                        arrayStorageUnchanged(*create, *join, dominators, classifier) &&
                         dominators.dominates(create, join) &&
                         completionCoversReturns(*create, *join))
                     {
