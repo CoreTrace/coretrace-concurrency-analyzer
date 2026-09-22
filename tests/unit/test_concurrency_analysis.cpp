@@ -1074,6 +1074,15 @@ namespace
                      "thread_argument_static_storage_no_fp.c",
              .intent = "the argument outlives every frame, so detaching is fine"},
 
+            // --- imported thread-escape fixtures (Nihil, 91e7431; #4) ---
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_loop_variable.c",
+             .intent = "workers receive the loop-variable address; #39 tracks the additional join-loop warning",
+             .missingJoin = 1,
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_stack_ptr.c",
+             .intent = "a global handle survives the helper frame whose local it references",
+             .threadArgumentEscape = 1},
+
             // --- process lifecycle ---------------------------------------------------------
             {.path = "tests/fixtures/concurrency/process/fork_after_thread_creation.c",
              .intent = "the child inherits a mutex no surviving thread can unlock",
@@ -1138,15 +1147,6 @@ namespace
                        "on",
              .countsAreMinimums = true},
 
-
-            // --- imported thread-escape fixtures (Nihil, 91e7431; #4) ---
-            {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_loop_variable.c",
-             .intent = "workers receive the loop-variable address; #39 tracks the additional join-loop warning",
-             .missingJoin = 1,
-             .threadArgumentEscape = 1},
-            {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_stack_ptr.c",
-             .intent = "a global handle survives the helper frame whose local it references",
-             .threadArgumentEscape = 1},
             // --- contained thread phases (#39) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_seq_join_inside_helper.c",
              .intent = "two calls bind different entries and each joins before returning"},
