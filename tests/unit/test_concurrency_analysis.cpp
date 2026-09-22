@@ -1054,6 +1054,19 @@ namespace
              .intent = "std::jthread joins in its destructor",
              .requiresCxx20 = true},
 
+            // --- imported missing-join fixtures (Nihil, 91e7431; #4) ---
+            {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join_scope_exit.cpp",
+             .intent = "an early return abandons a joinable C++ thread",
+             .missingJoin = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/missing-join/missing_join_early_return.c",
+             .intent = "the error return bypasses the pthread join",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/missing_join_overwritten_handle.c",
+             .intent = "reusing one handle loses earlier threads; unresolved array indices also report a race",
+             .dataRace = 1,
+             .missingJoin = 1},
+
             // --- signal handlers -----------------------------------------------------------
             {.path = "tests/fixtures/concurrency/signal/signal_handler_unsafe_call.c",
              .intent = "the handler prints and allocates, both of which it may interrupt",
@@ -1138,19 +1151,6 @@ namespace
                        "on",
              .countsAreMinimums = true},
 
-
-            // --- imported missing-join fixtures (Nihil, 91e7431; #4) ---
-            {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join_scope_exit.cpp",
-             .intent = "an early return abandons a joinable C++ thread",
-             .missingJoin = 1,
-             .requiresCxx20 = true},
-            {.path = "tests/fixtures/concurrency/missing-join/missing_join_early_return.c",
-             .intent = "the error return bypasses the pthread join",
-             .missingJoin = 1},
-            {.path = "tests/fixtures/concurrency/missing-join/missing_join_overwritten_handle.c",
-             .intent = "reusing one handle loses earlier threads; unresolved array indices also report a race",
-             .dataRace = 1,
-             .missingJoin = 1},
             // --- contained thread phases (#39) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_seq_join_inside_helper.c",
              .intent = "two calls bind different entries and each joins before returning"},
