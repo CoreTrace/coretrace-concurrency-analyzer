@@ -2,6 +2,7 @@
 #pragma once
 
 #include "facts.hpp"
+#include "thread_completion_analysis.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -53,7 +54,7 @@ namespace ctrace::concurrency::internal::analysis
         /// because that verdict is only observable here, at the spawn sites.
         [[nodiscard]] TaskConcurrencyResult
         analyze(const llvm::Module& module, const std::vector<DirectCallSite>& directCallSites,
-                bool includeExternalEntries = false) const;
+                const ThreadCompletionMap& completions, bool includeExternalEntries = false) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;
