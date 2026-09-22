@@ -10,6 +10,21 @@ still change between minor releases.
 
 ## Unreleased
 
+- Threads started and joined inside a helper, or across two counted loops, are
+  no longer paired with the threads of a later phase. A completion proof
+  identifies a point after every instance a spawn site produced has been
+  joined, and both the lifecycle collector and the task analysis read it, so
+  the two rules agree on what a finished phase is. Detach resolves ownership
+  and is not completion; an unknown path, an incomplete range, an overwritten
+  handle or a recursive context keeps the threads concurrent, and races
+  *within* a phase are retained. Covers the shapes every thread-pool and
+  run-in-parallel helper takes, including a fixed-size `std::vector` of
+  handles traversed by a full range. No public API or report change.
+  `docs/contained-thread-phases.md` states the contract and its limits.
+- 27 fixtures contributed in April are now registered as tests, one category
+  per import, with their original bytes and authorship. Six of them are pinned
+  silent because no rule covers what they exercise; those gaps are recorded
+  rather than presented as clean results.
 - A unit analysis builds only the facts the selected rules read. `--rules` now
   decides which collectors run, through one table from rule to fact; the
   collectors themselves know nothing about rules. On the documented 49-unit
