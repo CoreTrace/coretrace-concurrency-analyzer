@@ -144,6 +144,21 @@ namespace ctrace::concurrency::internal::diagnostics
                 },
         };
 
+        static const RuleMetadata kThreadLocalOutlivesThread{
+            .ruleId = RuleId::ThreadLocalOutlivesThread,
+            .title = "Thread-local object used after its thread ended",
+            .shortDescription =
+                "Detects a thread-local object reached through a pointer its thread published, "
+                "after that thread has been joined.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "825",
+                    .title = "Expired Pointer Dereference",
+                },
+        };
+
         static const RuleMetadata kWeakPublicationOrdering{
             .ruleId = RuleId::WeakPublicationOrdering,
             .title = "Atomic flag publishes data without release/acquire ordering",
@@ -185,6 +200,8 @@ namespace ctrace::concurrency::internal::diagnostics
             return kWeakPublicationOrdering;
         case RuleId::ThreadArgumentFreedEarly:
             return kThreadArgumentFreedEarly;
+        case RuleId::ThreadLocalOutlivesThread:
+            return kThreadLocalOutlivesThread;
         }
 
         return kCompilerDiagnostic;

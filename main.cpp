@@ -56,7 +56,7 @@ namespace
             << "                           missing-join, deadlock-lock-order, condition-wait,\n"
             << "                           fork-after-thread, unreaped-child, thread-arg-escape,\n"
             << "                           unsafe-signal-handler, weak-publication,\n"
-            << "                           thread-arg-freed, or `all`\n"
+            << "                           thread-arg-freed, thread-local-escape, or `all`\n"
             << "                           (default: every rule)\n"
             << "  --format=human|json|sarif\n"
             << "                           Diagnostic output format for --analyze (default: "
@@ -113,6 +113,8 @@ namespace
                     return "weak-publication";
                 case ctrace::concurrency::RuleId::ThreadArgumentFreedEarly:
                     return "thread-arg-freed";
+                case ctrace::concurrency::RuleId::ThreadLocalOutlivesThread:
+                    return "thread-local-escape";
                 case ctrace::concurrency::RuleId::DeadlockLockOrder:
                     return "deadlock-lock-order";
                 case ctrace::concurrency::RuleId::CompilerDiagnostic:
@@ -222,6 +224,8 @@ namespace
             return "weak-publication";
         case RuleId::ThreadArgumentFreedEarly:
             return "thread-arg-freed";
+        case RuleId::ThreadLocalOutlivesThread:
+            return "thread-local-escape";
         case RuleId::CompilerDiagnostic:
             return "compiler-diagnostic";
         }
@@ -289,6 +293,12 @@ namespace
         if (value == "thread-arg-freed")
         {
             out = RuleId::ThreadArgumentFreedEarly;
+            return true;
+        }
+
+        if (value == "thread-local-escape")
+        {
+            out = RuleId::ThreadLocalOutlivesThread;
             return true;
         }
 

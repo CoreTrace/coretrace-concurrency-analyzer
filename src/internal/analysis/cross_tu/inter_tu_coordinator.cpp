@@ -316,6 +316,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 options_.isEnabled(RuleId::UnreapedChildProcess) ||
                 options_.isEnabled(RuleId::ThreadArgumentEscapesFrame) ||
                 options_.isEnabled(RuleId::ThreadArgumentFreedEarly) ||
+                options_.isEnabled(RuleId::ThreadLocalOutlivesThread) ||
                 options_.isEnabled(RuleId::UnsafeSignalHandler))
             {
                 DiagnosticReport processReport = ProcessLifecycleChecker().run(facts);

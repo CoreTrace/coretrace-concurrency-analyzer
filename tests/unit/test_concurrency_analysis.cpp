@@ -810,6 +810,7 @@ namespace
         std::size_t unsafeSignalHandler = 0;
         std::size_t weakPublication = 0;
         std::size_t threadArgumentFreed = 0;
+        std::size_t threadLocalEscape = 0;
         /// Symbol the data-race diagnostics must name; empty when not asserted.
         std::string_view racingSymbol;
         bool requiresCxx20 = false;
@@ -1337,10 +1338,17 @@ namespace
              .racingSymbol = "_ZL8finished"},
             {.path = "tests/fixtures/concurrency/thread-local/tls_destructor_atomic_no_fp.cpp",
              .intent = "thread-local destructors updating an atomic counter do not race"},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_private_no_fp.c",
+             .intent = "each thread updates its own thread-local copy"},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_published_while_alive_no_fp.c",
+             .intent = "a thread-local address read while its owner still runs"},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_pointer_reassigned_no_fp.c",
+             .intent = "a pointer that also receives heap memory is not known to reach a dead thread-local"},
 
             // --- imported thread-local fixtures (Nihil, 91e7431; #50) ---
             {.path = "tests/fixtures/concurrency/thread-local/c_tls_dangling_ptr.c",
-             .intent = "known gap #50: a thread-local address used after its thread is joined is not tracked"},
+             .intent = "main reads and writes a thread-local through the address its joined thread published",
+             .threadLocalEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-local/cpp_tls_destructor_race.cpp",
              .intent = "thread-local constructors and main race on active_count",
              .dataRace = 1,
@@ -1460,6 +1468,8 @@ namespace
             {RuleId::UnsafeSignalHandler, expectation.unsafeSignalHandler, "unsafe-signal-handler"},
             {RuleId::WeakPublicationOrdering, expectation.weakPublication, "weak-publication"},
             {RuleId::ThreadArgumentFreedEarly, expectation.threadArgumentFreed, "thread-arg-freed"},
+            {RuleId::ThreadLocalOutlivesThread, expectation.threadLocalEscape,
+             "thread-local-escape"},
         };
 
         bool ok = true;
@@ -1523,6 +1533,7 @@ namespace
             RuleId::UnsafeSignalHandler,
             RuleId::WeakPublicationOrdering,
             RuleId::ThreadArgumentFreedEarly,
+            RuleId::ThreadLocalOutlivesThread,
         };
 
         bool ok = true;

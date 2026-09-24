@@ -91,6 +91,25 @@ namespace ctrace::concurrency::internal::analysis
             builder.emit();
         }
 
+        for (const ExpiredThreadLocalFact& expired : facts.expiredThreadLocals)
+        {
+            DiagnosticBuilder(report, RuleId::ThreadLocalOutlivesThread)
+                .primaryLocation(expired.useLocation)
+                .message("thread-local '" + expired.threadLocal +
+                         "' is used after its thread has ended")
+                .note("its thread published the address in '" + expired.pointer +
+                      "' and has been joined: a thread's thread-local objects end with it")
+                .note("copy the value out before the thread ends, or give it storage that "
+                      "outlives the thread")
+                .relatedLocation("Address published by the thread", expired.publishLocation)
+                .taxonomy("CERT", "DCL30-C", "Declare objects with appropriate storage durations")
+                .property("function", expired.functionId)
+                .property("entry", expired.entryFunctionId)
+                .property("threadLocal", expired.threadLocal)
+                .property("pointer", expired.pointer)
+                .emit();
+        }
+
         for (const SignalHandlerFact& handler : facts.signalHandlers)
         {
             DiagnosticBuilder(report, RuleId::UnsafeSignalHandler)

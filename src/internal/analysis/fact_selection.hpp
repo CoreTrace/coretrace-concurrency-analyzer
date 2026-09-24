@@ -32,6 +32,8 @@ namespace ctrace::concurrency::internal::analysis
         bool threadArgumentEscapes = false;
         /// `threadArgumentFrees`.
         bool threadArgumentFrees = false;
+        /// `expiredThreadLocals`.
+        bool expiredThreadLocals = false;
         /// `signalHandlers`.
         bool signalHandlers = false;
         /// `weakPublications`. Built from the accesses, which it therefore requires.
@@ -110,6 +112,9 @@ namespace ctrace::concurrency::internal::analysis
                     break;
                 case RuleId::ThreadArgumentFreedEarly:
                     selection.threadArgumentFrees = true;
+                    break;
+                case RuleId::ThreadLocalOutlivesThread:
+                    selection.expiredThreadLocals = true;
                     break;
                 case RuleId::UnsafeSignalHandler:
                     selection.signalHandlers = true;
