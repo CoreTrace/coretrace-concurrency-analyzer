@@ -47,7 +47,8 @@ What each of the newer rules establishes, and what it deliberately does not:
   waits, so a pointer to a local dangles as soon as that function returns. *Covers*
   `pthread_create`, and `std::thread` when an address of a local is stored in what it copies: a
   lambda capturing by reference, a pointer or `std::ref` argument. A local passed by value is
-  copied into the thread and does not escape.
+  copied into the thread and does not escape. *Not covered:* an address copied out of a pointer
+  variable (`int* p = &local; std::thread([p] {...})`), and `std::jthread`.
 - **`unsafe-signal-handler`** — a handler interrupts its own thread at an arbitrary instruction,
   so allocating, printing or locking there re-enters a structure the interrupted code may have
   left inconsistent. The unsafety travels back along direct calls to the handler. *Covers*
