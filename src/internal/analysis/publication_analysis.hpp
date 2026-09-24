@@ -31,7 +31,15 @@ namespace ctrace::concurrency::internal::analysis
     using PublicationOrderingMap =
         std::unordered_map<const llvm::Instruction*, PublicationOrdering>;
 
-    /// Finds the accesses a flag publication orders, keyed by the accessing instruction.
+    struct PublicationAnalysis
+    {
+        /// The accesses a release/acquire publication orders, keyed by the accessing instruction.
+        PublicationOrderingMap ordering;
+        /// Publications whose store does not release or whose observing load does not acquire.
+        std::vector<WeakPublicationFact> weakPublications;
+    };
+
+    /// Finds the publications through atomic flags in a unit.
     ///
     /// A thread publishes by writing data and then storing a constant to an atomic flag; another
     /// thread that loads the flag, sees that constant and only then touches the data is ordered
@@ -45,10 +53,12 @@ namespace ctrace::concurrency::internal::analysis
     ///   and that nothing else calls;
     /// - the reader's access lies on the branch taken when the loaded value is the constant.
     ///
-    /// Anything short of that orders nothing. In a project analysis only flags with internal
-    /// linkage qualify, since another unit may store an external one.
-    [[nodiscard]] PublicationOrderingMap collectPublicationOrdering(
-        const llvm::Module& module, const std::vector<const llvm::Instruction*>& accesses,
-        const std::vector<DirectCallSite>& directCallSites, const std::vector<SpawnFact>& spawns,
-        LlvmFunctionAnalysisProvider& analyses, bool projectAnalysis);
+    /// Such a publication orders the accesses it covers, and is reported as weak when the data
+    /// both sides touch is left uncovered by a relaxed store or load. In a project analysis only
+    /// flags with internal linkage qualify, since another unit may store an external one.
+    [[nodiscard]] PublicationAnalysis
+    analyzePublications(const llvm::Module& module, const std::vector<PendingAccess>& accesses,
+                        const std::vector<DirectCallSite>& directCallSites,
+                        const std::vector<SpawnFact>& spawns,
+                        LlvmFunctionAnalysisProvider& analyses, bool projectAnalysis);
 } // namespace ctrace::concurrency::internal::analysis

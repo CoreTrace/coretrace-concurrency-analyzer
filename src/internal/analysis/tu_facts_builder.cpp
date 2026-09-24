@@ -949,17 +949,15 @@ namespace ctrace::concurrency::internal::analysis
         if (!selection.accesses)
             return facts;
 
-        std::vector<const llvm::Instruction*> accessInstructions;
-        accessInstructions.reserve(pendingAccesses.size());
-        for (const PendingAccess& pendingAccess : pendingAccesses)
-            accessInstructions.push_back(pendingAccess.instruction);
-        const PublicationOrderingMap publicationOrdering = collectPublicationOrdering(
-            module, accessInstructions, directCallSites, facts.spawns, analyses, crossTU);
+        PublicationAnalysis publications = analyzePublications(
+            module, pendingAccesses, directCallSites, facts.spawns, analyses, crossTU);
+        if (selection.weakPublications)
+            facts.weakPublications = std::move(publications.weakPublications);
 
         for (PendingAccess& pendingAccess : pendingAccesses)
         {
-            if (const auto publicationIt = publicationOrdering.find(pendingAccess.instruction);
-                publicationIt != publicationOrdering.end())
+            if (const auto publicationIt = publications.ordering.find(pendingAccess.instruction);
+                publicationIt != publications.ordering.end())
             {
                 pendingAccess.fact.beforeRelease = publicationIt->second.beforeRelease;
                 pendingAccess.fact.afterAcquire = publicationIt->second.afterAcquire;

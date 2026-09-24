@@ -10,6 +10,14 @@ still change between minor releases.
 
 ## Unreleased
 
+- New rule `weak-publication` (`WeakPublicationOrdering`, warning, on by
+  default): data published through an atomic flag whose store does not
+  release, or whose observing load does not acquire, directly or through a
+  fence. The reader may then see the flag set and the data stale. It reads the
+  same publications `data-race` now treats as ordering, under the same
+  conditions, and names the flag, the data and the weak side. A plain payload
+  behind a relaxed flag gets both diagnostics: the race on the data and the
+  reason the flag does not order it.
 - An atomic flag reached through wrappers is no longer reported as a race
   when the wrappers also call a helper that touches no shared memory. Such a
   helper used to make the wrapper's accesses count as plain ones. libstdc++

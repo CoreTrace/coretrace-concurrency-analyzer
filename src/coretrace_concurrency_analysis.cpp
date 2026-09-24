@@ -3,6 +3,7 @@
 
 #include "internal/analysis/condition_wait_checker.hpp"
 #include "internal/analysis/process_lifecycle_checker.hpp"
+#include "internal/analysis/publication_ordering_checker.hpp"
 #include "internal/analysis/cross_tu/inter_tu_coordinator.hpp"
 #include "internal/analysis/data_race_checker.hpp"
 #include "internal/analysis/fact_selection.hpp"
@@ -120,6 +121,12 @@ namespace ctrace::concurrency
         {
             internal::analysis::ConditionWaitChecker conditionWaitChecker;
             appendDiagnostics(report, conditionWaitChecker.run(facts));
+        }
+
+        if (options_.isEnabled(RuleId::WeakPublicationOrdering))
+        {
+            internal::analysis::PublicationOrderingChecker publicationChecker;
+            appendDiagnostics(report, publicationChecker.run(facts));
         }
 
         if (options_.isEnabled(RuleId::ForkAfterThreadCreation) ||

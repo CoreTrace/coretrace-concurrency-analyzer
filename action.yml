@@ -21,7 +21,7 @@ inputs:
     required: false
     default: ""
   rules:
-    description: "Comma-separated rule selection: data-race, missing-join, deadlock-lock-order, condition-wait, fork-after-thread, unreaped-child, thread-arg-escape, unsafe-signal-handler, or all."
+    description: "Comma-separated rule selection: data-race, missing-join, deadlock-lock-order, condition-wait, fork-after-thread, unreaped-child, thread-arg-escape, unsafe-signal-handler, weak-publication, or all."
     required: false
     default: "all"
   fail-on:

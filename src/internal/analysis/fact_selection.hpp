@@ -32,6 +32,8 @@ namespace ctrace::concurrency::internal::analysis
         bool threadArgumentEscapes = false;
         /// `signalHandlers`.
         bool signalHandlers = false;
+        /// `weakPublications`. Built from the accesses, which it therefore requires.
+        bool weakPublications = false;
         /// `entryConcurrency` as corrected by the task analysis, `sequencedEntryPairs` and
         /// `reachableThreadEntriesByFunction`.
         bool threadEntries = false;
@@ -106,6 +108,11 @@ namespace ctrace::concurrency::internal::analysis
                     break;
                 case RuleId::UnsafeSignalHandler:
                     selection.signalHandlers = true;
+                    break;
+                case RuleId::WeakPublicationOrdering:
+                    selection.accesses = true;
+                    selection.threadEntries = true;
+                    selection.weakPublications = true;
                     break;
                 case RuleId::CompilerDiagnostic:
                     break;
