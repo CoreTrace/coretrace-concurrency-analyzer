@@ -889,6 +889,8 @@ namespace
              .countsAreMinimums = true},
 
             // --- data race: regressions fixed, must stay silent ---------------------------
+            {.path = "tests/fixtures/concurrency/data-race/atomic_wrapper_pure_helper_no_fp.c",
+             .intent = "a helper touching no shared memory leaves an atomic wrapper atomic"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_mutex_protected.c",
              .intent = "a common mutex protects both accesses"},
             {.path = "tests/fixtures/concurrency/data-race/"
