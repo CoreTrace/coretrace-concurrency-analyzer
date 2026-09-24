@@ -8,7 +8,7 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
-## Unreleased
+## v0.5.0
 
 - **Default change.** `--analyze` without `--rules`, and a default-constructed
   `AnalysisOptions`, now run every rule: `thread-arg-escape` and
