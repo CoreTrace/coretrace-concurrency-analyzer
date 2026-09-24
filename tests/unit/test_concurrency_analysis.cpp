@@ -1330,6 +1330,14 @@ namespace
              .dataRace = 1,
              .racingSymbol = "shared_task"},
 
+            // --- thread-local lifetime (#50) ---
+            {.path = "tests/fixtures/concurrency/thread-local/tls_destructor_only_race.cpp",
+             .intent = "thread-local destructors run at the end of their threads and race on a plain counter",
+             .dataRace = 1,
+             .racingSymbol = "_ZL8finished"},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_destructor_atomic_no_fp.cpp",
+             .intent = "thread-local destructors updating an atomic counter do not race"},
+
             // --- imported thread-local fixtures (Nihil, 91e7431; #50) ---
             {.path = "tests/fixtures/concurrency/thread-local/c_tls_dangling_ptr.c",
              .intent = "known gap #50: a thread-local address used after its thread is joined is not tracked"},
