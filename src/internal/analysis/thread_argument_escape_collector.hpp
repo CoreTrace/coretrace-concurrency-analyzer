@@ -2,6 +2,7 @@
 #pragma once
 
 #include "facts.hpp"
+#include "thread_completion_analysis.hpp"
 
 namespace llvm
 {
@@ -25,8 +26,10 @@ namespace ctrace::concurrency::internal::analysis
         explicit ThreadArgumentEscapeCollector(const ConcurrencySymbolClassifier& classifier,
                                                LlvmFunctionAnalysisProvider& analyses);
 
+        /// `completions` are the unit's join-range proofs: a creation they cover is joined, every
+        /// instance of it, before any normal return, even when no single join dominates one.
         [[nodiscard]] std::vector<ThreadArgumentEscapeFact>
-        collect(const llvm::Module& module) const;
+        collect(const llvm::Module& module, const ThreadCompletionMap& completions) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;

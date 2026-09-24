@@ -979,9 +979,8 @@ namespace
              .intent = "lazy global initialization races; the separate full join loop completes every worker",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_stats_counter.c",
-             .intent = "three shared statistics race; full joins complete the workers; #54 tracks the argument warning",
-             .dataRace = 3,
-             .threadArgumentEscape = 1},
+             .intent = "three shared statistics race; full joins complete the workers, so their ids outlive them",
+             .dataRace = 3},
             {.path = "tests/fixtures/concurrency/data-race/data_race_stop_flag.c",
              .intent = "the creator writes the stop flag while its worker reads it",
              .dataRace = 1},
@@ -1157,6 +1156,12 @@ namespace
             {.path = "tests/fixtures/concurrency/thread-escape/"
                      "thread_argument_static_storage_no_fp.c",
              .intent = "the argument outlives every frame, so detaching is fine"},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_join_loop_no_fp.c",
+             .intent = "a join loop over the whole creation range keeps the frame alive"},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_partial_join_loop.c",
+             .intent = "a join loop one short of the creation range leaves a worker reading a gone frame",
+             .missingJoin = 1,
+             .threadArgumentEscape = 1},
 
             // --- imported thread-escape fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_loop_variable.c",

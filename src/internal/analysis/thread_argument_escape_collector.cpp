@@ -70,7 +70,8 @@ namespace ctrace::concurrency::internal::analysis
     }
 
     std::vector<ThreadArgumentEscapeFact>
-    ThreadArgumentEscapeCollector::collect(const llvm::Module& module) const
+    ThreadArgumentEscapeCollector::collect(const llvm::Module& module,
+                                           const ThreadCompletionMap& completions) const
     {
         std::vector<ThreadArgumentEscapeFact> facts;
 
@@ -117,6 +118,9 @@ namespace ctrace::concurrency::internal::analysis
 
             for (const llvm::CallBase* creation : creations)
             {
+                if (completions.contains(creation))
+                    continue;
+
                 // getUnderlyingObject follows the indexing, so `&local` and `&local.field` and
                 // `&array[0]` all lead back to the same allocation.
                 const llvm::Value* argument =
