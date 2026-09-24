@@ -20,7 +20,6 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 
-#include <algorithm>
 #include <map>
 #include <optional>
 
@@ -248,6 +247,37 @@ namespace ctrace::concurrency::internal::analysis
             return live;
         }
 
+        /// True when every path through live blocks that reaches `later` passes `earlier` first.
+        /// An inlined atomic operation leaves its one live instruction in an arm of a switch on
+        /// the memory order, which dominates nothing once the dead arms are counted as paths.
+        bool liveDominates(const llvm::Instruction& earlier, const llvm::Instruction& later,
+                           const BlockSet& live)
+        {
+            const llvm::BasicBlock* earlierBlock = earlier.getParent();
+            const llvm::BasicBlock* laterBlock = later.getParent();
+            if (earlierBlock == laterBlock)
+                return &earlier == &later || earlier.comesBefore(&later);
+            if (!live.contains(earlierBlock))
+                return false;
+
+            BlockSet visited;
+            std::vector<const llvm::BasicBlock*> pending{&earlier.getFunction()->getEntryBlock()};
+            while (!pending.empty())
+            {
+                const llvm::BasicBlock* block = pending.back();
+                pending.pop_back();
+                if (block == earlierBlock || !live.contains(block) || !visited.insert(block).second)
+                {
+                    continue;
+                }
+                if (block == laterBlock)
+                    return false;
+                for (const llvm::BasicBlock* successor : llvm::successors(block))
+                    pending.push_back(successor);
+            }
+            return true;
+        }
+
         /// The value a global holds before any store, read from the start of its initializer.
         std::optional<llvm::APInt> initialValue(const llvm::GlobalVariable& global)
         {
@@ -289,11 +319,27 @@ namespace ctrace::concurrency::internal::analysis
         struct Publication
         {
             std::string flag;
-            const llvm::Function* function = nullptr;
+            /// The flag named the way accesses name their symbols.
+            std::string flagSymbol;
+            const FlagAccess* store = nullptr;
             llvm::APInt published;
-            /// Where the publishing thread's accesses must stand before: the store itself when it
-            /// releases, and any releasing fence that precedes it.
+            /// Where the publishing thread's accesses must stand before to be ordered: the store
+            /// itself when it releases, and any releasing fence that precedes it.
             std::vector<const llvm::Instruction*> releasePoints;
+        };
+
+        /// An access the analysis follows, with the global it touches when it touches one.
+        struct TrackedAccess
+        {
+            const llvm::Instruction* instruction = nullptr;
+            std::string symbol;
+        };
+
+        /// An access that takes part in a publication, and whether the flag's ordering covers it.
+        struct PublicationAccess
+        {
+            const TrackedAccess* access = nullptr;
+            bool ordered = false;
         };
 
         class PublicationFinder
@@ -308,14 +354,20 @@ namespace ctrace::concurrency::internal::analysis
             {
             }
 
-            PublicationOrderingMap run(const std::vector<const llvm::Instruction*>& accesses)
+            PublicationAnalysis run(const std::vector<PendingAccess>& accesses)
             {
-                for (const llvm::Instruction* access : accesses)
-                    accessesByFunction_[access->getFunction()].push_back(access);
+                for (const PendingAccess& access : accesses)
+                {
+                    accessesByFunction_[access.function].push_back(TrackedAccess{
+                        .instruction = access.instruction,
+                        .symbol = access.root.kind == RootBindingKind::Global ? access.root.symbol
+                                                                              : std::string(),
+                    });
+                }
 
                 collectFlagOperations();
 
-                PublicationOrderingMap ordering;
+                PublicationAnalysis analysis;
                 for (const auto& [flag, operations] : flags_)
                 {
                     const std::optional<Publication> publication =
@@ -323,14 +375,37 @@ namespace ctrace::concurrency::internal::analysis
                     if (!publication.has_value())
                         continue;
 
-                    tagPublisher(*publication, ordering);
+                    const std::vector<PublicationAccess> published =
+                        publishedAccesses(*publication);
+                    for (const PublicationAccess& access : published)
+                    {
+                        if (access.ordered)
+                            analysis.ordering[access.access->instruction].beforeRelease.insert(
+                                flag);
+                    }
+
                     for (const FlagAccess& load : operations.loads)
                     {
-                        if (load.function != publication->function)
-                            tagConsumer(*publication, load, ordering);
+                        if (load.function == publication->store->function)
+                            continue;
+
+                        const std::vector<PublicationAccess> observed =
+                            observingAccesses(*publication, load);
+                        for (const PublicationAccess& access : observed)
+                        {
+                            if (access.ordered)
+                                analysis.ordering[access.access->instruction].afterAcquire.insert(
+                                    flag);
+                        }
+
+                        if (std::optional<WeakPublicationFact> weak =
+                                weakPublication(*publication, load, published, observed))
+                        {
+                            analysis.weakPublications.push_back(std::move(*weak));
+                        }
                     }
                 }
-                return ordering;
+                return analysis;
             }
 
           private:
@@ -430,6 +505,8 @@ namespace ctrace::concurrency::internal::analysis
                 return starts == 1;
             }
 
+            /// The flag's publication, whatever its ordering, when observing the published
+            /// constant proves the publishing store was the one read.
             std::optional<Publication> findPublication(const std::string& flag,
                                                        const FlagOperations& operations)
             {
@@ -447,7 +524,8 @@ namespace ctrace::concurrency::internal::analysis
                 ConstantFolder folder(&liveByFunction_.at(store.function));
                 const std::optional<llvm::APInt> published = folder.fold(*operation.storedValue);
                 const std::optional<llvm::APInt> initial = initialValue(*operations.global);
-                if (!published.has_value() || !initial.has_value() ||
+                const std::optional<std::string> flagSymbol = canonicalGlobalId(*operations.global);
+                if (!published.has_value() || !initial.has_value() || !flagSymbol.has_value() ||
                     published->zextOrTrunc(kFoldWidth) == *initial)
                 {
                     return std::nullopt;
@@ -461,54 +539,60 @@ namespace ctrace::concurrency::internal::analysis
                 }
 
                 Publication publication{.flag = flag,
-                                        .function = store.function,
+                                        .flagSymbol = *flagSymbol,
+                                        .store = &store,
                                         .published = published->zextOrTrunc(kFoldWidth)};
                 if (releasesAtLeast(*operation.order))
                     publication.releasePoints.push_back(store.instruction);
 
-                const llvm::DominatorTree& dominators = analyses_.getDominatorTree(*store.function);
+                const BlockSet& live = liveByFunction_.at(store.function);
                 for (const Fence& fence : fencesFor(*store.function))
                 {
                     if (releasesAtLeast(fence.order) &&
-                        dominators.dominates(fence.instruction, store.instruction))
+                        liveDominates(*fence.instruction, *store.instruction, live))
                     {
                         publication.releasePoints.push_back(fence.instruction);
                     }
                 }
-
-                if (publication.releasePoints.empty())
-                    return std::nullopt;
                 return publication;
             }
 
-            void tagPublisher(const Publication& publication, PublicationOrderingMap& ordering)
+            /// The publishing thread's accesses made before the store, each ordered when it stands
+            /// before a release point.
+            std::vector<PublicationAccess> publishedAccesses(const Publication& publication)
             {
-                const llvm::DominatorTree& dominators =
-                    analyses_.getDominatorTree(*publication.function);
-                for (const llvm::Instruction* access : accessesIn(*publication.function))
+                const llvm::Function& function = *publication.store->function;
+                const BlockSet& live = liveByFunction_.at(&function);
+                std::vector<PublicationAccess> published;
+                for (const TrackedAccess& access : accessesIn(function))
                 {
+                    if (!liveDominates(*access.instruction, *publication.store->instruction, live))
+                        continue;
+
+                    bool ordered = false;
                     for (const llvm::Instruction* releasePoint : publication.releasePoints)
-                    {
-                        if (dominators.dominates(access, releasePoint))
-                        {
-                            ordering[access].beforeRelease.insert(publication.flag);
-                            break;
-                        }
-                    }
+                        ordered =
+                            ordered || liveDominates(*access.instruction, *releasePoint, live);
+                    published.push_back(PublicationAccess{.access = &access, .ordered = ordered});
                 }
+                return published;
             }
 
-            void tagConsumer(const Publication& publication, const FlagAccess& load,
-                             PublicationOrderingMap& ordering)
+            /// The reader's accesses on the branch taken once `load` returned the published
+            /// constant, each ordered when the load acquires or an acquire fence precedes it.
+            std::vector<PublicationAccess> observingAccesses(const Publication& publication,
+                                                             const FlagAccess& load)
             {
+                // An order that cannot be read orders nothing and is not known to be too weak.
                 if (!load.operation.order.has_value())
-                    return;
+                    return {};
 
                 const llvm::Function& function = *load.function;
                 const BlockSet& live = liveByFunction_.at(&function);
                 const llvm::DominatorTree& dominators = analyses_.getDominatorTree(function);
                 const bool acquires = acquiresAtLeast(*load.operation.order);
 
+                std::map<const TrackedAccess*, bool> observed;
                 for (const llvm::BasicBlock& block : function)
                 {
                     if (!live.contains(&block))
@@ -521,35 +605,94 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
 
                     // The branch arm taken when the load returned the published constant.
-                    const llvm::BasicBlockEdge observed(&block, taken);
+                    const llvm::BasicBlockEdge observedArm(&block, taken);
                     std::vector<const llvm::Instruction*> acquireFences;
                     for (const Fence& fence : fencesFor(function))
                     {
                         if (acquiresAtLeast(fence.order) &&
-                            dominators.dominates(observed, fence.instruction->getParent()))
+                            dominators.dominates(observedArm, fence.instruction->getParent()))
                         {
                             acquireFences.push_back(fence.instruction);
                         }
                     }
 
-                    for (const llvm::Instruction* access : accessesIn(function))
+                    for (const TrackedAccess& access : accessesIn(function))
                     {
-                        const bool afterObservedAcquire =
-                            acquires && dominators.dominates(observed, access->getParent());
-                        const bool afterAcquireFence =
-                            std::any_of(acquireFences.begin(), acquireFences.end(),
-                                        [&](const llvm::Instruction* fence)
-                                        { return dominators.dominates(fence, access); });
-                        if (afterObservedAcquire || afterAcquireFence)
-                            ordering[access].afterAcquire.insert(publication.flag);
+                        if (!dominators.dominates(observedArm, access.instruction->getParent()))
+                            continue;
+
+                        // A loop rather than std::any_of with a multi-line lambda: clang-format
+                        // builds disagree on how to break the latter.
+                        bool afterAcquireFence = false;
+                        for (const llvm::Instruction* fence : acquireFences)
+                        {
+                            afterAcquireFence = afterAcquireFence ||
+                                                liveDominates(*fence, *access.instruction, live);
+                        }
+                        bool& ordered = observed.try_emplace(&access, false).first->second;
+                        ordered = ordered || acquires || afterAcquireFence;
                     }
                 }
+
+                std::vector<PublicationAccess> accesses;
+                for (const auto& [access, ordered] : observed)
+                    accesses.push_back(PublicationAccess{.access = access, .ordered = ordered});
+                return accesses;
             }
 
-            const std::vector<const llvm::Instruction*>&
-            accessesIn(const llvm::Function& function) const
+            /// The data both sides of a publication touch, when the flag's ordering fails to
+            /// cover it on the publishing side, the reading side, or both.
+            std::optional<WeakPublicationFact>
+            weakPublication(const Publication& publication, const FlagAccess& load,
+                            const std::vector<PublicationAccess>& published,
+                            const std::vector<PublicationAccess>& observed) const
             {
-                static const std::vector<const llvm::Instruction*> kNone;
+                // Per data symbol: whether every access of that side is ordered.
+                auto orderingBySymbol = [&](const std::vector<PublicationAccess>& accesses)
+                {
+                    std::map<std::string, bool> ordering;
+                    for (const PublicationAccess& access : accesses)
+                    {
+                        const std::string& symbol = access.access->symbol;
+                        if (symbol.empty() || symbol == publication.flagSymbol)
+                            continue;
+                        const auto [it, inserted] = ordering.try_emplace(symbol, access.ordered);
+                        if (!inserted)
+                            it->second = it->second && access.ordered;
+                    }
+                    return ordering;
+                };
+
+                const std::map<std::string, bool> publishing = orderingBySymbol(published);
+                const std::map<std::string, bool> reading = orderingBySymbol(observed);
+
+                WeakPublicationFact fact{
+                    .flag = publication.flagSymbol, .storeReleases = true, .loadAcquires = true};
+                for (const auto& [symbol, readOrdered] : reading)
+                {
+                    const auto publishedIt = publishing.find(symbol);
+                    if (publishedIt == publishing.end())
+                        continue;
+
+                    fact.data.push_back(symbol);
+                    fact.storeReleases = fact.storeReleases && publishedIt->second;
+                    fact.loadAcquires = fact.loadAcquires && readOrdered;
+                }
+
+                if (fact.data.empty() || (fact.storeReleases && fact.loadAcquires))
+                    return std::nullopt;
+
+                fact.storeLocation =
+                    resolveSourceLocations(*publication.store->instruction).userLocation;
+                fact.loadLocation = resolveSourceLocations(*load.instruction).userLocation;
+                fact.publisherFunctionId = functionId(*publication.store->function);
+                fact.readerFunctionId = functionId(*load.function);
+                return fact;
+            }
+
+            const std::vector<TrackedAccess>& accessesIn(const llvm::Function& function) const
+            {
+                static const std::vector<TrackedAccess> kNone;
                 const auto it = accessesByFunction_.find(&function);
                 return it != accessesByFunction_.end() ? it->second : kNone;
             }
@@ -572,15 +715,17 @@ namespace ctrace::concurrency::internal::analysis
             std::set<std::string> plainlyStored_;
             std::unordered_map<const llvm::Function*, BlockSet> liveByFunction_;
             std::unordered_map<const llvm::Function*, std::vector<Fence>> fencesByFunction_;
-            std::unordered_map<const llvm::Function*, std::vector<const llvm::Instruction*>>
+            std::unordered_map<const llvm::Function*, std::vector<TrackedAccess>>
                 accessesByFunction_;
         };
     } // namespace
 
-    PublicationOrderingMap collectPublicationOrdering(
-        const llvm::Module& module, const std::vector<const llvm::Instruction*>& accesses,
-        const std::vector<DirectCallSite>& directCallSites, const std::vector<SpawnFact>& spawns,
-        LlvmFunctionAnalysisProvider& analyses, bool projectAnalysis)
+    PublicationAnalysis analyzePublications(const llvm::Module& module,
+                                            const std::vector<PendingAccess>& accesses,
+                                            const std::vector<DirectCallSite>& directCallSites,
+                                            const std::vector<SpawnFact>& spawns,
+                                            LlvmFunctionAnalysisProvider& analyses,
+                                            bool projectAnalysis)
     {
         return PublicationFinder(module, directCallSites, spawns, analyses, projectAnalysis)
             .run(accesses);

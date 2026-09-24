@@ -808,6 +808,7 @@ namespace
         std::size_t unreapedChild = 0;
         std::size_t threadArgumentEscape = 0;
         std::size_t unsafeSignalHandler = 0;
+        std::size_t weakPublication = 0;
         /// Symbol the data-race diagnostics must name; empty when not asserted.
         std::string_view racingSymbol;
         bool requiresCxx20 = false;
@@ -1241,8 +1242,17 @@ namespace
             {.path = "tests/fixtures/concurrency/atomic-ordering/publish_fences_no_fp.c",
              .intent = "release and acquire fences around relaxed flag operations order the payload"},
             {.path = "tests/fixtures/concurrency/atomic-ordering/publish_relaxed_nonatomic.cpp",
-             .intent = "a relaxed flag orders nothing, so the plain payload still races",
-             .dataRace = 1},
+             .intent = "a relaxed flag orders nothing: the plain payload races, and the flag does not publish it",
+             .dataRace = 1,
+             .weakPublication = 1},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_relaxed_store.cpp",
+             .intent = "a relaxed store publishes nothing even to an acquiring reader",
+             .weakPublication = 1},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_relaxed_load.c",
+             .intent = "a relaxed observing load with no acquire fence is not ordered after the release",
+             .weakPublication = 1},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_seq_cst_default_no_fp.cpp",
+             .intent = "atomic assignment and conversion are sequentially consistent and publish"},
             {.path = "tests/fixtures/concurrency/atomic-ordering/publish_write_after_flag.cpp",
              .intent = "a payload written after the release store is not published by it",
              .dataRace = 1},
@@ -1257,7 +1267,8 @@ namespace
             {.path = "tests/fixtures/concurrency/atomic-ordering/cpp_aba_compare_exchange.cpp",
              .intent = "a value CAS on an int has value semantics; ABA needs reused identity (#47)"},
             {.path = "tests/fixtures/concurrency/atomic-ordering/cpp_relaxed_ordering_publish.cpp",
-             .intent = "known gap #47: a relaxed flag publishing an atomic payload is not modeled"},
+             .intent = "a relaxed flag does not publish its atomic payload",
+             .weakPublication = 1},
             {.path = "tests/fixtures/concurrency/atomic-ordering/seqlock_missing_fence.cpp",
              .intent = "the non-atomic payload races whatever the sequence ordering; validated reads are outside #47",
              .dataRace = 2},
@@ -1377,6 +1388,7 @@ namespace
             {RuleId::ThreadArgumentEscapesFrame, expectation.threadArgumentEscape,
              "thread-arg-escape"},
             {RuleId::UnsafeSignalHandler, expectation.unsafeSignalHandler, "unsafe-signal-handler"},
+            {RuleId::WeakPublicationOrdering, expectation.weakPublication, "weak-publication"},
         };
 
         bool ok = true;
@@ -1438,6 +1450,7 @@ namespace
             RuleId::UnreapedChildProcess,
             RuleId::ThreadArgumentEscapesFrame,
             RuleId::UnsafeSignalHandler,
+            RuleId::WeakPublicationOrdering,
         };
 
         bool ok = true;

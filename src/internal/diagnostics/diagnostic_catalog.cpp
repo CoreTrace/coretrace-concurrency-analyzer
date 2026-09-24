@@ -129,6 +129,23 @@ namespace ctrace::concurrency::internal::diagnostics
                 },
         };
 
+        static const RuleMetadata kWeakPublicationOrdering{
+            .ruleId = RuleId::WeakPublicationOrdering,
+            .title = "Atomic flag publishes data without release/acquire ordering",
+            .shortDescription =
+                "Detects data published through an atomic flag whose store does not release or "
+                "whose observing load does not acquire, so the reader may see the flag set and "
+                "the data stale.",
+            .defaultSeverity = Severity::Warning,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "362",
+                    .title = "Concurrent Execution using Shared Resource with Improper "
+                             "Synchronization ('Race Condition')",
+                },
+        };
+
         switch (ruleId)
         {
         case RuleId::CompilerDiagnostic:
@@ -149,6 +166,8 @@ namespace ctrace::concurrency::internal::diagnostics
             return kThreadArgumentEscapesFrame;
         case RuleId::UnsafeSignalHandler:
             return kUnsafeSignalHandler;
+        case RuleId::WeakPublicationOrdering:
+            return kWeakPublicationOrdering;
         }
 
         return kCompilerDiagnostic;

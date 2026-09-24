@@ -53,6 +53,7 @@ namespace ctrace::concurrency
         UnreapedChildProcess,
         ThreadArgumentEscapesFrame,
         UnsafeSignalHandler,
+        WeakPublicationOrdering,
     };
 
     enum class ConfidenceLevel
@@ -156,7 +157,8 @@ namespace ctrace::concurrency
                                          RuleId::ForkAfterThreadCreation,
                                          RuleId::UnreapedChildProcess,
                                          RuleId::ThreadArgumentEscapesFrame,
-                                         RuleId::UnsafeSignalHandler};
+                                         RuleId::UnsafeSignalHandler,
+                                         RuleId::WeakPublicationOrdering};
         /// Most units of a project held in memory at once during a project analysis. Zero
         /// means one per hardware thread. Peak memory grows with this number; wall time
         /// shrinks with it until the hardware runs out of threads.
@@ -355,6 +357,8 @@ namespace ctrace::concurrency
             return "ThreadArgumentEscapesFrame";
         case RuleId::UnsafeSignalHandler:
             return "UnsafeSignalHandler";
+        case RuleId::WeakPublicationOrdering:
+            return "WeakPublicationOrdering";
         }
         return "UnknownRule";
     }

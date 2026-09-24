@@ -283,6 +283,22 @@ namespace ctrace::concurrency::internal::analysis
         std::string unsafeCallFunctionId;
     };
 
+    /// Data published through an atomic flag whose store does not release or whose observing
+    /// load does not acquire: the reader can see the flag set and still read the data as it was
+    /// before the store.
+    struct WeakPublicationFact
+    {
+        /// The flag and the data it publishes, named the way accesses name their symbols.
+        std::string flag;
+        std::vector<std::string> data;
+        bool storeReleases = false;
+        bool loadAcquires = false;
+        SourceLocation storeLocation;
+        SourceLocation loadLocation;
+        std::string publisherFunctionId;
+        std::string readerFunctionId;
+    };
+
     /// A place where the program duplicates itself.
     struct ProcessForkFact
     {
@@ -326,6 +342,7 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<ProcessForkFact> processForks;
         std::vector<ThreadArgumentEscapeFact> threadArgumentEscapes;
         std::vector<SignalHandlerFact> signalHandlers;
+        std::vector<WeakPublicationFact> weakPublications;
         /// Some part of the program collects its terminated children.
         bool reapsChildProcesses = false;
         /// Some part of the program starts a thread. Equal to `!spawns.empty()` when a single

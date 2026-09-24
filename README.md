@@ -26,6 +26,7 @@ Supported analysis rules. The name in the second column is what `--rules=` accep
 | `UnreapedChildProcess` | `unreaped-child` | a `fork` whose children are never collected |
 | `ThreadArgumentEscapesFrame` | `thread-arg-escape` | a thread given a pointer into the frame that created it |
 | `UnsafeSignalHandler` | `unsafe-signal-handler` | a signal handler reaching a call it may not make |
+| `WeakPublicationOrdering` | `weak-publication` | data published through an atomic flag with no release/acquire ordering |
 
 What each of the newer rules establishes, and what it deliberately does not:
 
@@ -49,6 +50,14 @@ What each of the newer rules establishes, and what it deliberately does not:
   so allocating, printing or locking there re-enters a structure the interrupted code may have
   left inconsistent. The unsafety travels back along direct calls to the handler. *Covers*
   handlers installed through `signal` and `sigaction`.
+- **`weak-publication`** (warning) — a thread writes data and then sets an atomic flag, and
+  another reads the data once it sees the flag set. Unless the store releases and the load
+  acquires, directly or through a fence, the reader may see the flag set and the data stale. The
+  same analysis lets `data-race` treat a release/acquire publication as ordering the accesses it
+  covers. *Covers* a flag with a single store of a constant, made once by a thread `main` starts
+  once, and a reader that branches on seeing that constant, for C11 atomics and `std::atomic` in
+  libc++ and libstdc++. *Not covered:* sequence locks (reads validated afterwards), store-load
+  (Dekker) ordering, ABA, and in a project analysis flags with external linkage.
 
 Current implementation boundaries:
 - Whole-project analysis reads a `compile_commands.json`; four kinds of fact cross the unit
