@@ -21,6 +21,10 @@ still change between minor releases.
   JSON `functions` array of a function that initializes such a static, the
   guard no longer counts as a shared access and the initialization's accesses
   count as protected.
+- Calling `pthread_once` from several threads is no longer reported as a race
+  on its control. The control was recognized only by its type name, and glibc
+  declares `pthread_once_t` as a plain `int`, so on Linux the call counted as a
+  plain write to it.
 - New rule `weak-publication` (`WeakPublicationOrdering`, warning, on by
   default): data published through an atomic flag whose store does not
   release, or whose observing load does not acquire, directly or through a

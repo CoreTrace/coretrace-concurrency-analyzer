@@ -63,6 +63,10 @@ namespace ctrace::concurrency::internal::analysis
         /// Ends that initialization, whether it completed (`__cxa_guard_release`) or threw
         /// (`__cxa_guard_abort`), and lets the waiting callers go.
         StaticInitGuardRelease,
+        /// Runs a routine once for every caller of the same control (`pthread_once`). The runtime
+        /// synchronizes the control itself, so the call is not an access to it, whatever type the
+        /// C library gives the control: glibc's is a plain `int` no type name identifies.
+        PThreadOnce,
     };
 
     class ConcurrencySymbolClassifier
