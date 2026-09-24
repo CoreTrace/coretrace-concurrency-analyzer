@@ -5,6 +5,7 @@
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
 
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Dominators.h>
@@ -13,6 +14,7 @@
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
+#include <utility>
 #include <vector>
 
 namespace ctrace::concurrency::internal::analysis
@@ -22,6 +24,9 @@ namespace ctrace::concurrency::internal::analysis
         constexpr unsigned kHandleOperandIndex = 0;
         constexpr unsigned kEntryOperandIndex = 2;
         constexpr unsigned kArgumentOperandIndex = 3;
+        /// A `std::thread` constructor takes the thread object, then the callable, then the
+        /// arguments, each by reference.
+        constexpr unsigned kStdThreadCallableOperandIndex = 1;
 
         struct JoinSite
         {
@@ -61,6 +66,74 @@ namespace ctrace::concurrency::internal::analysis
 
             return true;
         }
+
+        /// A local of `function` whose address is stored into `object`, directly or into one of
+        /// its fields: a lambda closure capturing by reference, a temporary holding `&local`, a
+        /// `std::reference_wrapper`.
+        const llvm::AllocaInst* localStoredInto(const llvm::AllocaInst& object,
+                                                const llvm::Function& function)
+        {
+            std::vector<const llvm::Value*> pending{&object};
+            llvm::SmallPtrSet<const llvm::Value*, 8> visited;
+            while (!pending.empty())
+            {
+                const llvm::Value* address = pending.back();
+                pending.pop_back();
+                if (!visited.insert(address).second)
+                    continue;
+
+                for (const llvm::User* user : address->users())
+                {
+                    if (llvm::isa<llvm::GetElementPtrInst>(user) ||
+                        llvm::isa<llvm::BitCastInst>(user))
+                    {
+                        pending.push_back(user);
+                        continue;
+                    }
+
+                    const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                    if (store == nullptr || store->getPointerOperand() != address)
+                        continue;
+
+                    const auto* stored = llvm::dyn_cast_or_null<llvm::AllocaInst>(
+                        llvm::getUnderlyingObject(store->getValueOperand()));
+                    if (stored != nullptr && stored != &object &&
+                        stored->getFunction() == &function)
+                        return stored;
+                }
+            }
+            return nullptr;
+        }
+
+        /// The local of `function` a new thread may keep reading after the creator returns.
+        ///
+        /// `pthread_create` hands the thread its argument pointer as is. `std::thread` copies its
+        /// callable and arguments into the new thread, so a local passed directly is copied and
+        /// safe; what escapes is an address stored inside one of them.
+        const llvm::AllocaInst* escapingLocal(const llvm::CallBase& creation, CallKind kind,
+                                              const llvm::Function& function)
+        {
+            if (kind == CallKind::PThreadCreate)
+            {
+                // getUnderlyingObject follows the indexing, so `&local` and `&local.field` and
+                // `&array[0]` all lead back to the same allocation.
+                const auto* local = llvm::dyn_cast_or_null<llvm::AllocaInst>(
+                    llvm::getUnderlyingObject(creation.getArgOperand(kArgumentOperandIndex)));
+                return local != nullptr && local->getFunction() == &function ? local : nullptr;
+            }
+
+            for (unsigned index = kStdThreadCallableOperandIndex; index < creation.arg_size();
+                 ++index)
+            {
+                const auto* passed = llvm::dyn_cast_or_null<llvm::AllocaInst>(
+                    llvm::getUnderlyingObject(creation.getArgOperand(index)));
+                if (passed == nullptr || passed->getFunction() != &function)
+                    continue;
+                if (const llvm::AllocaInst* local = localStoredInto(*passed, function))
+                    return local;
+            }
+            return nullptr;
+        }
     } // namespace
 
     ThreadArgumentEscapeCollector::ThreadArgumentEscapeCollector(
@@ -81,7 +154,7 @@ namespace ctrace::concurrency::internal::analysis
                 continue;
 
             std::vector<JoinSite> joins;
-            std::vector<const llvm::CallBase*> creations;
+            std::vector<std::pair<const llvm::CallBase*, CallKind>> creations;
             for (const llvm::BasicBlock& block : function)
             {
                 for (const llvm::Instruction& instruction : block)
@@ -91,7 +164,7 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
 
                     const CallKind kind = classifier_.classify(*call);
-                    if (kind == CallKind::PThreadJoin)
+                    if (kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin)
                     {
                         if (std::optional<std::string> handleGroupId =
                                 canonicalStorageGroupId(*call->getArgOperand(kHandleOperandIndex)))
@@ -104,9 +177,12 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
                     }
 
-                    if (kind == CallKind::PThreadCreate && call->arg_size() > kArgumentOperandIndex)
+                    if ((kind == CallKind::PThreadCreate &&
+                         call->arg_size() > kArgumentOperandIndex) ||
+                        (kind == CallKind::StdThreadCtor &&
+                         call->arg_size() > kStdThreadCallableOperandIndex))
                     {
-                        creations.push_back(call);
+                        creations.emplace_back(call, kind);
                     }
                 }
             }
@@ -116,18 +192,13 @@ namespace ctrace::concurrency::internal::analysis
 
             const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
 
-            for (const llvm::CallBase* creation : creations)
+            for (const auto& [creation, kind] : creations)
             {
-                if (completions.contains(creation))
+                if (completions.contains(creation) ||
+                    escapingLocal(*creation, kind, function) == nullptr)
+                {
                     continue;
-
-                // getUnderlyingObject follows the indexing, so `&local` and `&local.field` and
-                // `&array[0]` all lead back to the same allocation.
-                const llvm::Value* argument =
-                    llvm::getUnderlyingObject(creation->getArgOperand(kArgumentOperandIndex));
-                const auto* local = llvm::dyn_cast_or_null<llvm::AllocaInst>(argument);
-                if (local == nullptr || local->getFunction() != &function)
-                    continue;
+                }
 
                 const std::optional<std::string> handleGroupId =
                     canonicalStorageGroupId(*creation->getArgOperand(kHandleOperandIndex));
@@ -137,8 +208,9 @@ namespace ctrace::concurrency::internal::analysis
                     continue;
                 }
 
-                const llvm::Function* entry =
-                    resolveFunctionValue(*creation->getArgOperand(kEntryOperandIndex));
+                const llvm::Function* entry = resolveFunctionValue(*creation->getArgOperand(
+                    kind == CallKind::PThreadCreate ? kEntryOperandIndex
+                                                    : kStdThreadCallableOperandIndex));
                 const ResolvedSourceLocations locations = resolveSourceLocations(*creation);
 
                 facts.push_back(ThreadArgumentEscapeFact{

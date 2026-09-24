@@ -1166,6 +1166,14 @@ namespace
              .missingJoin = 1,
              .threadArgumentEscape = 1},
 
+            {.path = "tests/fixtures/concurrency/thread-escape/std_thread_ref_capture_joined_no_fp.cpp",
+             .intent = "a by-reference capture is safe when the std::thread is joined before return"},
+            {.path = "tests/fixtures/concurrency/thread-escape/std_thread_value_capture_detached_no_fp.cpp",
+             .intent = "a by-value capture leaves nothing pointing into the frame"},
+            {.path = "tests/fixtures/concurrency/thread-escape/std_thread_pointer_arg_detached.cpp",
+             .intent = "a detached std::thread handed a pointer to a local outlives the frame",
+             .threadArgumentEscape = 1},
+
             // --- imported thread-escape fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_loop_variable.c",
              .intent = "workers receive the loop-counter address; with the counter escaped, no join range is provable",
@@ -1305,7 +1313,8 @@ namespace
 
             // --- imported use-after-free fixtures (Nihil, 91e7431; #49) ---
             {.path = "tests/fixtures/concurrency/use-after-free/cpp_detached_thread_dangling_ref.cpp",
-             .intent = "known gap #49: a detached std::thread capturing a local by reference is not followed"},
+             .intent = "a detached std::thread keeps a reference into the frame that created it",
+             .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/use-after-free/use_after_free_callback.c",
              .intent = "known gap #49: a thread argument freed before the join is not tracked"},
             {.path = "tests/fixtures/concurrency/use-after-free/use_after_free_concurrent.c",
