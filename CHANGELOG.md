@@ -10,6 +10,21 @@ still change between minor releases.
 
 ## Unreleased
 
+- A function-local static is no longer reported as racing with itself. The
+  language initializes it once, under a guard that every other thread passes or
+  waits on, but `data-race` saw the constructor run in every thread and the
+  guard's own bookkeeping as plain accesses: every Meyers singleton reached by
+  threads was reported twice. `__cxa_guard_acquire` now holds the guard for the
+  initialization and `__cxa_guard_release`/`__cxa_guard_abort` release it, and
+  what the initialization writes is ordered before every other access to the
+  object. What threads do with the object afterwards is still checked. In the
+  JSON `functions` array of a function that initializes such a static, the
+  guard no longer counts as a shared access and the initialization's accesses
+  count as protected.
+- Calling `pthread_once` from several threads is no longer reported as a race
+  on its control. The control was recognized only by its type name, and glibc
+  declares `pthread_once_t` as a plain `int`, so on Linux the call counted as a
+  plain write to it.
 - New rule `weak-publication` (`WeakPublicationOrdering`, warning, on by
   default): data published through an atomic flag whose store does not
   release, or whose observing load does not acquire, directly or through a

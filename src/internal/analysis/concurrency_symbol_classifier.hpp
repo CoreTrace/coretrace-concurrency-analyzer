@@ -56,6 +56,17 @@ namespace ctrace::concurrency::internal::analysis
         ProcessExec,
         /// Collects a terminated child, releasing its entry in the process table.
         ProcessWait,
+        /// Enters the initialization of a function-local static (`__cxa_guard_acquire`). It
+        /// returns nonzero to the one caller that must initialize, which then holds the guard
+        /// until the release; every other caller waits for that release or finds it done.
+        StaticInitGuardAcquire,
+        /// Ends that initialization, whether it completed (`__cxa_guard_release`) or threw
+        /// (`__cxa_guard_abort`), and lets the waiting callers go.
+        StaticInitGuardRelease,
+        /// Runs a routine once for every caller of the same control (`pthread_once`). The runtime
+        /// synchronizes the control itself, so the call is not an access to it, whatever type the
+        /// C library gives the control: glibc's is a plain `int` no type name identifies.
+        PThreadOnce,
     };
 
     class ConcurrencySymbolClassifier

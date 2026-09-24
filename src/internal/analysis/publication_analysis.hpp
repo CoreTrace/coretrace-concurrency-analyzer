@@ -61,4 +61,16 @@ namespace ctrace::concurrency::internal::analysis
                         const std::vector<DirectCallSite>& directCallSites,
                         const std::vector<SpawnFact>& spawns,
                         LlvmFunctionAnalysisProvider& analyses, bool projectAnalysis);
+
+    /// Orders a function-local static's initialization before every other access to it.
+    ///
+    /// The language initializes such a static once: the thread that wins its guard runs the
+    /// constructor while holding it, and every other thread either finds it done or waits for
+    /// the release. The object is only reachable through its function, past that guard, so
+    /// whatever the initialization wrote happens before anything else touches the object. An
+    /// access holding the guard is initialization and is tagged `beforeRelease`; any other
+    /// access to the object is tagged `afterAcquire`. Accesses outside the initialization are
+    /// still paired with each other.
+    void orderStaticInitialization(const llvm::Module& module, std::vector<AccessFact>& accesses,
+                                   bool projectAnalysis);
 } // namespace ctrace::concurrency::internal::analysis
