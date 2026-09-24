@@ -1276,6 +1276,20 @@ namespace
              .intent = "relaxed Dekker lets both threads race on shared; store-load ordering is outside #47",
              .dataRace = 3},
 
+            // --- imported once-init fixtures (Nihil, 91e7431; #48) ---
+            {.path = "tests/fixtures/concurrency/once-init/cpp_once_init_static_side_effects.cpp",
+             .intent = "workers race on registry_count; the guard and instance reports are magic-static false positives (#48)",
+             .dataRace = 3},
+            {.path = "tests/fixtures/concurrency/once-init/once_init_dclp_no_barrier.c",
+             .intent = "the unlocked first check races with the locked write of the pointer",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/once-init/once_init_double_checked_locking.c",
+             .intent = "volatile is not atomic: the unlocked check races with the locked write",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/once-init/once_init_manual_flag_race.c",
+             .intent = "a plain flag guards nothing: the flag, the pointer and the size race",
+             .dataRace = 3},
+
             // --- rules that do not exist yet: pinned as silent -----------------------------
             {.path = "tests/fixtures/concurrency/memory-barrier/missing_memory_barrier.c",
              .intent = "no rule models memory ordering yet; the plain accesses still race",
