@@ -268,11 +268,12 @@ namespace ctrace::concurrency::internal::analysis
         // Deliberately short: only calls whose unsafety is not a matter of interpretation. A
         // handler that allocates can deadlock against an interrupted allocation, one that prints
         // can corrupt a stream mid-write, and one that locks can wait on a mutex its own thread
-        // already holds.
+        // already holds. strtok keeps its position in hidden state the interrupted scan is still
+        // using; POSIX lists strtok_r as async-signal-safe and leaves strtok out.
         static constexpr std::string_view kUnsafe[] = {
-            "malloc",  "calloc",  "realloc",  "free",    "exit",     "printf",
-            "fprintf", "sprintf", "snprintf", "vprintf", "vfprintf", "puts",
-            "fputs",   "putchar", "fopen",    "fclose",  "fwrite",   "fread",
+            "malloc",  "calloc",   "realloc", "free",     "exit",   "printf", "fprintf",
+            "sprintf", "snprintf", "vprintf", "vfprintf", "puts",   "fputs",  "putchar",
+            "fopen",   "fclose",   "fwrite",  "fread",    "strtok",
         };
         for (const std::string_view unsafe : kUnsafe)
         {
