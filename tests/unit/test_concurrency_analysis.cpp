@@ -1303,6 +1303,16 @@ namespace
              .intent = "a plain flag guards nothing: the flag, the pointer and the size race",
              .dataRace = 3},
 
+            // --- imported use-after-free fixtures (Nihil, 91e7431; #49) ---
+            {.path = "tests/fixtures/concurrency/use-after-free/cpp_detached_thread_dangling_ref.cpp",
+             .intent = "known gap #49: a detached std::thread capturing a local by reference is not followed"},
+            {.path = "tests/fixtures/concurrency/use-after-free/use_after_free_callback.c",
+             .intent = "known gap #49: a thread argument freed before the join is not tracked"},
+            {.path = "tests/fixtures/concurrency/use-after-free/use_after_free_concurrent.c",
+             .intent = "freeing through a shared pointer another thread reads races on the pointer",
+             .dataRace = 1,
+             .racingSymbol = "shared_task"},
+
             // --- rules that do not exist yet: pinned as silent -----------------------------
             {.path = "tests/fixtures/concurrency/memory-barrier/missing_memory_barrier.c",
              .intent = "no rule models memory ordering yet; the plain accesses still race",
