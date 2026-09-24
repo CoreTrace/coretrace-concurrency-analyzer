@@ -27,6 +27,7 @@ Supported analysis rules. The name in the second column is what `--rules=` accep
 | `ThreadArgumentEscapesFrame` | `thread-arg-escape` | a thread given a pointer into the frame that created it |
 | `UnsafeSignalHandler` | `unsafe-signal-handler` | a signal handler reaching a call it may not make |
 | `WeakPublicationOrdering` | `weak-publication` | data published through an atomic flag with no release/acquire ordering |
+| `ThreadArgumentFreedEarly` | `thread-arg-freed` | memory handed to a thread and freed before the thread is joined |
 
 What each of the newer rules establishes, and what it deliberately does not:
 
@@ -53,6 +54,12 @@ What each of the newer rules establishes, and what it deliberately does not:
   so allocating, printing or locking there re-enters a structure the interrupted code may have
   left inconsistent. The unsafety travels back along direct calls to the handler. *Covers*
   handlers installed through `signal` and `sigaction`.
+- **`thread-arg-freed`** — `thread-arg-escape`'s counterpart for memory the creator frees: a
+  `pthread_create` argument that the creator passes to `free` or `operator delete` before a join
+  of that thread, while the thread reads or writes through it. The freed pointer must be the one
+  handed over: the same value, or one pointer variable nothing reassigns in between. *Covers*
+  `pthread_create` only. *Not covered:* a free in another function, or through a copy of the
+  pointer.
 - **`weak-publication`** (warning) — a thread writes data and then sets an atomic flag, and
   another reads the data once it sees the flag set. Unless the store releases and the load
   acquires, directly or through a fence, the reader may see the flag set and the data stale. The

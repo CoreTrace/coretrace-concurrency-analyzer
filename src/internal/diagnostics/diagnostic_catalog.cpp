@@ -129,6 +129,21 @@ namespace ctrace::concurrency::internal::diagnostics
                 },
         };
 
+        static const RuleMetadata kThreadArgumentFreedEarly{
+            .ruleId = RuleId::ThreadArgumentFreedEarly,
+            .title = "Thread argument freed before the thread is joined",
+            .shortDescription =
+                "Detects memory handed to a thread that its creator frees while the thread may "
+                "still use it.",
+            .defaultSeverity = Severity::Error,
+            .primaryTaxonomy =
+                TaxonomyMetadata{
+                    .scheme = "CWE",
+                    .id = "416",
+                    .title = "Use After Free",
+                },
+        };
+
         static const RuleMetadata kWeakPublicationOrdering{
             .ruleId = RuleId::WeakPublicationOrdering,
             .title = "Atomic flag publishes data without release/acquire ordering",
@@ -168,6 +183,8 @@ namespace ctrace::concurrency::internal::diagnostics
             return kUnsafeSignalHandler;
         case RuleId::WeakPublicationOrdering:
             return kWeakPublicationOrdering;
+        case RuleId::ThreadArgumentFreedEarly:
+            return kThreadArgumentFreedEarly;
         }
 
         return kCompilerDiagnostic;

@@ -55,7 +55,8 @@ namespace
             << "                           Rule selection for --analyze. Available: data-race,\n"
             << "                           missing-join, deadlock-lock-order, condition-wait,\n"
             << "                           fork-after-thread, unreaped-child, thread-arg-escape,\n"
-            << "                           unsafe-signal-handler, weak-publication, or `all`\n"
+            << "                           unsafe-signal-handler, weak-publication,\n"
+            << "                           thread-arg-freed, or `all`\n"
             << "                           (default: every rule)\n"
             << "  --format=human|json|sarif\n"
             << "                           Diagnostic output format for --analyze (default: "
@@ -110,6 +111,8 @@ namespace
                     return "unsafe-signal-handler";
                 case ctrace::concurrency::RuleId::WeakPublicationOrdering:
                     return "weak-publication";
+                case ctrace::concurrency::RuleId::ThreadArgumentFreedEarly:
+                    return "thread-arg-freed";
                 case ctrace::concurrency::RuleId::DeadlockLockOrder:
                     return "deadlock-lock-order";
                 case ctrace::concurrency::RuleId::CompilerDiagnostic:
@@ -217,6 +220,8 @@ namespace
             return "unsafe-signal-handler";
         case RuleId::WeakPublicationOrdering:
             return "weak-publication";
+        case RuleId::ThreadArgumentFreedEarly:
+            return "thread-arg-freed";
         case RuleId::CompilerDiagnostic:
             return "compiler-diagnostic";
         }
@@ -278,6 +283,12 @@ namespace
         if (value == "weak-publication")
         {
             out = RuleId::WeakPublicationOrdering;
+            return true;
+        }
+
+        if (value == "thread-arg-freed")
+        {
+            out = RuleId::ThreadArgumentFreedEarly;
             return true;
         }
 

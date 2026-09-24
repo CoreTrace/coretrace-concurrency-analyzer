@@ -134,6 +134,85 @@ namespace ctrace::concurrency::internal::analysis
             }
             return nullptr;
         }
+
+        /// True when `first` and `second` are the same pointer: the same value, or two reads of
+        /// one local slot that nothing writes between them. Without optimization a pointer
+        /// variable lives in such a slot and every use reloads it.
+        bool samePointer(const llvm::Value& first, const llvm::Value& second,
+                         const llvm::Instruction& between, const llvm::DominatorTree& dominators)
+        {
+            if (first.stripPointerCasts() == second.stripPointerCasts())
+                return true;
+
+            const auto* firstLoad = llvm::dyn_cast<llvm::LoadInst>(first.stripPointerCasts());
+            const auto* secondLoad = llvm::dyn_cast<llvm::LoadInst>(second.stripPointerCasts());
+            if (firstLoad == nullptr || secondLoad == nullptr)
+                return false;
+
+            const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(
+                firstLoad->getPointerOperand()->stripPointerCasts());
+            if (slot == nullptr || secondLoad->getPointerOperand()->stripPointerCasts() != slot)
+                return false;
+
+            // Every write to the slot must come before the first read or after `between`, the
+            // point that ends what the pointer designated; a slot whose address is taken may
+            // change behind the analysis.
+            for (const llvm::User* user : slot->users())
+            {
+                if (llvm::isa<llvm::LoadInst>(user))
+                    continue;
+
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store == nullptr || store->getPointerOperand() != slot)
+                    return false;
+                if (!dominators.dominates(store, firstLoad) &&
+                    !dominators.dominates(&between, store))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        /// True when a thread entry reads or writes through its argument, or hands it on.
+        bool usesArgument(const llvm::Function& entry, const llvm::DataLayout& layout)
+        {
+            if (entry.isDeclaration() || entry.arg_empty())
+                return false;
+
+            auto designatesArgument = [&](const llvm::Value& pointer)
+            {
+                const std::optional<RootBinding> root = resolveTrackedRoot(pointer, &layout, 0);
+                return root.has_value() && root->kind == RootBindingKind::Argument &&
+                       root->argumentIndex == 0;
+            };
+
+            for (const llvm::BasicBlock& block : entry)
+            {
+                for (const llvm::Instruction& instruction : block)
+                {
+                    if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction))
+                    {
+                        if (designatesArgument(*load->getPointerOperand()))
+                            return true;
+                    }
+                    else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
+                    {
+                        if (designatesArgument(*store->getPointerOperand()))
+                            return true;
+                    }
+                    else if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+                    {
+                        for (const llvm::Use& operand : call->args())
+                        {
+                            if (operand->getType()->isPointerTy() && designatesArgument(*operand))
+                                return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
     } // namespace
 
     ThreadArgumentEscapeCollector::ThreadArgumentEscapeCollector(
@@ -142,11 +221,11 @@ namespace ctrace::concurrency::internal::analysis
     {
     }
 
-    std::vector<ThreadArgumentEscapeFact>
+    ThreadArgumentLifetimes
     ThreadArgumentEscapeCollector::collect(const llvm::Module& module,
                                            const ThreadCompletionMap& completions) const
     {
-        std::vector<ThreadArgumentEscapeFact> facts;
+        ThreadArgumentLifetimes facts;
 
         for (const llvm::Function& function : module)
         {
@@ -155,6 +234,7 @@ namespace ctrace::concurrency::internal::analysis
 
             std::vector<JoinSite> joins;
             std::vector<std::pair<const llvm::CallBase*, CallKind>> creations;
+            std::vector<const llvm::CallBase*> frees;
             for (const llvm::BasicBlock& block : function)
             {
                 for (const llvm::Instruction& instruction : block)
@@ -162,6 +242,12 @@ namespace ctrace::concurrency::internal::analysis
                     const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
                     if (call == nullptr || call->arg_size() <= kHandleOperandIndex)
                         continue;
+
+                    if (classifier_.releasesMemory(*call))
+                    {
+                        frees.push_back(call);
+                        continue;
+                    }
 
                     const CallKind kind = classifier_.classify(*call);
                     if (kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin)
@@ -194,31 +280,72 @@ namespace ctrace::concurrency::internal::analysis
 
             for (const auto& [creation, kind] : creations)
             {
-                if (completions.contains(creation) ||
-                    escapingLocal(*creation, kind, function) == nullptr)
-                {
-                    continue;
-                }
-
                 const std::optional<std::string> handleGroupId =
                     canonicalStorageGroupId(*creation->getArgOperand(kHandleOperandIndex));
-                if (handleGroupId.has_value() &&
-                    joinPrecedesEveryReturn(function, *handleGroupId, joins, dominatorTree))
-                {
-                    continue;
-                }
-
                 const llvm::Function* entry = resolveFunctionValue(*creation->getArgOperand(
                     kind == CallKind::PThreadCreate ? kEntryOperandIndex
                                                     : kStdThreadCallableOperandIndex));
                 const ResolvedSourceLocations locations = resolveSourceLocations(*creation);
 
-                facts.push_back(ThreadArgumentEscapeFact{
-                    .functionId = functionId(function),
-                    .entryFunctionId =
-                        entry != nullptr ? functionDisplayName(*entry) : std::string(),
-                    .location = locations.userLocation,
-                });
+                // True when the thread is joined, every instance of it, before `point`.
+                auto joinedBefore = [&](const llvm::Instruction& point)
+                {
+                    if (const auto completion = completions.find(creation);
+                        completion != completions.end() &&
+                        dominatorTree.dominates(completion->second, &point))
+                    {
+                        return true;
+                    }
+                    for (const JoinSite& join : joins)
+                    {
+                        if (handleGroupId.has_value() && join.handleGroupId == *handleGroupId &&
+                            dominatorTree.dominates(join.instruction, &point))
+                        {
+                            return true;
+                        }
+                    }
+                    return false;
+                };
+
+                const bool escapes =
+                    !completions.contains(creation) &&
+                    escapingLocal(*creation, kind, function) != nullptr &&
+                    !(handleGroupId.has_value() &&
+                      joinPrecedesEveryReturn(function, *handleGroupId, joins, dominatorTree));
+                if (escapes)
+                {
+                    facts.escapes.push_back(ThreadArgumentEscapeFact{
+                        .functionId = functionId(function),
+                        .entryFunctionId =
+                            entry != nullptr ? functionDisplayName(*entry) : std::string(),
+                        .location = locations.userLocation,
+                    });
+                }
+
+                // A heap argument the creator frees while the thread may still use it.
+                if (kind != CallKind::PThreadCreate || entry == nullptr ||
+                    !usesArgument(*entry, module.getDataLayout()))
+                {
+                    continue;
+                }
+
+                const llvm::Value& argument = *creation->getArgOperand(kArgumentOperandIndex);
+                for (const llvm::CallBase* release : frees)
+                {
+                    if (!dominatorTree.dominates(creation, release) || joinedBefore(*release) ||
+                        !samePointer(argument, *release->getArgOperand(0), *release, dominatorTree))
+                    {
+                        continue;
+                    }
+
+                    facts.frees.push_back(ThreadArgumentFreeFact{
+                        .functionId = functionId(function),
+                        .entryFunctionId = functionDisplayName(*entry),
+                        .creationLocation = locations.userLocation,
+                        .freeLocation = resolveSourceLocations(*release).userLocation,
+                    });
+                    break;
+                }
             }
         }
 

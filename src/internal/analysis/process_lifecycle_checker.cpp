@@ -72,6 +72,25 @@ namespace ctrace::concurrency::internal::analysis
             builder.emit();
         }
 
+        for (const ThreadArgumentFreeFact& freed : facts.threadArgumentFrees)
+        {
+            DiagnosticBuilder builder(report, RuleId::ThreadArgumentFreedEarly);
+            builder.primaryLocation(freed.freeLocation)
+                .message("memory handed to a thread is freed before the thread is joined")
+                .note("the thread may still be reading it: nothing orders the thread's use "
+                      "before this free")
+                .note("join the thread before freeing, or let the thread free what it was "
+                      "given")
+                .relatedLocation("Thread given the memory", freed.creationLocation)
+                .taxonomy("CERT", "MEM30-C", "Do not access freed memory")
+                .property("function", freed.functionId);
+
+            if (!freed.entryFunctionId.empty())
+                builder.property("entry", freed.entryFunctionId);
+
+            builder.emit();
+        }
+
         for (const SignalHandlerFact& handler : facts.signalHandlers)
         {
             DiagnosticBuilder(report, RuleId::UnsafeSignalHandler)

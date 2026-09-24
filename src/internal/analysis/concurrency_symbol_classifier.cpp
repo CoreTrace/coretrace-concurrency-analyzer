@@ -256,6 +256,18 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
+    bool ConcurrencySymbolClassifier::releasesMemory(const llvm::CallBase& call) const
+    {
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr || call.arg_size() == 0)
+            return false;
+
+        const std::string canonical = canonicalName(*callee);
+        const llvm::StringRef name = canonical;
+        return matchesPlainSymbol(name, "free") || name.starts_with("_ZdlPv") ||
+               name.starts_with("_ZdaPv");
+    }
+
     bool ConcurrencySymbolClassifier::isAsyncSignalUnsafe(const llvm::CallBase& call) const
     {
         const llvm::Function* callee = directCallee(call);
