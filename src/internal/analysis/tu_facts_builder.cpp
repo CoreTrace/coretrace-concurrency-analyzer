@@ -608,7 +608,8 @@ namespace ctrace::concurrency::internal::analysis
 
         const ThreadCompletionMap completions =
             selection.taskConcurrency() || selection.threadLifecycles ||
-                    selection.threadArgumentEscapes || selection.threadArgumentFrees
+                    selection.threadArgumentEscapes || selection.threadArgumentFrees ||
+                    selection.expiredThreadLocals
                 ? collectThreadCompletions(module, classifier, analyses)
                 : ThreadCompletionMap{};
         TaskConcurrencyResult taskConcurrency;
@@ -738,14 +739,17 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
-        if (selection.threadArgumentEscapes || selection.threadArgumentFrees)
+        if (selection.threadArgumentEscapes || selection.threadArgumentFrees ||
+            selection.expiredThreadLocals)
         {
-            ThreadArgumentLifetimes lifetimes =
+            ThreadLifetimeFacts lifetimes =
                 ThreadArgumentEscapeCollector(classifier, analyses).collect(module, completions);
             if (selection.threadArgumentEscapes)
                 facts.threadArgumentEscapes = std::move(lifetimes.escapes);
             if (selection.threadArgumentFrees)
                 facts.threadArgumentFrees = std::move(lifetimes.frees);
+            if (selection.expiredThreadLocals)
+                facts.expiredThreadLocals = std::move(lifetimes.expiredThreadLocals);
         }
         if (selection.signalHandlers)
         {

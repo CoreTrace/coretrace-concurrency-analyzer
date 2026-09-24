@@ -292,6 +292,18 @@ namespace ctrace::concurrency::internal::analysis
         SourceLocation freeLocation;
     };
 
+    /// A thread-local object reached through a pointer after every thread that could have
+    /// published its address has ended, taking the object with it.
+    struct ExpiredThreadLocalFact
+    {
+        std::string functionId;
+        std::string entryFunctionId;
+        std::string threadLocal;
+        std::string pointer;
+        SourceLocation publishLocation;
+        SourceLocation useLocation;
+    };
+
     /// Data published through an atomic flag whose store does not release or whose observing
     /// load does not acquire: the reader can see the flag set and still read the data as it was
     /// before the store.
@@ -351,6 +363,7 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<ProcessForkFact> processForks;
         std::vector<ThreadArgumentEscapeFact> threadArgumentEscapes;
         std::vector<ThreadArgumentFreeFact> threadArgumentFrees;
+        std::vector<ExpiredThreadLocalFact> expiredThreadLocals;
         std::vector<SignalHandlerFact> signalHandlers;
         std::vector<WeakPublicationFact> weakPublications;
         /// Some part of the program collects its terminated children.

@@ -10,6 +10,12 @@ still change between minor releases.
 
 ## Unreleased
 
+- New rule `thread-local-escape` (`ThreadLocalOutlivesThread`, error,
+  CWE-825, on by default): a thread-local object reached through the global
+  pointer its thread stored its address in, after every thread that could
+  have stored it has been joined, which ends the object. Reading it while its
+  owner still runs, or through a pointer that may hold something else, is not
+  reported.
 - The destructor of a `thread_local` object is now analysed as running at the
   end of the thread that constructed it, in that thread. The runtime calls it
   through `__cxa_thread_atexit` (Linux) or `_tlv_atexit` (macOS), which

@@ -28,6 +28,7 @@ Supported analysis rules. The name in the second column is what `--rules=` accep
 | `UnsafeSignalHandler` | `unsafe-signal-handler` | a signal handler reaching a call it may not make |
 | `WeakPublicationOrdering` | `weak-publication` | data published through an atomic flag with no release/acquire ordering |
 | `ThreadArgumentFreedEarly` | `thread-arg-freed` | memory handed to a thread and freed before the thread is joined |
+| `ThreadLocalOutlivesThread` | `thread-local-escape` | a thread-local reached through a pointer after its thread has ended |
 
 What each of the newer rules establishes, and what it deliberately does not:
 
@@ -60,6 +61,14 @@ What each of the newer rules establishes, and what it deliberately does not:
   handed over: the same value, or one pointer variable nothing reassigns in between. *Covers*
   `pthread_create` only. *Not covered:* a free in another function, or through a copy of the
   pointer.
+- **`thread-local-escape`** — a thread's thread-local objects end with the thread. A thread entry
+  that stores the address of one of its thread-locals in a global pointer leaves that pointer
+  dangling once every thread that runs the entry has been joined; a read or write through it
+  after those joins is reported. The pointer must receive nothing but that address (or null),
+  and the entry must only ever run as a thread, so the object is known to be gone. A thread-local
+  address read while its owner still runs is legal and not reported. Thread-local accesses on
+  their own are never shared state. *Covers* a store made by the entry itself, and a use in the
+  function that starts and joins those threads.
 - **`weak-publication`** (warning) — a thread writes data and then sets an atomic flag, and
   another reads the data once it sees the flag set. Unless the store releases and the load
   acquires, directly or through a fence, the reader may see the flag set and the data stale. The

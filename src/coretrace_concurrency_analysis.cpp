@@ -133,6 +133,7 @@ namespace ctrace::concurrency
             options_.isEnabled(RuleId::UnreapedChildProcess) ||
             options_.isEnabled(RuleId::ThreadArgumentEscapesFrame) ||
             options_.isEnabled(RuleId::ThreadArgumentFreedEarly) ||
+            options_.isEnabled(RuleId::ThreadLocalOutlivesThread) ||
             options_.isEnabled(RuleId::UnsafeSignalHandler))
         {
             internal::analysis::ProcessLifecycleChecker processChecker;

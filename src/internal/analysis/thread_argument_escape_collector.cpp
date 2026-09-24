@@ -8,12 +8,15 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -174,6 +177,189 @@ namespace ctrace::concurrency::internal::analysis
             return true;
         }
 
+        /// True when the thread `creation` starts is joined, every instance of it, before `point`:
+        /// the join-range proof covers it, or a join of the same handle dominates the point.
+        bool joinedBefore(const llvm::CallBase& creation, const llvm::Instruction& point,
+                          const std::vector<JoinSite>& joins,
+                          const ThreadCompletionMap& completions,
+                          const llvm::DominatorTree& dominators)
+        {
+            if (const auto completion = completions.find(&creation);
+                completion != completions.end() && dominators.dominates(completion->second, &point))
+            {
+                return true;
+            }
+
+            const std::optional<std::string> handleGroupId =
+                canonicalStorageGroupId(*creation.getArgOperand(kHandleOperandIndex));
+            if (!handleGroupId.has_value())
+                return false;
+            for (const JoinSite& join : joins)
+            {
+                if (join.handleGroupId == *handleGroupId &&
+                    dominators.dominates(join.instruction, &point))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        /// The one store to a local slot, when the slot is only stored to once and loaded from.
+        /// Without optimization every temporary lives in such a slot.
+        const llvm::StoreInst* soleStoreTo(const llvm::AllocaInst& slot)
+        {
+            const llvm::StoreInst* found = nullptr;
+            for (const llvm::User* user : slot.users())
+            {
+                if (llvm::isa<llvm::LoadInst>(user))
+                    continue;
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store == nullptr || store->getPointerOperand() != &slot || found != nullptr)
+                    return nullptr;
+                found = store;
+            }
+            return found;
+        }
+
+        constexpr unsigned kMaxSlotHops = 8;
+
+        /// The thread-local object a pointer value designates, following the local slots an
+        /// unoptimized build copies it through.
+        const llvm::GlobalVariable* threadLocalBehind(const llvm::Value& value)
+        {
+            const llvm::Value* current = &value;
+            for (unsigned hop = 0; hop < kMaxSlotHops && current != nullptr; ++hop)
+            {
+                current = current->stripPointerCasts();
+                if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(current))
+                {
+                    current = gep->getPointerOperand();
+                    continue;
+                }
+                if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(current);
+                    intrinsic != nullptr &&
+                    intrinsic->getIntrinsicID() == llvm::Intrinsic::threadlocal_address)
+                {
+                    current = intrinsic->getArgOperand(0);
+                    continue;
+                }
+                if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(current))
+                    return global->isThreadLocal() ? global : nullptr;
+
+                const auto* load = llvm::dyn_cast<llvm::LoadInst>(current);
+                const auto* slot = load != nullptr
+                                       ? llvm::dyn_cast<llvm::AllocaInst>(
+                                             load->getPointerOperand()->stripPointerCasts())
+                                       : nullptr;
+                const llvm::StoreInst* store = slot != nullptr ? soleStoreTo(*slot) : nullptr;
+                current = store != nullptr ? store->getValueOperand() : nullptr;
+            }
+            return nullptr;
+        }
+
+        /// True when a pointer value was read from `pointer`, directly or through the local
+        /// slots an unoptimized build copies it through.
+        bool readFrom(const llvm::Value& value, const llvm::GlobalVariable& pointer)
+        {
+            const llvm::Value* current = &value;
+            for (unsigned hop = 0; hop < kMaxSlotHops && current != nullptr; ++hop)
+            {
+                current = current->stripPointerCasts();
+                if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(current))
+                {
+                    current = gep->getPointerOperand();
+                    continue;
+                }
+                const auto* load = llvm::dyn_cast<llvm::LoadInst>(current);
+                if (load == nullptr)
+                    return false;
+
+                const llvm::Value* source = load->getPointerOperand()->stripPointerCasts();
+                if (source == &pointer)
+                    return true;
+                const auto* slot = llvm::dyn_cast<llvm::AllocaInst>(source);
+                const llvm::StoreInst* store = slot != nullptr ? soleStoreTo(*slot) : nullptr;
+                current = store != nullptr ? store->getValueOperand() : nullptr;
+            }
+            return false;
+        }
+
+        /// A global pointer a thread entry fills with the address of one of its thread-locals.
+        struct ThreadLocalPublication
+        {
+            const llvm::GlobalVariable* threadLocal = nullptr;
+            const llvm::Function* entry = nullptr;
+            const llvm::StoreInst* store = nullptr;
+        };
+
+        /// The global pointers whose only non-null value is a thread-local address stored by one
+        /// function, so that a non-null value read from one designates that thread-local. A
+        /// pointer whose own address is taken, or that receives anything else, may hold another
+        /// object and is left out.
+        std::unordered_map<const llvm::GlobalVariable*, ThreadLocalPublication>
+        threadLocalPublications(const llvm::Module& module)
+        {
+            std::unordered_map<const llvm::GlobalVariable*, ThreadLocalPublication> publications;
+            for (const llvm::GlobalVariable& pointer : module.globals())
+            {
+                if (pointer.isThreadLocal() || pointer.isConstant() ||
+                    !pointer.getValueType()->isPointerTy())
+                {
+                    continue;
+                }
+
+                ThreadLocalPublication publication;
+                bool qualifies = true;
+                for (const llvm::User* user : pointer.users())
+                {
+                    if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
+                    {
+                        qualifies = load->getPointerOperand() == &pointer;
+                    }
+                    else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+                    {
+                        if (store->getPointerOperand() != &pointer)
+                        {
+                            qualifies = false;
+                        }
+                        else if (!llvm::isa<llvm::ConstantPointerNull>(store->getValueOperand()))
+                        {
+                            const llvm::GlobalVariable* threadLocal =
+                                threadLocalBehind(*store->getValueOperand());
+                            qualifies = threadLocal != nullptr && publication.store == nullptr;
+                            publication = ThreadLocalPublication{.threadLocal = threadLocal,
+                                                                 .entry = store->getFunction(),
+                                                                 .store = store};
+                        }
+                    }
+                    else
+                    {
+                        qualifies = false;
+                    }
+                    if (!qualifies)
+                        break;
+                }
+
+                if (qualifies && publication.store != nullptr)
+                    publications.emplace(&pointer, publication);
+            }
+            return publications;
+        }
+
+        /// True when a function only ever runs as a thread entry: nothing calls it directly, so
+        /// its thread-locals are those of the threads it starts.
+        bool onlyRunsAsThreadEntry(const llvm::Function& function)
+        {
+            for (const llvm::User* user : function.users())
+            {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+                if (call != nullptr && call->getCalledOperand() == &function)
+                    return false;
+            }
+            return true;
+        }
+
         /// True when a thread entry reads or writes through its argument, or hands it on.
         bool usesArgument(const llvm::Function& entry, const llvm::DataLayout& layout)
         {
@@ -221,11 +407,41 @@ namespace ctrace::concurrency::internal::analysis
     {
     }
 
-    ThreadArgumentLifetimes
+    ThreadLifetimeFacts
     ThreadArgumentEscapeCollector::collect(const llvm::Module& module,
                                            const ThreadCompletionMap& completions) const
     {
-        ThreadArgumentLifetimes facts;
+        ThreadLifetimeFacts facts;
+        const auto publications = threadLocalPublications(module);
+
+        // Every place the unit starts each entry, wherever it is: a thread-local is only known
+        // to be gone once all the threads that could have published it are.
+        std::unordered_map<const llvm::Function*, std::size_t> startsByEntry;
+        for (const llvm::Function& function : module)
+        {
+            for (const llvm::BasicBlock& block : function)
+            {
+                for (const llvm::Instruction& instruction : block)
+                {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (call == nullptr)
+                        continue;
+                    const CallKind kind = classifier_.classify(*call);
+                    const unsigned entryIndex = kind == CallKind::PThreadCreate
+                                                    ? kEntryOperandIndex
+                                                    : kStdThreadCallableOperandIndex;
+                    if ((kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor) &&
+                        call->arg_size() > entryIndex)
+                    {
+                        if (const llvm::Function* entry =
+                                resolveFunctionValue(*call->getArgOperand(entryIndex)))
+                        {
+                            ++startsByEntry[entry];
+                        }
+                    }
+                }
+            }
+        }
 
         for (const llvm::Function& function : module)
         {
@@ -287,26 +503,6 @@ namespace ctrace::concurrency::internal::analysis
                                                     : kStdThreadCallableOperandIndex));
                 const ResolvedSourceLocations locations = resolveSourceLocations(*creation);
 
-                // True when the thread is joined, every instance of it, before `point`.
-                auto joinedBefore = [&](const llvm::Instruction& point)
-                {
-                    if (const auto completion = completions.find(creation);
-                        completion != completions.end() &&
-                        dominatorTree.dominates(completion->second, &point))
-                    {
-                        return true;
-                    }
-                    for (const JoinSite& join : joins)
-                    {
-                        if (handleGroupId.has_value() && join.handleGroupId == *handleGroupId &&
-                            dominatorTree.dominates(join.instruction, &point))
-                        {
-                            return true;
-                        }
-                    }
-                    return false;
-                };
-
                 const bool escapes =
                     !completions.contains(creation) &&
                     escapingLocal(*creation, kind, function) != nullptr &&
@@ -332,7 +528,8 @@ namespace ctrace::concurrency::internal::analysis
                 const llvm::Value& argument = *creation->getArgOperand(kArgumentOperandIndex);
                 for (const llvm::CallBase* release : frees)
                 {
-                    if (!dominatorTree.dominates(creation, release) || joinedBefore(*release) ||
+                    if (!dominatorTree.dominates(creation, release) ||
+                        joinedBefore(*creation, *release, joins, completions, dominatorTree) ||
                         !samePointer(argument, *release->getArgOperand(0), *release, dominatorTree))
                     {
                         continue;
@@ -343,6 +540,71 @@ namespace ctrace::concurrency::internal::analysis
                         .entryFunctionId = functionDisplayName(*entry),
                         .creationLocation = locations.userLocation,
                         .freeLocation = resolveSourceLocations(*release).userLocation,
+                    });
+                    break;
+                }
+            }
+
+            // A thread-local reached through the pointer its thread filled, once every thread
+            // that could have filled it has been joined.
+            for (const auto& [pointer, publication] : publications)
+            {
+                std::vector<const llvm::CallBase*> entryCreations;
+                for (const auto& [creation, kind] : creations)
+                {
+                    if (resolveFunctionValue(*creation->getArgOperand(
+                            kind == CallKind::PThreadCreate ? kEntryOperandIndex
+                                                            : kStdThreadCallableOperandIndex)) ==
+                        publication.entry)
+                    {
+                        entryCreations.push_back(creation);
+                    }
+                }
+                if (entryCreations.empty() || !onlyRunsAsThreadEntry(*publication.entry) ||
+                    entryCreations.size() != startsByEntry[publication.entry])
+                {
+                    continue;
+                }
+
+                for (const llvm::BasicBlock& block : function)
+                {
+                    const llvm::Instruction* use = nullptr;
+                    for (const llvm::Instruction& instruction : block)
+                    {
+                        const llvm::Value* address = nullptr;
+                        if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction))
+                            address = load->getPointerOperand();
+                        else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
+                            address = store->getPointerOperand();
+                        if (address == nullptr || address == pointer ||
+                            !readFrom(*address, *pointer))
+                        {
+                            continue;
+                        }
+
+                        bool everyThreadEnded = true;
+                        for (const llvm::CallBase* creation : entryCreations)
+                        {
+                            everyThreadEnded =
+                                everyThreadEnded && joinedBefore(*creation, instruction, joins,
+                                                                 completions, dominatorTree);
+                        }
+                        if (everyThreadEnded)
+                        {
+                            use = &instruction;
+                            break;
+                        }
+                    }
+                    if (use == nullptr)
+                        continue;
+
+                    facts.expiredThreadLocals.push_back(ExpiredThreadLocalFact{
+                        .functionId = functionId(function),
+                        .entryFunctionId = functionDisplayName(*publication.entry),
+                        .threadLocal = publication.threadLocal->getName().str(),
+                        .pointer = pointer->getName().str(),
+                        .publishLocation = resolveSourceLocations(*publication.store).userLocation,
+                        .useLocation = resolveSourceLocations(*use).userLocation,
                     });
                     break;
                 }
