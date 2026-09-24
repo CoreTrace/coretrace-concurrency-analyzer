@@ -8,8 +8,14 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
-## Unreleased
+## v0.6.0
 
+- **Default change.** Three new rules run by default, as every rule does:
+  `weak-publication` (warning), `thread-arg-freed` and `thread-local-escape`
+  (both errors). A run gated with `--fail-on=error` or `--fail-on=warning` can
+  fail where v0.5.0 passed. To keep v0.5.0's selection, name its eight rules:
+  `--rules=data-race,missing-join,deadlock-lock-order,condition-wait,fork-after-thread,unreaped-child,thread-arg-escape,unsafe-signal-handler`.
+  The GitHub Action runs `rules: all` and gets the new rules too.
 - New rule `thread-local-escape` (`ThreadLocalOutlivesThread`, error,
   CWE-825, on by default): a thread-local object reached through the global
   pointer its thread stored its address in, after every thread that could
