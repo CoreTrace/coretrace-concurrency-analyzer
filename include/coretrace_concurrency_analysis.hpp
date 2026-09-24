@@ -147,10 +147,16 @@ namespace ctrace::concurrency
 
     struct AnalysisOptions
     {
-        std::vector<RuleId> enabledRules{
-            RuleId::DataRaceGlobal,          RuleId::MissingJoin,
-            RuleId::DeadlockLockOrder,       RuleId::ConditionWaitWithoutPredicate,
-            RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess};
+        /// Every rule by default. This list is also what `allAvailable()` returns, so a rule is
+        /// added once and reaches both; naming rules here narrows the analysis to them.
+        std::vector<RuleId> enabledRules{RuleId::DataRaceGlobal,
+                                         RuleId::MissingJoin,
+                                         RuleId::DeadlockLockOrder,
+                                         RuleId::ConditionWaitWithoutPredicate,
+                                         RuleId::ForkAfterThreadCreation,
+                                         RuleId::UnreapedChildProcess,
+                                         RuleId::ThreadArgumentEscapesFrame,
+                                         RuleId::UnsafeSignalHandler};
         /// Most units of a project held in memory at once during a project analysis. Zero
         /// means one per hardware thread. Peak memory grows with this number; wall time
         /// shrinks with it until the hardware runs out of threads.
@@ -166,13 +172,10 @@ namespace ctrace::concurrency
             return false;
         }
 
+        /// Every rule the analyzer implements, which is also the default selection.
         [[nodiscard]] static AnalysisOptions allAvailable()
         {
-            return AnalysisOptions{
-                .enabledRules = {RuleId::DataRaceGlobal, RuleId::MissingJoin,
-                                 RuleId::DeadlockLockOrder, RuleId::ConditionWaitWithoutPredicate,
-                                 RuleId::ForkAfterThreadCreation, RuleId::UnreapedChildProcess,
-                                 RuleId::ThreadArgumentEscapesFrame, RuleId::UnsafeSignalHandler}};
+            return AnalysisOptions{};
         }
     };
 

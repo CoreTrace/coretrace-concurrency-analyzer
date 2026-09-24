@@ -10,6 +10,17 @@ still change between minor releases.
 
 ## Unreleased
 
+- **Default change.** `--analyze` without `--rules`, and a default-constructed
+  `AnalysisOptions`, now run every rule: `thread-arg-escape` and
+  `unsafe-signal-handler` join the six that ran before. Both report at error
+  severity, so a run gated with `--fail-on=error` or `--fail-on=warning` can
+  fail where it passed. To keep the previous behaviour, name the six rules:
+  `--rules=data-race,missing-join,deadlock-lock-order,condition-wait,fork-after-thread,unreaped-child`.
+  The GitHub Action already defaulted to `rules: all` and is unaffected.
+  `AnalysisOptions::allAvailable()` now returns the default, so a new rule is
+  listed once and reaches both. Measured on the fixtures and on pigz, zstd, this
+  analyzer and the 49-unit workload before the change (#53); the analysis costs
+  about 2% more on that workload.
 - `thread-arg-escape` no longer reports threads that are all joined by a loop
   over the range that created them, the usual `&ids[i]` worker shape. The rule
   used to accept only a join that dominates every return, which a join inside a

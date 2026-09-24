@@ -1165,7 +1165,7 @@ namespace
 
             // --- imported thread-escape fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_loop_variable.c",
-             .intent = "workers receive the loop-variable address; #39 tracks the additional join-loop warning",
+             .intent = "workers receive the loop-counter address; with the counter escaped, no join range is provable",
              .missingJoin = 1,
              .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_stack_ptr.c",
@@ -1450,6 +1450,21 @@ namespace
     /// An access count that was never taken is absent, and a count of zero means the accesses
     /// were examined and there were none. Reporting zero for both would answer a question
     /// nobody asked, and a reader cannot tell the two apart afterwards.
+    /// The default analysis runs every rule. Rules used to be added to `allAvailable()` alone
+    /// and left out of the default without anyone deciding so (#53); a rule meant to be opt-in
+    /// has to change this test, which makes that a decision instead of an omission.
+    bool testDefaultOptionsEnableEveryAvailableRule()
+    {
+        const std::vector<RuleId> byDefault = AnalysisOptions{}.enabledRules;
+        const std::vector<RuleId> available = AnalysisOptions::allAvailable().enabledRules;
+        if (byDefault == available)
+            return true;
+
+        std::cerr << "[FAIL] the default analysis enables " << byDefault.size()
+                  << " rule(s), allAvailable() " << available.size() << "\n";
+        return false;
+    }
+
     bool testAccessCountsDistinguishNotComputedFromZero()
     {
         const std::optional<CompiledFixture> compiled =
@@ -1669,6 +1684,7 @@ int main()
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
+    ok = testDefaultOptionsEnableEveryAvailableRule() && ok;
     ok = testAccessCountsDistinguishNotComputedFromZero() && ok;
     ok = testOptimizationRequestDoesNotChangeFindings() && ok;
     ok = testFixtureExpectationTable() && ok;
