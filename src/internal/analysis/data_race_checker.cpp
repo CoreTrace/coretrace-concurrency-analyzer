@@ -39,6 +39,20 @@ namespace ctrace::concurrency::internal::analysis
                                { return rhs.heldLocks.contains(lock); });
         }
 
+        /// A publication orders what its thread did before the releasing store ahead of what a
+        /// reader does after the acquire that observed it, whichever of the two comes first here.
+        bool orderedByPublication(const AccessFact& lhs, const AccessFact& rhs)
+        {
+            auto intersects = [](const std::set<std::string>& first,
+                                 const std::set<std::string>& second)
+            {
+                return std::any_of(first.begin(), first.end(),
+                                   [&](const std::string& flag) { return second.contains(flag); });
+            };
+            return intersects(lhs.beforeRelease, rhs.afterAcquire) ||
+                   intersects(rhs.beforeRelease, lhs.afterAcquire);
+        }
+
         /// Two atomic operations on the same location are ordered by the memory model and never
         /// form a data race. A mix of atomic and plain access still does, and is worth reporting
         /// with its own wording because the bug is the unsynchronized side.
@@ -436,7 +450,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (!mayHappenInParallel(lhs, lhsEntries, rhs, rhsEntries, facts))
                         continue;
 
-                    if (shareRecognizedLock(lhs, rhs))
+                    if (shareRecognizedLock(lhs, rhs) || orderedByPublication(lhs, rhs))
                         continue;
 
                     // Approximations: an effect inferred for a call names the call site rather

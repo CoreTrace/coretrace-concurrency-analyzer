@@ -8,6 +8,20 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased
+
+- `data-race` no longer reports data published through an atomic flag with
+  release and acquire ordering: a thread writes the data and stores a constant
+  to the flag with a release store (or after a release fence), and the reader
+  touches the data only on the branch taken once an acquire load (or a load
+  followed by an acquire fence) has seen that constant. The ordering is only
+  trusted when observing the constant proves which store was read: the flag
+  has that single store, from a thread `main` starts once, outside any loop,
+  and the constant differs from the flag's initial value. A relaxed flag, a
+  second writer, data written after the store or read on the wrong branch
+  still race. Orders are read from C11 atomics and from the libc++ and
+  libstdc++ `std::atomic` members, including the ones libstdc++ inlines.
+
 ## v0.5.0
 
 - **Default change.** `--analyze` without `--rules`, and a default-constructed

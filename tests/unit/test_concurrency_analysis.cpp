@@ -1231,6 +1231,26 @@ namespace
              .intent = "broadcast consumers must recheck the predicate after waking",
              .conditionWait = 1},
 
+            // --- atomic publication (#47) ---
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_release_acquire_no_fp.cpp",
+             .intent = "a release store observed by an acquire load orders the payload"},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_int_flag_no_fp.cpp",
+             .intent = "an integer flag publishes as a boolean one, whatever the library inlines"},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_fences_no_fp.c",
+             .intent = "release and acquire fences around relaxed flag operations order the payload"},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_relaxed_nonatomic.cpp",
+             .intent = "a relaxed flag orders nothing, so the plain payload still races",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_write_after_flag.cpp",
+             .intent = "a payload written after the release store is not published by it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_inverted_guard.cpp",
+             .intent = "a read guarded by the flag still being unset observed no publication",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/publish_two_writers.cpp",
+             .intent = "with a second writer, observing the flag does not prove whose store was read",
+             .dataRace = 1},
+
             // --- imported atomic-ordering fixtures (Nihil, 91e7431; #47) ---
             {.path = "tests/fixtures/concurrency/atomic-ordering/cpp_aba_compare_exchange.cpp",
              .intent = "a value CAS on an int has value semantics; ABA needs reused identity (#47)"},

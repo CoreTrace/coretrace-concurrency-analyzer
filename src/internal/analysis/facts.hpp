@@ -161,6 +161,11 @@ namespace ctrace::concurrency::internal::analysis
         /// Spawned entries already running when a root-task access executes.
         ThreadEntrySet liveEntries;
         std::set<std::string> heldLocks;
+        /// Atomic flags whose releasing publication this access happens before, and flags whose
+        /// observed publication it happens after. An access before a release and one after the
+        /// acquire that observed it are ordered, the way two accesses under one lock are.
+        std::set<std::string> beforeRelease;
+        std::set<std::string> afterAcquire;
     };
 
     struct LockOrderFact

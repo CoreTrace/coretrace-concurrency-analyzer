@@ -11,6 +11,7 @@
 #include "lock_state_propagator.hpp"
 #include "lock_wrapper_summaries.hpp"
 #include "process_lifecycle_collector.hpp"
+#include "publication_analysis.hpp"
 #include "shared_access_collector.hpp"
 #include "shared_object_binding_collector.hpp"
 #include "signal_handler_collector.hpp"
@@ -948,8 +949,22 @@ namespace ctrace::concurrency::internal::analysis
         if (!selection.accesses)
             return facts;
 
+        std::vector<const llvm::Instruction*> accessInstructions;
+        accessInstructions.reserve(pendingAccesses.size());
+        for (const PendingAccess& pendingAccess : pendingAccesses)
+            accessInstructions.push_back(pendingAccess.instruction);
+        const PublicationOrderingMap publicationOrdering = collectPublicationOrdering(
+            module, accessInstructions, directCallSites, facts.spawns, analyses, crossTU);
+
         for (PendingAccess& pendingAccess : pendingAccesses)
         {
+            if (const auto publicationIt = publicationOrdering.find(pendingAccess.instruction);
+                publicationIt != publicationOrdering.end())
+            {
+                pendingAccess.fact.beforeRelease = publicationIt->second.beforeRelease;
+                pendingAccess.fact.afterAcquire = publicationIt->second.afterAcquire;
+            }
+
             const auto heldLocksIt = heldLocksByAccess.find(pendingAccess.instruction);
             if (heldLocksIt != heldLocksByAccess.end())
                 pendingAccess.fact.heldLocks = heldLocksIt->second;
