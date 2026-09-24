@@ -267,8 +267,9 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    SharedAccessCollector::SharedAccessCollector(LlvmFunctionAnalysisProvider& analyses)
-        : analyses_(analyses)
+    SharedAccessCollector::SharedAccessCollector(const ConcurrencySymbolClassifier& classifier,
+                                                 LlvmFunctionAnalysisProvider& analyses)
+        : classifier_(classifier), analyses_(analyses)
     {
     }
 
@@ -286,7 +287,6 @@ namespace ctrace::concurrency::internal::analysis
                 trackedGlobals.push_back(&global);
         }
 
-        ConcurrencySymbolClassifier classifier;
         AtomicOnlyCache atomicOnlyCache;
         const llvm::DataLayout& layout = module.getDataLayout();
         static const std::unordered_set<std::string> kNoSharedObjects;
@@ -320,7 +320,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                     {
                         appendCallMemoryEffectAccesses(accesses, function, *call, aaResults,
-                                                       classifier, scope, atomicOnlyCache);
+                                                       classifier_, scope, atomicOnlyCache);
                         continue;
                     }
 
