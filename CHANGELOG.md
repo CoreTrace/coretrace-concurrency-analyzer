@@ -8,6 +8,16 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased
+
+- `thread-arg-escape` no longer reports threads that are all joined by a loop
+  over the range that created them, the usual `&ids[i]` worker shape. The rule
+  used to accept only a join that dominates every return, which a join inside a
+  loop never does. It now also reads the join-range proof that `missing-join`
+  and the task analysis already share. A range it cannot prove, such as a join
+  loop that stops short or a loop counter handed to the threads, is still
+  reported.
+
 ## v0.4.0
 
 - **Report and public API change.** The JSON `functions` array reports what

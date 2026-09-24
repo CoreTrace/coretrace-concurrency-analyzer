@@ -606,7 +606,8 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         const ThreadCompletionMap completions =
-            selection.taskConcurrency() || selection.threadLifecycles
+            selection.taskConcurrency() || selection.threadLifecycles ||
+                    selection.threadArgumentEscapes
                 ? collectThreadCompletions(module, classifier, analyses)
                 : ThreadCompletionMap{};
         TaskConcurrencyResult taskConcurrency;
@@ -739,7 +740,7 @@ namespace ctrace::concurrency::internal::analysis
         if (selection.threadArgumentEscapes)
         {
             facts.threadArgumentEscapes =
-                ThreadArgumentEscapeCollector(classifier, analyses).collect(module);
+                ThreadArgumentEscapeCollector(classifier, analyses).collect(module, completions);
         }
         if (selection.signalHandlers)
         {
