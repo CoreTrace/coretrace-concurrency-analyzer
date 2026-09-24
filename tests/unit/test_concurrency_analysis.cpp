@@ -1127,6 +1127,8 @@ namespace
              .unsafeSignalHandler = 1},
             {.path = "tests/fixtures/concurrency/signal/signal_handler_flag_only_no_fp.c",
              .intent = "writing a volatile sig_atomic_t flag is the shape the standard allows"},
+            {.path = "tests/fixtures/concurrency/signal/signal_handler_strtok_r_no_fp.c",
+             .intent = "strtok_r keeps its position in caller-owned state and is async-signal-safe"},
 
             // --- imported signal-handler fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/signal-handler/signal_handler_data_race_global.c",
@@ -1141,7 +1143,8 @@ namespace
              .intent = "mutex operations are not async-signal-safe",
              .unsafeSignalHandler = 1},
             {.path = "tests/fixtures/concurrency/signal-handler/signal_reentrant_function.c",
-             .intent = "known gap #54: handler calls to nonreentrant strtok are not classified"},
+             .intent = "strtok resumes from hidden state the interrupted scan is still using",
+             .unsafeSignalHandler = 1},
             {.path = "tests/fixtures/concurrency/signal-handler/signal_thread_mask.c",
              .intent = "known gap #54: signal delivery is not modeled; the full join loop completes the workers"},
 
