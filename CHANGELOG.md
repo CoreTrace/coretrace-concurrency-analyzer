@@ -10,6 +10,11 @@ still change between minor releases.
 
 ## Unreleased
 
+- An atomic flag reached through wrappers is no longer reported as a race
+  when the wrappers also call a helper that touches no shared memory. Such a
+  helper used to make the wrapper's accesses count as plain ones. libstdc++
+  builds every `std::atomic<bool>` member this way, so on Linux a correctly
+  used atomic flag was reported as a data race.
 - `data-race` no longer reports data published through an atomic flag with
   release and acquire ordering: a thread writes the data and stores a constant
   to the flag with a release store (or after a release fence), and the reader
