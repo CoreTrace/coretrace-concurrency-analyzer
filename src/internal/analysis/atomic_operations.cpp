@@ -110,7 +110,10 @@ namespace ctrace::concurrency::internal::analysis
         /// The atomic member or fence a callee is, from its demangled name.
         std::optional<AtomicMember> atomicMemberOf(const llvm::Function& callee)
         {
-            if (!callee.getName().starts_with("_Z"))
+            // Every member and fence recognized below spells "atomic" in its mangled name
+            // (`6atomicI`, `13__atomic_base`, `19atomic_thread_fence`); checking that first spares
+            // demangling every other callee of a unit.
+            if (!callee.getName().starts_with("_Z") || !callee.getName().contains("atomic"))
                 return std::nullopt;
 
             const std::optional<DemangledName> name = demangleFunction(callee.getName());
