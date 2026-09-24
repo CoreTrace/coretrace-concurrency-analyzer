@@ -56,6 +56,13 @@ namespace ctrace::concurrency::internal::analysis
         ProcessExec,
         /// Collects a terminated child, releasing its entry in the process table.
         ProcessWait,
+        /// Enters the initialization of a function-local static (`__cxa_guard_acquire`). It
+        /// returns nonzero to the one caller that must initialize, which then holds the guard
+        /// until the release; every other caller waits for that release or finds it done.
+        StaticInitGuardAcquire,
+        /// Ends that initialization, whether it completed (`__cxa_guard_release`) or threw
+        /// (`__cxa_guard_abort`), and lets the waiting callers go.
+        StaticInitGuardRelease,
     };
 
     class ConcurrencySymbolClassifier

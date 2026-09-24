@@ -730,4 +730,58 @@ namespace ctrace::concurrency::internal::analysis
         return PublicationFinder(module, directCallSites, spawns, analyses, projectAnalysis)
             .run(accesses);
     }
+
+    void orderStaticInitialization(const llvm::Module& module, std::vector<AccessFact>& accesses,
+                                   bool projectAnalysis)
+    {
+        // The Itanium ABI names the guard of `_Z<name>` `_ZGV<name>`.
+        constexpr llvm::StringRef kGuardPrefix = "_ZGV";
+        struct Guard
+        {
+            std::string lockId;
+            std::string key;
+        };
+
+        std::unordered_map<std::string, Guard> guardByObject;
+        for (const llvm::GlobalVariable& guard : module.globals())
+        {
+            if (!guard.getName().starts_with(kGuardPrefix))
+                continue;
+
+            const std::string objectName =
+                "_Z" + guard.getName().drop_front(kGuardPrefix.size()).str();
+            const llvm::GlobalVariable* object =
+                module.getGlobalVariable(objectName, /*AllowInternal=*/true);
+            if (object == nullptr)
+                continue;
+
+            const std::optional<std::string> objectSymbol = canonicalGlobalId(*object);
+            const std::optional<std::string> lockId =
+                canonicalLockId(guard, &module.getDataLayout());
+            if (!objectSymbol.has_value() || !lockId.has_value())
+                continue;
+
+            // A static local to this unit must not meet a namesake from another one, while one
+            // in an inline function is the same object, and guard, in every unit.
+            std::string key = "static-init:" + *lockId;
+            if (projectAnalysis && guard.hasLocalLinkage())
+                key = module.getModuleIdentifier() + "#" + key;
+            guardByObject.emplace(*objectSymbol, Guard{.lockId = *lockId, .key = std::move(key)});
+        }
+
+        if (guardByObject.empty())
+            return;
+
+        for (AccessFact& access : accesses)
+        {
+            const auto guardIt = guardByObject.find(access.symbol);
+            if (guardIt == guardByObject.end())
+                continue;
+
+            if (access.heldLocks.contains(guardIt->second.lockId))
+                access.beforeRelease.insert(guardIt->second.key);
+            else
+                access.afterAcquire.insert(guardIt->second.key);
+        }
+    }
 } // namespace ctrace::concurrency::internal::analysis

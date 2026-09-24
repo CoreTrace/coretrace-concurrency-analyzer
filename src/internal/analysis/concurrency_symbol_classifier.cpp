@@ -474,6 +474,11 @@ namespace ctrace::concurrency::internal::analysis
                 return CallKind::PThreadSpinUnlock;
             if (matchesPlainSymbol(name, "pthread_spin_trylock"))
                 return CallKind::PThreadSpinTryLock;
+            if (matchesPlainSymbol(name, "__cxa_guard_acquire"))
+                return CallKind::StaticInitGuardAcquire;
+            if (matchesPlainSymbol(name, "__cxa_guard_release") ||
+                matchesPlainSymbol(name, "__cxa_guard_abort"))
+                return CallKind::StaticInitGuardRelease;
             if (matchesPlainSymbol(name, "pthread_mutex_init"))
                 return CallKind::PThreadMutexInit;
             if (matchesPlainSymbol(name, "pthread_mutexattr_settype"))
@@ -582,6 +587,10 @@ namespace ctrace::concurrency::internal::analysis
             return "fork";
         case CallKind::ProcessExec:
             return "exec";
+        case CallKind::StaticInitGuardAcquire:
+            return "static_init_guard_acquire";
+        case CallKind::StaticInitGuardRelease:
+            return "static_init_guard_release";
         case CallKind::ProcessWait:
             return "wait";
         case CallKind::StdThreadCtor:

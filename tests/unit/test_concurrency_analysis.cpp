@@ -1276,10 +1276,23 @@ namespace
              .intent = "relaxed Dekker lets both threads race on shared; store-load ordering is outside #47",
              .dataRace = 3},
 
+            // --- once initialization (#48) ---
+            {.path = "tests/fixtures/concurrency/once-init/magic_static_no_fp.cpp",
+             .intent = "a function-local static is initialized once, before every thread reads it"},
+            {.path = "tests/fixtures/concurrency/once-init/magic_static_mutated_after_init.cpp",
+             .intent = "safe initialization does not protect what threads do with the object afterwards",
+             .dataRace = 1,
+             .racingSymbol = "_ZZL11next_ticketvE8instance"},
+            {.path = "tests/fixtures/concurrency/once-init/pthread_once_no_fp.c",
+             .intent = "pthread_once initializes once; the callback is not followed, so nothing pairs its writes"},
+            {.path = "tests/fixtures/concurrency/once-init/call_once_no_fp.cpp",
+             .intent = "std::call_once initializes once; the callable is not followed, so nothing pairs its writes"},
+
             // --- imported once-init fixtures (Nihil, 91e7431; #48) ---
             {.path = "tests/fixtures/concurrency/once-init/cpp_once_init_static_side_effects.cpp",
-             .intent = "workers race on registry_count; the guard and instance reports are magic-static false positives (#48)",
-             .dataRace = 3},
+             .intent = "workers race on registry_count; initializing the local static is thread-safe",
+             .dataRace = 1,
+             .racingSymbol = "_ZL14registry_count"},
             {.path = "tests/fixtures/concurrency/once-init/once_init_dclp_no_barrier.c",
              .intent = "the unlocked first check races with the locked write of the pointer",
              .dataRace = 1},

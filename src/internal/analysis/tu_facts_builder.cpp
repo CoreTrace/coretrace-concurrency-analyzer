@@ -1149,6 +1149,7 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         facts.accesses = filterProjectedConcreteAccesses(std::move(concreteAccesses));
+        orderStaticInitialization(module, facts.accesses, crossTU);
         return facts;
     }
 } // namespace ctrace::concurrency::internal::analysis
