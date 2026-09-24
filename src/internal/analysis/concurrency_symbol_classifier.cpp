@@ -488,6 +488,12 @@ namespace ctrace::concurrency::internal::analysis
                 return CallKind::PThreadSpinTryLock;
             if (matchesPlainSymbol(name, "pthread_once"))
                 return CallKind::PThreadOnce;
+            if (matchesPlainSymbol(name, "__cxa_thread_atexit") ||
+                matchesPlainSymbol(name, "__cxa_thread_atexit_impl") ||
+                matchesPlainSymbol(name, "_tlv_atexit"))
+            {
+                return CallKind::ThreadExitDestructorRegistration;
+            }
             if (matchesPlainSymbol(name, "__cxa_guard_acquire"))
                 return CallKind::StaticInitGuardAcquire;
             if (matchesPlainSymbol(name, "__cxa_guard_release") ||
@@ -607,6 +613,8 @@ namespace ctrace::concurrency::internal::analysis
             return "static_init_guard_release";
         case CallKind::PThreadOnce:
             return "pthread_once";
+        case CallKind::ThreadExitDestructorRegistration:
+            return "thread_exit_destructor_registration";
         case CallKind::ProcessWait:
             return "wait";
         case CallKind::StdThreadCtor:

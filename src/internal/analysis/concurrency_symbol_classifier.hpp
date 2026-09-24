@@ -63,6 +63,10 @@ namespace ctrace::concurrency::internal::analysis
         /// Ends that initialization, whether it completed (`__cxa_guard_release`) or threw
         /// (`__cxa_guard_abort`), and lets the waiting callers go.
         StaticInitGuardRelease,
+        /// Registers the destructor of a thread-local object (`__cxa_thread_atexit`,
+        /// `_tlv_atexit`): the runtime calls it, on that object, when the registering thread
+        /// ends, in that thread.
+        ThreadExitDestructorRegistration,
         /// Runs a routine once for every caller of the same control (`pthread_once`). The runtime
         /// synchronizes the control itself, so the call is not an access to it, whatever type the
         /// C library gives the control: glibc's is a plain `int` no type name identifies.

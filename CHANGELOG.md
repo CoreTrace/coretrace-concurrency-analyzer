@@ -10,6 +10,11 @@ still change between minor releases.
 
 ## Unreleased
 
+- The destructor of a `thread_local` object is now analysed as running at the
+  end of the thread that constructed it, in that thread. The runtime calls it
+  through `__cxa_thread_atexit` (Linux) or `_tlv_atexit` (macOS), which
+  nothing followed, so a race that only a thread-local destructor takes part
+  in was not reported.
 - New rule `thread-arg-freed` (`ThreadArgumentFreedEarly`, error, CWE-416, on
   by default): memory handed to a thread with `pthread_create` that the creator
   frees before joining that thread, while the thread uses it. Joining first, a
