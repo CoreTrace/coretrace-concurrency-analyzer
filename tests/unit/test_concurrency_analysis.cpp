@@ -809,6 +809,7 @@ namespace
         std::size_t threadArgumentEscape = 0;
         std::size_t unsafeSignalHandler = 0;
         std::size_t weakPublication = 0;
+        std::size_t threadArgumentFreed = 0;
         /// Symbol the data-race diagnostics must name; empty when not asserted.
         std::string_view racingSymbol;
         bool requiresCxx20 = false;
@@ -1316,7 +1317,14 @@ namespace
              .intent = "a detached std::thread keeps a reference into the frame that created it",
              .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/use-after-free/use_after_free_callback.c",
-             .intent = "known gap #49: a thread argument freed before the join is not tracked"},
+             .intent = "the creator frees the thread's argument before joining the thread",
+             .threadArgumentFreed = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_joined_then_freed_no_fp.c",
+             .intent = "freeing after the join leaves the thread done with the memory"},
+            {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_freed_unused_no_fp.c",
+             .intent = "a thread that never touches its argument cannot use it after the free"},
+            {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_reassigned_then_freed_no_fp.c",
+             .intent = "the freed pointer is another allocation than the one the thread was given"},
             {.path = "tests/fixtures/concurrency/use-after-free/use_after_free_concurrent.c",
              .intent = "freeing through a shared pointer another thread reads races on the pointer",
              .dataRace = 1,
@@ -1435,6 +1443,7 @@ namespace
              "thread-arg-escape"},
             {RuleId::UnsafeSignalHandler, expectation.unsafeSignalHandler, "unsafe-signal-handler"},
             {RuleId::WeakPublicationOrdering, expectation.weakPublication, "weak-publication"},
+            {RuleId::ThreadArgumentFreedEarly, expectation.threadArgumentFreed, "thread-arg-freed"},
         };
 
         bool ok = true;
@@ -1497,6 +1506,7 @@ namespace
             RuleId::ThreadArgumentEscapesFrame,
             RuleId::UnsafeSignalHandler,
             RuleId::WeakPublicationOrdering,
+            RuleId::ThreadArgumentFreedEarly,
         };
 
         bool ok = true;

@@ -82,6 +82,10 @@ namespace ctrace::concurrency::internal::analysis
         /// functions there: a handler interrupts its own thread mid-operation, so allocating,
         /// printing or locking can re-enter a structure the interrupted code left inconsistent.
         [[nodiscard]] bool isAsyncSignalUnsafe(const llvm::CallBase& call) const;
+        /// True for a call that ends the lifetime of the heap memory its first argument points
+        /// to: `free`, or an `operator delete` in any spelling the ABI gives it. Not a `CallKind`:
+        /// classifying it would stop the call counting as an access to what it frees.
+        [[nodiscard]] bool releasesMemory(const llvm::CallBase& call) const;
         /// True when the call hands child termination to the system, which reaps the children
         /// itself. A program that does this leaves no zombie behind and owes no wait.
         [[nodiscard]] bool ignoresChildTermination(const llvm::CallBase& call) const;

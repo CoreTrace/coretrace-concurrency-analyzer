@@ -283,6 +283,15 @@ namespace ctrace::concurrency::internal::analysis
         std::string unsafeCallFunctionId;
     };
 
+    /// Memory handed to a thread and freed by its creator while the thread may still run.
+    struct ThreadArgumentFreeFact
+    {
+        std::string functionId;
+        std::string entryFunctionId;
+        SourceLocation creationLocation;
+        SourceLocation freeLocation;
+    };
+
     /// Data published through an atomic flag whose store does not release or whose observing
     /// load does not acquire: the reader can see the flag set and still read the data as it was
     /// before the store.
@@ -341,6 +350,7 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<ConditionWaitFact> conditionWaits;
         std::vector<ProcessForkFact> processForks;
         std::vector<ThreadArgumentEscapeFact> threadArgumentEscapes;
+        std::vector<ThreadArgumentFreeFact> threadArgumentFrees;
         std::vector<SignalHandlerFact> signalHandlers;
         std::vector<WeakPublicationFact> weakPublications;
         /// Some part of the program collects its terminated children.

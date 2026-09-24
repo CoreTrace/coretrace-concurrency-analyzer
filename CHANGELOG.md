@@ -10,6 +10,11 @@ still change between minor releases.
 
 ## Unreleased
 
+- New rule `thread-arg-freed` (`ThreadArgumentFreedEarly`, error, CWE-416, on
+  by default): memory handed to a thread with `pthread_create` that the creator
+  frees before joining that thread, while the thread uses it. Joining first, a
+  thread that never touches its argument, and a pointer reassigned before the
+  free are not reported.
 - `thread-arg-escape` now covers `std::thread`: a thread started with a lambda
   capturing a local by reference, or given a pointer or `std::ref` to a local,
   and not joined before the creator returns. `std::thread` copies its callable
