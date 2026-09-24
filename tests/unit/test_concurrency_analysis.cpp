@@ -1330,6 +1330,14 @@ namespace
              .dataRace = 1,
              .racingSymbol = "shared_task"},
 
+            // --- imported thread-local fixtures (Nihil, 91e7431; #50) ---
+            {.path = "tests/fixtures/concurrency/thread-local/c_tls_dangling_ptr.c",
+             .intent = "known gap #50: a thread-local address used after its thread is joined is not tracked"},
+            {.path = "tests/fixtures/concurrency/thread-local/cpp_tls_destructor_race.cpp",
+             .intent = "thread-local constructors and main race on active_count",
+             .dataRace = 1,
+             .racingSymbol = "_ZL12active_count"},
+
             // --- rules that do not exist yet: pinned as silent -----------------------------
             {.path = "tests/fixtures/concurrency/memory-barrier/missing_memory_barrier.c",
              .intent = "no rule models memory ordering yet; the plain accesses still race",
