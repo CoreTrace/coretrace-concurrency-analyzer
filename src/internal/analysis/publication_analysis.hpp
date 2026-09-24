@@ -47,10 +47,8 @@ namespace ctrace::concurrency::internal::analysis
     ///
     /// Anything short of that orders nothing. In a project analysis only flags with internal
     /// linkage qualify, since another unit may store an external one.
-    [[nodiscard]] PublicationOrderingMap
-    collectPublicationOrdering(const llvm::Module& module,
-                               const std::vector<const llvm::Instruction*>& accesses,
-                               const std::vector<DirectCallSite>& directCallSites,
-                               const std::vector<SpawnFact>& spawns,
-                               LlvmFunctionAnalysisProvider& analyses, bool projectAnalysis);
+    [[nodiscard]] PublicationOrderingMap collectPublicationOrdering(
+        const llvm::Module& module, const std::vector<const llvm::Instruction*>& accesses,
+        const std::vector<DirectCallSite>& directCallSites, const std::vector<SpawnFact>& spawns,
+        LlvmFunctionAnalysisProvider& analyses, bool projectAnalysis);
 } // namespace ctrace::concurrency::internal::analysis

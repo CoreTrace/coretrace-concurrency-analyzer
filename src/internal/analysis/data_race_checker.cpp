@@ -43,8 +43,8 @@ namespace ctrace::concurrency::internal::analysis
         /// reader does after the acquire that observed it, whichever of the two comes first here.
         bool orderedByPublication(const AccessFact& lhs, const AccessFact& rhs)
         {
-            auto intersects = [](const std::set<std::string>& first,
-                                 const std::set<std::string>& second)
+            auto intersects =
+                [](const std::set<std::string>& first, const std::set<std::string>& second)
             {
                 return std::any_of(first.begin(), first.end(),
                                    [&](const std::string& flag) { return second.contains(flag); });
