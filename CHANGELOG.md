@@ -10,6 +10,12 @@ still change between minor releases.
 
 ## Unreleased
 
+- `thread-arg-escape` now covers `std::thread`: a thread started with a lambda
+  capturing a local by reference, or given a pointer or `std::ref` to a local,
+  and not joined before the creator returns. `std::thread` copies its callable
+  and arguments into the new thread, so what escapes is an address stored in
+  them; a local passed by value is copied and not reported. The join test is
+  the one pthreads already use, and `detach` never covers.
 - A function-local static is no longer reported as racing with itself. The
   language initializes it once, under a guard that every other thread passes or
   waits on, but `data-race` saw the constructor run in every thread and the
