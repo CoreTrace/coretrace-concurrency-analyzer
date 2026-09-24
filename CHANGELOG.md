@@ -8,8 +8,15 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
-## Unreleased
+## v0.4.0
 
+- **Report and public API change.** The JSON `functions` array reports what
+  the selected rules computed, as the diagnostics already did. `--rules=all` is
+  unchanged; under a selection that reads no shared accesses,
+  `sharedAccessCount`, `protectedAccessCount` and `writeAccessCount` are absent
+  from an entry instead of rendered as zero, so a count nobody took is not
+  mistaken for a count of none. `FunctionSummary` holds them as
+  `std::optional<std::size_t>` accordingly. See `README.md`.
 - Threads started and joined inside a helper, or across two counted loops, are
   no longer paired with the threads of a later phase. A completion proof
   identifies a point after every instance a spawn site produced has been
@@ -33,12 +40,10 @@ still change between minor releases.
   analysis still builds, for every unit, the facts the whole-program index and
   the second-pass gate read — the entry concurrency, the thread lifecycles and
   the lock wrapper summaries — whatever the rules select.
-- The JSON `functions` array reports what the selected rules computed, as the
-  diagnostics already did. `--rules=all` is unchanged; under a selection that
-  reads no shared accesses, `sharedAccessCount`, `protectedAccessCount` and
-  `writeAccessCount` are absent from an entry instead of rendered as zero, so a
-  count nobody took is not mistaken for a count of none. `FunctionSummary` holds
-  them as `std::optional<std::size_t>` accordingly. See `README.md`.
+- A signal handler that calls `strtok` is reported. `strtok` keeps its position
+  in hidden state that the scan it interrupted is still using; POSIX lists
+  `strtok_r` as async-signal-safe and leaves `strtok` out. One of the six
+  fixtures pinned silent now expects the diagnostic.
 
 ## v0.3.0
 
