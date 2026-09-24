@@ -241,6 +241,25 @@ distinct functions) exactly as before, and `--rules=missing-join` lists 865 — 
 accesses. An entry a narrow run does keep carries no access counts at all rather
 than zeros, since nothing counted them.
 
+## Default selection of every rule: follow-up measurement
+
+Measured on 2026-09-24 on `36bfafe` with the default widened from six rules to
+all eight (#53). The benchmark command above passes no `--rules`, so it now
+measures the eight-rule default; figures recorded before this change measured
+six. To compare runs across it, pin the same `--rules=` list on both sides.
+
+Same binary, the old default named explicitly against the new one, three
+interleaved runs each:
+
+| 49 units | `analysis-ms` (median) | Total wall time | Peak RSS (range) |
+| --- | --- | --- | --- |
+| six rules (the previous default) | 4783 | 9.37 s | 718–782 MB |
+| eight rules (the default now) | 4875 | 9.40 s | 750–814 MB |
+
+The two rules add about 2% of analysis time and 0.3% of wall time. The RSS
+ranges overlap, so no memory difference is claimed. Both selections report the
+same 880 function entries and no diagnostic on this workload.
+
 ## Scaling
 
 After that change, with the cross-TU thread pool active:

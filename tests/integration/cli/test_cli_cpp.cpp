@@ -13,6 +13,10 @@
 
 namespace
 {
+    /// What `--fail-on` exits with when the report crosses the gate (`kFindingsExitCode` in
+    /// main.cpp).
+    constexpr int kFindingsExitCode = 2;
+
     struct RunResult
     {
         int exitCode = -1;
@@ -139,11 +143,9 @@ namespace
             ok = assertContains(result.output, "--analyze", "--help output") && ok;
             ok = assertContains(result.output, "--rules=<comma-separated>|all", "--help output") &&
                  ok;
-            // Every rule the option accepts is named, and the default says which are off.
+            // Every rule the option accepts is named, and the default is stated.
             ok = assertContains(result.output, "unsafe-signal-handler", "--help output") && ok;
-            ok = assertContains(result.output, "default: every rule except thread-arg-escape and",
-                                "--help output") &&
-                 ok;
+            ok = assertContains(result.output, "(default: every rule)", "--help output") && ok;
             ok = assertContains(result.output, "--format=human|json|sarif", "--help output") && ok;
             ok = assertContains(result.output, "--verbose", "--help output") && ok;
         }
@@ -526,6 +528,43 @@ namespace
     bool testRuleSelectionAndNewChecks()
     {
         bool ok = true;
+
+        // The default runs every rule, including the two that were once left out of it (#53).
+        {
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/signal/signal_handler_unsafe_call.c").string(),
+                 "--analyze", "--fail-on=error"});
+            ok = assertTrue(result.exitCode == kFindingsExitCode,
+                            "a default run gated on errors should fail on the unsafe handler") &&
+                 ok;
+            ok = assertContains(result.output, "ruleId: UnsafeSignalHandler",
+                                "default unsafe-signal-handler output") &&
+                 ok;
+        }
+
+        {
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/thread-escape/thread_argument_stack_escape.c").string(),
+                 "--analyze"});
+            ok = assertTrue(result.exitCode == 0, "default thread-arg-escape run should succeed") &&
+                 ok;
+            ok = assertContains(result.output, "ruleId: ThreadArgumentEscapesFrame",
+                                "default thread-arg-escape output") &&
+                 ok;
+        }
+
+        // An explicit selection replaces the default rather than adding to it.
+        {
+            const RunResult result = runAnalyzer(
+                {fixturePath("concurrency/signal/signal_handler_unsafe_call.c").string(),
+                 "--analyze", "--rules=data-race", "--fail-on=error"});
+            ok = assertTrue(result.exitCode == 0,
+                            "--rules=data-race should not gate on the unsafe handler") &&
+                 ok;
+            ok = assertNotContains(result.output, "ruleId: UnsafeSignalHandler",
+                                   "data-race-only signal output") &&
+                 ok;
+        }
 
         {
             const RunResult result =

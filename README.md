@@ -145,8 +145,7 @@ Compile only:
 ./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --ir-format=bc
 ```
 
-Analyze with the default rule selection — every rule except `thread-arg-escape` and
-`unsafe-signal-handler`, which `--rules=all` adds:
+Analyze with the default rule selection, which is every rule (the same as `--rules=all`):
 
 ```bash
 ./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --format=human
