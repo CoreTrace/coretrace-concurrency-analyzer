@@ -73,34 +73,45 @@ namespace ctrace::concurrency::internal::analysis
             return classifier.classify(call) == CallKind::Unknown;
         }
 
-        /// True when every memory operation a callee performs on memory it does not own is atomic,
-        /// following direct calls. The coarse effect inferred for such a call summarizes atomic
-        /// work only, so it must not be reported as a plain access: that is what turned a correct
-        /// `std::atomic` wrapper into a race.
+        /// What a callee does to memory it does not own, following direct calls.
+        enum class SharedMemoryEffect
+        {
+            /// Touches only its own frame: it neither makes a caller's accesses plain nor atomic.
+            None,
+            AtomicOnly,
+            Plain,
+        };
+
+        /// The coarse effect inferred for a call summarizes the callee's work, so a callee whose
+        /// every operation on memory it does not own is atomic must not be reported as a plain
+        /// access: that is what turned a correct `std::atomic` wrapper into a race. A helper that
+        /// touches no such memory at all, like the function a standard library computes the
+        /// memory order with, changes nothing either way.
         ///
         /// Answering this from the callee body rather than from its interprocedural summary keeps
         /// the result identical whether or not the summary reaches the caller, which differs
         /// between standard library implementations.
-        using AtomicOnlyCache = std::unordered_map<const llvm::Function*, bool>;
+        using SharedMemoryEffectCache =
+            std::unordered_map<const llvm::Function*, SharedMemoryEffect>;
 
-        bool accessesMemoryAtomicallyOnly(const llvm::Function& function,
-                                          const ConcurrencySymbolClassifier& classifier,
-                                          AtomicOnlyCache& cache,
-                                          std::unordered_set<const llvm::Function*>& visiting)
+        SharedMemoryEffect sharedMemoryEffect(const llvm::Function& function,
+                                              const ConcurrencySymbolClassifier& classifier,
+                                              SharedMemoryEffectCache& cache,
+                                              std::unordered_set<const llvm::Function*>& visiting)
         {
             if (const auto cached = cache.find(&function); cached != cache.end())
                 return cached->second;
 
             if (function.isDeclaration())
-                return false;
+                return SharedMemoryEffect::Plain;
 
-            // A cycle is assumed atomic-only; a genuine plain access elsewhere in it still
-            // decides the answer.
+            // A call back into a function still being examined adds nothing of its own; the
+            // operations elsewhere in the cycle decide the answer.
             if (!visiting.insert(&function).second)
-                return true;
+                return SharedMemoryEffect::None;
 
             bool sawAtomic = false;
-            bool atomicOnly = true;
+            bool sawPlain = false;
             for (const llvm::BasicBlock& block : function)
             {
                 for (const llvm::Instruction& instruction : block)
@@ -118,8 +129,7 @@ namespace ctrace::concurrency::internal::analysis
                                 load->getPointerOperand()->stripPointerCastsAndAliases()))
                             continue;
 
-                        sawAtomic = sawAtomic || load->isAtomic();
-                        atomicOnly = atomicOnly && load->isAtomic();
+                        (load->isAtomic() ? sawAtomic : sawPlain) = true;
                         continue;
                     }
 
@@ -129,8 +139,7 @@ namespace ctrace::concurrency::internal::analysis
                                 store->getPointerOperand()->stripPointerCastsAndAliases()))
                             continue;
 
-                        sawAtomic = sawAtomic || store->isAtomic();
-                        atomicOnly = atomicOnly && store->isAtomic();
+                        (store->isAtomic() ? sawAtomic : sawPlain) = true;
                         continue;
                     }
 
@@ -139,21 +148,30 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
 
                     const llvm::Function* callee = classifier.directCallee(*call);
-                    if (callee == nullptr || callee->isDeclaration())
+                    if (callee == nullptr)
                     {
-                        atomicOnly = false;
+                        sawPlain = true;
                         continue;
                     }
 
-                    if (!accessesMemoryAtomicallyOnly(*callee, classifier, cache, visiting))
-                        atomicOnly = false;
-                    else
+                    switch (sharedMemoryEffect(*callee, classifier, cache, visiting))
+                    {
+                    case SharedMemoryEffect::None:
+                        break;
+                    case SharedMemoryEffect::AtomicOnly:
                         sawAtomic = true;
+                        break;
+                    case SharedMemoryEffect::Plain:
+                        sawPlain = true;
+                        break;
+                    }
                 }
             }
 
             visiting.erase(&function);
-            const bool result = sawAtomic && atomicOnly;
+            const SharedMemoryEffect result = sawPlain    ? SharedMemoryEffect::Plain
+                                              : sawAtomic ? SharedMemoryEffect::AtomicOnly
+                                                          : SharedMemoryEffect::None;
             cache.emplace(&function, result);
             return result;
         }
@@ -228,7 +246,7 @@ namespace ctrace::concurrency::internal::analysis
                                             const llvm::CallBase& call, llvm::AAResults& aaResults,
                                             const ConcurrencySymbolClassifier& classifier,
                                             const MemoryScope& scope,
-                                            AtomicOnlyCache& atomicOnlyCache)
+                                            SharedMemoryEffectCache& effectCache)
         {
             if (!shouldInferCallMemoryEffects(call, classifier))
                 return;
@@ -236,8 +254,8 @@ namespace ctrace::concurrency::internal::analysis
             const llvm::Function* callee = classifier.directCallee(call);
             std::unordered_set<const llvm::Function*> visiting;
             const bool atomicEffect =
-                callee != nullptr &&
-                accessesMemoryAtomicallyOnly(*callee, classifier, atomicOnlyCache, visiting);
+                callee != nullptr && sharedMemoryEffect(*callee, classifier, effectCache,
+                                                        visiting) == SharedMemoryEffect::AtomicOnly;
 
             std::unordered_set<std::string> seenEffects;
             for (const llvm::Use& argument : call.args())
@@ -287,7 +305,7 @@ namespace ctrace::concurrency::internal::analysis
                 trackedGlobals.push_back(&global);
         }
 
-        AtomicOnlyCache atomicOnlyCache;
+        SharedMemoryEffectCache effectCache;
         const llvm::DataLayout& layout = module.getDataLayout();
         static const std::unordered_set<std::string> kNoSharedObjects;
         const std::unordered_set<std::string>& sharedObjects =
@@ -320,7 +338,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                     {
                         appendCallMemoryEffectAccesses(accesses, function, *call, aaResults,
-                                                       classifier_, scope, atomicOnlyCache);
+                                                       classifier_, scope, effectCache);
                         continue;
                     }
 
