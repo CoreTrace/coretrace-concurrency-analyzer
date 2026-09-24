@@ -20,7 +20,6 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 
-#include <algorithm>
 #include <map>
 #include <optional>
 
@@ -570,10 +569,10 @@ namespace ctrace::concurrency::internal::analysis
                     if (!liveDominates(*access.instruction, *publication.store->instruction, live))
                         continue;
 
-                    const bool ordered = std::any_of(
-                        publication.releasePoints.begin(), publication.releasePoints.end(),
-                        [&](const llvm::Instruction* releasePoint)
-                        { return liveDominates(*access.instruction, *releasePoint, live); });
+                    bool ordered = false;
+                    for (const llvm::Instruction* releasePoint : publication.releasePoints)
+                        ordered =
+                            ordered || liveDominates(*access.instruction, *releasePoint, live);
                     published.push_back(PublicationAccess{.access = &access, .ordered = ordered});
                 }
                 return published;
@@ -622,10 +621,14 @@ namespace ctrace::concurrency::internal::analysis
                         if (!dominators.dominates(observedArm, access.instruction->getParent()))
                             continue;
 
-                        const bool afterAcquireFence = std::any_of(
-                            acquireFences.begin(), acquireFences.end(),
-                            [&](const llvm::Instruction* fence)
-                            { return liveDominates(*fence, *access.instruction, live); });
+                        // A loop rather than std::any_of with a multi-line lambda: clang-format
+                        // builds disagree on how to break the latter.
+                        bool afterAcquireFence = false;
+                        for (const llvm::Instruction* fence : acquireFences)
+                        {
+                            afterAcquireFence = afterAcquireFence ||
+                                                liveDominates(*fence, *access.instruction, live);
+                        }
                         bool& ordered = observed.try_emplace(&access, false).first->second;
                         ordered = ordered || acquires || afterAcquireFence;
                     }
