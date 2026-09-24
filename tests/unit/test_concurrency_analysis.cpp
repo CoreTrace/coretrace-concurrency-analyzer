@@ -1231,6 +1231,18 @@ namespace
              .intent = "broadcast consumers must recheck the predicate after waking",
              .conditionWait = 1},
 
+            // --- imported atomic-ordering fixtures (Nihil, 91e7431; #47) ---
+            {.path = "tests/fixtures/concurrency/atomic-ordering/cpp_aba_compare_exchange.cpp",
+             .intent = "a value CAS on an int has value semantics; ABA needs reused identity (#47)"},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/cpp_relaxed_ordering_publish.cpp",
+             .intent = "known gap #47: a relaxed flag publishing an atomic payload is not modeled"},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/seqlock_missing_fence.cpp",
+             .intent = "the non-atomic payload races whatever the sequence ordering; validated reads are outside #47",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/atomic-ordering/store_load_reorder.cpp",
+             .intent = "relaxed Dekker lets both threads race on shared; store-load ordering is outside #47",
+             .dataRace = 3},
+
             // --- rules that do not exist yet: pinned as silent -----------------------------
             {.path = "tests/fixtures/concurrency/memory-barrier/missing_memory_barrier.c",
              .intent = "no rule models memory ordering yet; the plain accesses still race",
