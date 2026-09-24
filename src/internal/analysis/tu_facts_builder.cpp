@@ -578,8 +578,8 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;
         if (selection.accesses)
         {
-            pendingAccesses =
-                SharedAccessCollector(analyses).collect(module, programDefined, &sharedObjectIds);
+            pendingAccesses = SharedAccessCollector(classifier, analyses)
+                                  .collect(module, programDefined, &sharedObjectIds);
 
             std::unordered_map<std::string, std::unordered_set<const llvm::Instruction*>>
                 trackedAccessesByFunction;

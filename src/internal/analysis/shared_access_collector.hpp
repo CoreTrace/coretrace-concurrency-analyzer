@@ -13,12 +13,14 @@ namespace llvm
 
 namespace ctrace::concurrency::internal::analysis
 {
+    class ConcurrencySymbolClassifier;
     class LlvmFunctionAnalysisProvider;
 
     class SharedAccessCollector
     {
       public:
-        explicit SharedAccessCollector(LlvmFunctionAnalysisProvider& analyses);
+        explicit SharedAccessCollector(const ConcurrencySymbolClassifier& classifier,
+                                       LlvmFunctionAnalysisProvider& analyses);
 
         /// `programDefined` names the globals the whole program defines, so an `extern`
         /// declared here and defined in another unit is followed instead of dropped. Null when
@@ -31,6 +33,7 @@ namespace ctrace::concurrency::internal::analysis
                 const std::unordered_set<std::string>* sharedObjectIds = nullptr) const;
 
       private:
+        const ConcurrencySymbolClassifier& classifier_;
         LlvmFunctionAnalysisProvider& analyses_;
     };
 } // namespace ctrace::concurrency::internal::analysis
