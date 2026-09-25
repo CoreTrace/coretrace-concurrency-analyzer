@@ -1,89 +1,70 @@
 # Tests de bugs de concurrence
 
-Cette collection contient des exemples de bugs de concurrence en C et C++ pour tester l'analyseur CoreTrace.
+Cette collection contient des exemples de bugs de concurrence en C et C++ pour
+tester l'analyseur CoreTrace, ainsi que des variantes correctes qui ne doivent
+rien signaler.
+
+## Ce que chaque fixture vérifie
+
+Chaque fichier `.c` ou `.cpp` de ce dossier a une ligne dans la table
+`fixtureExpectations()` de `tests/unit/test_concurrency_analysis.cpp` : son
+intention (`intent`) et le nombre de diagnostics attendus pour chaque règle.
+`testFixtureExpectationTable` vérifie ces nombres, et
+`testEveryConcurrencyFixtureIsCovered` échoue dès qu'un fichier n'a pas de
+ligne. Cette table est la liste de référence ; ce README ne la recopie pas. La
+même table couvre le dossier voisin `tests/fixtures/concurrency-cxx20/`.
+
+Un suffixe `_no_fp`, `_no_diagnostic`, `_no_missing_join` ou `_no_race` marque
+une variante correcte que la règle visée ne doit pas signaler. Une ligne sans
+diagnostic attendu peut aussi documenter une limite connue de l'analyseur : son
+`intent` le dit alors, avec le numéro de l'issue.
 
 ## Structure des dossiers
 
 ```
 tests/fixtures/concurrency/
-├── data-race/          # Data races (lectures/écritures concurrentes non protégées)
-├── deadlock/           # Deadlocks (attentes circulaires de locks)
-├── memory-barrier/     # Problèmes de barrières mémoire (réordering CPU)
+├── atomic-ordering/    # Publication par atomiques, ordres mémoire trop faibles
 ├── condition-variable/ # Mauvaise utilisation des condition variables
-├── thread-escape/      # Threads échappant au contrôle (fork, main thread)
-└── missing-join/       # Threads non joints (ressources perdues, synchronisation manquante)
+├── data-race/          # Lectures/écritures concurrentes non protégées
+├── deadlock/           # Attentes circulaires de locks
+├── memory-barrier/     # Réordonnancement sans barrière mémoire
+├── missing-join/       # Threads jamais joints
+├── once-init/          # Initialisation unique (DCLP, statiques locales, pthread_once)
+├── process/            # fork() après création de threads, processus fils jamais attendus
+├── signal/             # Handlers de signal : cas écrits pour la règle unsafe-signal-handler
+├── signal-handler/     # Handlers de signal : exemples importés du corpus initial
+├── thread-escape/      # États qui échappent à leur thread (pile du créateur, fork, main)
+├── thread-local/       # Variables thread-locales : destructeurs, adresses après la fin du thread
+└── use-after-free/     # Mémoire libérée pendant qu'un thread l'utilise encore
 ```
 
-## Catégories de tests
+## Analyser une fixture
 
-### data-race/
-- **data_race_basic.c**: Écriture concurrente sur un compteur partagé
-- **data_race_mixed_access.c**: Lectures et écritures mélangées sans synchronisation
-- **race_condition_check_then_use.c**: Pattern TOCTOU (check-then-use)
-- **cpp_data_race_class.cpp**: Data race dans une classe C++ non thread-safe
-- **cpp_shared_object_by_ref.cpp**: Propagation d'un objet global partagé via une référence
-- **cpp_thread_local_class.cpp**: Classe locale à chaque thread, ne doit pas être reportée
-- **cpp_race_std_async.cpp**: Data race avec std::async et shared state
-- **cpp_atomic_vs_non_atomic.cpp**: Mélange dangereux d'opérations atomiques et non-atomiques
-- **cpp_move_semantics_race.cpp**: Data race avec move semantics et unique_ptr
-- **cpp_double_checked_locking.cpp**: Double-checked locking pattern cassé
+```bash
+./build-llvm20/coretrace_concurrency_analyzer tests/fixtures/concurrency/data-race/data_race_basic.c --analyze
+./build-llvm20/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/deadlock_basic.c --analyze --rules=deadlock-lock-order --format=json
+```
 
-### deadlock/
-- **deadlock_basic.c**: Acquisition de deux locks dans ordre inverse par deux threads
-- **lock_order_violation.c**: Violation cyclique d'ordre de locks (3+ mutex)
-- **recursive_deadlock.c**: Thread s'attend lui-même (lock non-récursif)
+`build-llvm20` est le dossier de build décrit dans le README principal. Sans
+`--analyze`, l'analyseur compile seulement la fixture en IR.
 
-### memory-barrier/
-- **missing_memory_barrier.c**: Réordering CPU/compiler sans barrière mémoire appropriée
+## Compiler et exécuter une fixture
 
-### condition-variable/
-- **condition_variable_spurious.c**: Spurious wakeup non géré (if au lieu de while)
-
-### thread-escape/
-- **thread_escape_posix.c**: Fonction appelée depuis un thread ET depuis main sans synchronisation
-- **fork_thread_race.c**: Race condition après fork() avec threads existants
-
-### missing-join/
-- **missing_join_basic.c**: Thread unique jamais joint, mémoire potentiellement perdue
-- **missing_join_multiple.c**: Plusieurs threads créés, un seul est joint
-- **missing_join_detach_mix.c**: Mélange incorrect de detach et threads non joints
-- **cpp_missing_join.cpp**: Threads std::thread non joints (risque de std::terminate())
-
-## Compilation
-
-### Pour les fichiers C:
 ```bash
 gcc -pthread -o test tests/fixtures/concurrency/data-race/data_race_basic.c
+g++ -std=c++20 -pthread -o test tests/fixtures/concurrency/data-race/cpp_data_race_class.cpp
 ```
 
-### Pour les fichiers C++:
-```bash
-g++ -std=c++17 -pthread -o test tests/fixtures/concurrency/data-race/cpp_data_race_class.cpp
-```
+Ces fixtures sont faites pour l'analyse statique : beaucoup de ces bugs
+dépendent de l'ordonnancement des threads ou du processeur et peuvent ne pas se
+manifester à l'exécution.
 
-### Avec instrumentation CoreTrace:
-```bash
-./build-llvm20/coretrace_concurrency_analyzer tests/fixtures/concurrency/data-race/data_race_basic.c --ir-format=ll
-./build-llvm20/coretrace_concurrency_analyzer tests/fixtures/concurrency/deadlock/deadlock_basic.c --ir-format=bc
-```
+## Ajouter une fixture
 
-## Exécution attendue
-
-Ces tests sont conçus pour être **détectés statiquement** par l'analyseur CoreTrace. Certains bugs peuvent ne pas se manifester à l'exécution car ils dépendent du scheduling des threads.
-
-| Catégorie | Détection statique | Reproduction dynamique |
-|-----------|-------------------|------------------------|
-| data-race | ✅ | ⚠️ (non déterministe) |
-| deadlock | ✅ | ⚠️ (dépend du timing) |
-| memory-barrier | ✅ | ❌ (rarement observable) |
-| condition-variable | ✅ | ⚠️ (spurious wakeups rares) |
-| thread-escape | ✅ | ⚠️ (dépend du contexte) |
-| missing-join | ✅ | ✅ (fuites mémoire visibles) |
-
-## Ajout de nouveaux tests
-
-Pour ajouter un nouveau test :
-1. Créer le fichier dans le sous-dossier approprié
-2. Ajouter un commentaire expliquant le bug au début du fichier
-3. Mettre à jour ce README
-4. Vérifier que l'analyseur détecte le bug
+1. Créer le fichier dans le sous-dossier approprié, avec
+   `// SPDX-License-Identifier: Apache-2.0` en première ligne
+   (`scripts/check-license-compliance.sh` le vérifie).
+2. Expliquer en tête de fichier le bug, ou pourquoi la variante est correcte.
+3. Ajouter sa ligne dans `fixtureExpectations()` : son intention et le nombre
+   de diagnostics attendus pour chaque règle.
+4. Lancer `ctest --test-dir build-llvm20 -R coretrace_concurrency_analysis_tests --output-on-failure`.
