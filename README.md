@@ -138,7 +138,7 @@ installed beyond a container runtime:
 
 ```bash
 docker run --rm -v "$PWD:/work" \
-  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.7.0 file.c --analyze
+  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.7.1 file.c --analyze
 ```
 
 To build a specific release from source instead, consume the tag through CMake:
@@ -147,7 +147,7 @@ To build a specific release from source instead, consume the tag through CMake:
 FetchContent_Declare(
   concurrency_analyzer
   GIT_REPOSITORY https://github.com/CoreTrace/coretrace-concurrency-analyzer.git
-  GIT_TAG v0.7.0
+  GIT_TAG v0.7.1
 )
 ```
 

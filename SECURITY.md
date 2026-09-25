@@ -61,5 +61,5 @@ The published container image is one way to do that:
 
 ```sh
 docker run --rm --network none -v "$PWD:/work:ro" \
-  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.7.0 suspicious.c --analyze
+  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.7.1 suspicious.c --analyze
 ```
