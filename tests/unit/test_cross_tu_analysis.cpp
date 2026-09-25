@@ -579,6 +579,86 @@ namespace
                           "fork-after-thread reanalyses nothing for a wait in another unit");
     }
 
+    /// Threads joined by a helper defined in another unit are finished at the call: no local
+    /// escapes, no memory is freed under a running thread, and the result read afterwards does
+    /// not race. The thread-local read through the pointer the thread published is the one real
+    /// defect, and it only becomes visible once the join is (#89).
+    bool testThreadsJoinedByAHelperInAnotherUnitAreFinished()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-helper-join/workers.c") ||
+            !project.add("cross-tu-helper-join/join.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(project.units());
+        const DiagnosticReport& report = analysis.report;
+
+        return assertTrue(countRule(report, RuleId::ThreadArgumentEscapesFrame) == 0,
+                          "a local outlives a thread joined by a helper in another unit") &&
+               assertTrue(countRule(report, RuleId::ThreadArgumentFreedEarly) == 0,
+                          "memory freed after that join is no longer in use") &&
+               assertTrue(countRule(report, RuleId::DataRaceGlobal) == 0,
+                          "a result read after that join does not race") &&
+               assertTrue(countRule(report, RuleId::MissingJoin) == 0,
+                          "a handle joined by that helper is resolved") &&
+               assertTrue(countRule(report, RuleId::ThreadLocalOutlivesThread) == 1,
+                          "the thread-local read after that join is reported");
+    }
+
+    /// The threading unit alone must keep its conclusions: it genuinely cannot see the join.
+    /// Without this, the test above would pass even if the rules never looked at the threads.
+    bool testThreadingUnitAloneCannotSeeTheHelperJoin()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-helper-join/workers.c"))
+            return false;
+
+        const DiagnosticReport report = SingleTUConcurrencyAnalyzer().analyze(project.moduleAt(0));
+
+        return assertTrue(countRule(report, RuleId::ThreadArgumentEscapesFrame) == 1,
+                          "alone, the local handed to a thread escapes") &&
+               assertTrue(countRule(report, RuleId::ThreadArgumentFreedEarly) == 1,
+                          "alone, the memory is freed under a running thread") &&
+               assertTrue(countRule(report, RuleId::DataRaceGlobal) > 0,
+                          "alone, the result races") &&
+               assertTrue(countRule(report, RuleId::ThreadLocalOutlivesThread) == 0,
+                          "alone, no join ends the thread that owns the thread-local") &&
+               assertTrue(countRule(report, RuleId::MissingJoin) == 0,
+                          "alone, a handle given to a function with no body here may be joined "
+                          "there, whether pthread_t is a pointer or an integer");
+    }
+
+    /// The helper's join changes what the threading unit concludes for the rules that ask
+    /// whether a thread has ended, and for no other (#89).
+    bool testHelperJoinReanalysisFollowsTheSelection()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-helper-join/workers.c") ||
+            !project.add("cross-tu-helper-join/join.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport escapes =
+            ProjectConcurrencyAnalyzer(
+                AnalysisOptions{.enabledRules = {RuleId::ThreadArgumentEscapesFrame}})
+                .analyze(project.units());
+        const ProjectAnalysisReport waits =
+            ProjectConcurrencyAnalyzer(
+                AnalysisOptions{.enabledRules = {RuleId::ConditionWaitWithoutPredicate}})
+                .analyze(project.units());
+
+        return assertTrue(escapes.reanalyzedUnitCount == 1,
+                          "thread-arg-escape reanalyses the unit calling the joining helper") &&
+               assertTrue(countRule(escapes.report, RuleId::ThreadArgumentEscapesFrame) == 0,
+                          "and the second pass sees the thread joined") &&
+               assertTrue(waits.reanalyzedUnitCount == 0,
+                          "condition-wait reanalyses nothing for a join in another unit");
+    }
+
     /// Pins the frontier rather than a finding: two real defects in this fixture are invisible,
     /// and both need work that does not exist yet. When either becomes visible this test fails,
     /// which is the point — it is how the analyzer announces that it grew.
@@ -680,6 +760,7 @@ namespace
                        "cross-tu-handle-lifecycle/main.c"}},
             {.units = {"cross-tu-lock-wrapper/workers.c", "cross-tu-lock-wrapper/sync.c"}},
             {.units = {"cross-tu-reaped-elsewhere/main.c", "cross-tu-reaped-elsewhere/reaper.c"}},
+            {.units = {"cross-tu-helper-join/workers.c", "cross-tu-helper-join/join.c"}},
             {.units = {"cross-tu-vtable-declaration/widget.cpp",
                        "cross-tu-vtable-declaration/main.cpp"},
              .compileArgs = cxx},
@@ -702,9 +783,8 @@ namespace
     /// The rules no fact from another unit can change: their project conclusions are the
     /// single-unit ones, so a project analysis owes them no program-wide work (#52).
     constexpr RuleId kUnitLocalRules[] = {
-        RuleId::ConditionWaitWithoutPredicate, RuleId::ThreadArgumentEscapesFrame,
-        RuleId::UnsafeSignalHandler,           RuleId::ThreadArgumentFreedEarly,
-        RuleId::ThreadLocalOutlivesThread,
+        RuleId::ConditionWaitWithoutPredicate,
+        RuleId::UnsafeSignalHandler,
     };
 
     /// The rules that read which thread entries reach each function; every other rule leaves
@@ -1012,8 +1092,8 @@ namespace
     /// single-unit run does (#52). A rule reading no entry concurrency lists no function merely
     /// because a thread reaches it: only functions carrying one of its diagnostics. For the
     /// rules no other unit can inform, those are the single-unit diagnostics, so the summaries
-    /// are the single-unit ones. missing-join, fork-after-thread and unreaped-child are left out
-    /// of that last comparison on purpose: another unit legitimately changes what they report.
+    /// are the single-unit ones. The rules that read a cross-unit fact are left out of that last
+    /// comparison on purpose: another unit legitimately changes what they report.
     bool testNarrowFunctionsMatchWhatTheRulesComputed()
     {
         const auto readsEntryConcurrency = [](RuleId rule)
@@ -1104,6 +1184,9 @@ int main()
     ok = testChildReapedInAnotherUnitIsCollected() && ok;
     ok = testForkingUnitAloneStillReportsTheChild() && ok;
     ok = testReapingReanalysisFollowsTheSelection() && ok;
+    ok = testThreadsJoinedByAHelperInAnotherUnitAreFinished() && ok;
+    ok = testThreadingUnitAloneCannotSeeTheHelperJoin() && ok;
+    ok = testHelperJoinReanalysisFollowsTheSelection() && ok;
     ok = testIdiomaticServiceKeepsItsKnownBlindSpots() && ok;
     ok = testHandleJoinedInAnotherUnitIsNotOutstanding() && ok;
     ok = testCreatingUnitAloneStillReportsTheHandle() && ok;

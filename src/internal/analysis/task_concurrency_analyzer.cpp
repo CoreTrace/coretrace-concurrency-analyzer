@@ -127,9 +127,12 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         /// Entries whose instance created at `spawn` is still running at `point`: the spawn must
-        /// dominate the point, and no join of the same handle may dominate it.
+        /// dominate the point, and neither a join of the same handle nor the proven completion of
+        /// the spawn may dominate it. The completion also covers a helper that joins the handle
+        /// it is given.
         bool spawnIsLiveAt(const SpawnSite& spawn, const llvm::Instruction& point,
                            const FunctionLifecycleSites& sites,
+                           const ThreadCompletionMap& completions,
                            const llvm::DominatorTree& dominatorTree)
         {
             if (spawn.instruction == &point)
@@ -137,6 +140,14 @@ namespace ctrace::concurrency::internal::analysis
 
             if (!dominatorTree.dominates(spawn.instruction, &point))
                 return false;
+
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(spawn.instruction))
+            {
+                const auto completion = completions.find(call);
+                if (completion != completions.end() &&
+                    dominatorTree.dominates(completion->second, &point))
+                    return false;
+            }
 
             for (const JoinSite& join : sites.joins)
             {
@@ -234,7 +245,7 @@ namespace ctrace::concurrency::internal::analysis
                     ThreadEntrySet liveEntries;
                     for (const SpawnSite& spawn : sites.spawns)
                     {
-                        if (spawnIsLiveAt(spawn, instruction, sites, dominatorTree))
+                        if (spawnIsLiveAt(spawn, instruction, sites, completions, dominatorTree))
                             liveEntries.insert(spawn.entryFunctionId);
                     }
 
@@ -266,7 +277,8 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
 
                     const bool earlierIsJoinedFirst =
-                        !spawnIsLiveAt(earlier, *spawn.instruction, sites, dominatorTree) &&
+                        !spawnIsLiveAt(earlier, *spawn.instruction, sites, completions,
+                                       dominatorTree) &&
                         dominatorTree.dominates(earlier.instruction, spawn.instruction);
                     if (earlierIsJoinedFirst)
                     {
@@ -306,7 +318,8 @@ namespace ctrace::concurrency::internal::analysis
                     }
 
                     stillRunningOnSomeReturn = false;
-                    if (spawnIsLiveAt(spawn, *terminator, sitesIt->second, dominatorTree))
+                    if (spawnIsLiveAt(spawn, *terminator, sitesIt->second, completions,
+                                      dominatorTree))
                     {
                         stillRunningOnSomeReturn = true;
                         break;

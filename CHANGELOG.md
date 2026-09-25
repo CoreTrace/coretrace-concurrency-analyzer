@@ -14,8 +14,22 @@ still change between minor releases.
   child a helper in another unit collects. Reaping is now judged against the
   whole program, as the threads `fork-after-thread` looks for already were:
   a `wait` in any unit counts, as a `wait` anywhere in the unit did before.
-  `unreaped-child` therefore reads a cross-unit fact, and five rules, not six,
-  have project conclusions equal to their single-unit ones.
+- A thread joined through a helper now counts as joined where the helper is
+  called: a function that joins the handle it is given on every path, a
+  `pthread_t` by value or a `std::thread` by reference, directly or through
+  another such function. `thread-arg-escape`, `thread-arg-freed` and
+  `data-race` no longer report a thread its creator waits for that way, and
+  `thread-local-escape` now reports a thread-local used after it. In a
+  project analysis the helper may be defined in another unit.
+- Of the eleven rules, only `condition-wait` and `unsafe-signal-handler` now
+  have project conclusions equal to their single-unit ones (v0.7.0 said six):
+  `unreaped-child` reads where children are collected, and `thread-arg-escape`,
+  `thread-arg-freed` and `thread-local-escape` read which helpers other units
+  define that join the thread they are handed.
+- `missing-join` no longer depends on how the platform represents `pthread_t`:
+  a handle passed to a function with no body in the unit may be joined there,
+  so it is not reported. macOS, where `pthread_t` is a pointer, already behaved
+  that way; Linux, where it is an integer, reported it.
 
 ## v0.7.0
 

@@ -80,10 +80,14 @@ What each of the newer rules establishes, and what it deliberately does not:
   (Dekker) ordering, ABA, and in a project analysis flags with external linkage.
 
 Current implementation boundaries:
-- Whole-project analysis reads a `compile_commands.json`; six kinds of fact cross the unit
+- Whole-project analysis reads a `compile_commands.json`; seven kinds of fact cross the unit
   boundary and nothing else does (see [docs/cross-tu-mode.md](docs/cross-tu-mode.md)).
 - Direct-call interprocedural propagation is supported for thread context, thread lifecycle, and
   lock state.
+- A join need not be written in place: a function that joins the handle it is given on every
+  normal return — a `pthread_t` by value or a `std::thread` by reference, directly or through
+  another such function — counts as a join wherever it is called, for every rule that asks
+  whether a thread has ended. In a project analysis it may be defined in another unit.
 - `MissingJoin` supports both `pthread` and `std::thread`.
 - `DeadlockLockOrder` is intentionally conservative and does not yet model arbitrary `3+` lock
   cycles across the whole program.

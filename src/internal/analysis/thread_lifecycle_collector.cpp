@@ -357,17 +357,23 @@ namespace ctrace::concurrency::internal::analysis
 
                 // A handle handed to anything other than a lifecycle operation may have its
                 // ownership taken over — `v.push_back(std::move(t))` moves it into storage this
-                // analysis cannot name, and the join then happens through that storage.
+                // analysis cannot name, and the join then happens through that storage. A
+                // function with no body here may as well join a handle it is given by value:
+                // `pthread_t` is a pointer on some platforms and an integer on others, and the
+                // answer must not depend on which.
                 for (const llvm::Instruction& instruction : block)
                 {
                     const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
                     if (call == nullptr || !transfersHandleOwnership(*call, classifier_))
                         continue;
 
+                    const llvm::Function* callee = call->getCalledFunction();
+                    const bool opaque = callee == nullptr || callee->isDeclaration();
                     for (const llvm::Use& argument : call->args())
                     {
                         const llvm::Value* value = argument.get();
-                        if (value == nullptr || !value->getType()->isPointerTy())
+                        if (value == nullptr || !(value->getType()->isPointerTy() ||
+                                                  (opaque && value->getType()->isIntegerTy())))
                             continue;
 
                         if (const auto group = canonicalStorageGroupId(*value); group.has_value())
