@@ -372,7 +372,8 @@ Rendered formats:
 The JSON report also carries a `functions` array summarising, per function, the shared
 accesses seen, how many were protected, how many were writes, and which thread entries
 reach it. Those counts come from the facts the selected rules asked for: a narrow
-`--rules` run reports what it computed and nothing more. When no selected rule reads the
+`--rules` run reports what it computed and nothing more, in a project analysis as in a
+single-unit one. When no selected rule reads the
 shared accesses, the three count fields are **absent** from each entry rather than
 rendered as zero — zero means the accesses were examined and none was found, which is a
 different statement. `--rules=all` reports everything.

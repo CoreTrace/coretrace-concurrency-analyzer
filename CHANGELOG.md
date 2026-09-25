@@ -10,6 +10,16 @@ still change between minor releases.
 
 ## Unreleased
 
+- **Report change.** A narrow project analysis builds only what crosses a unit
+  boundary for the selected rules. Each rule reads a known set of cross-unit
+  facts: an `extern` defined elsewhere, a helper's lock effects, the entries
+  other units spawn, whether the program starts threads, a handle joined
+  elsewhere. Six rules read none, and their project conclusions are their
+  single-unit ones. Diagnostics are unchanged for every rule, but the JSON
+  `functions` array of a narrow project run now lists what its rules computed,
+  as a single-unit run already did: a `--rules=missing-join` analysis of the
+  49-unit workload no longer lists 865 functions only because a thread reaches
+  them. `--rules=all` and any selection reading thread entries are unchanged.
 - A project analysis no longer analyses a unit twice because it declares a
   constant that another unit defines. Every C++ unit that uses a polymorphic
   class declares its vtable and type information, and each such declaration

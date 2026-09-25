@@ -41,9 +41,9 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                    std::to_string(diagnostic.location.column) + '|' + diagnostic.message;
         }
 
-        /// True when the program-wide view contradicts a fact this unit concluded alone and a
-        /// selected rule reads. Only these units are worth analysing a second time. Decided from
-        /// the facts alone: the unit's module need not be live.
+        /// True when the program-wide view contradicts a fact this unit concluded alone, through a
+        /// channel a selected rule reads. Only these units are worth analysing a second time.
+        /// Decided from the facts alone: the unit's module need not be live.
         bool crossTUChangesFacts(const TUFacts& facts, const ProgramSymbolIndex& index,
                                  const FactSelection& selection)
         {
@@ -51,7 +51,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
 
             // An `extern` this unit dropped as unresolved turns out to name real storage, which
             // changes what its accesses mean.
-            if (selection.accesses)
+            if (selection.channels.externGlobals)
             {
                 for (const std::string& global : program.declaredGlobals)
                 {
@@ -61,29 +61,32 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
             }
 
             // This unit forks, and the threads that make the fork unsafe are started elsewhere.
-            if (!facts.processForks.empty() && !facts.programCreatesThreads &&
-                index.programCreatesThreads())
+            if (selection.channels.programThreads && !facts.processForks.empty() &&
+                !facts.programCreatesThreads && index.programCreatesThreads())
             {
                 return true;
             }
 
             // A handle this unit creates is joined by another.
-            for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
+            if (selection.channels.resolvedHandles)
             {
-                if (fact.action != ThreadLifecycleAction::Create)
-                    continue;
-
-                const auto handle = program.handleSymbolsByGroupId.find(fact.handleGroupId);
-                if (handle != program.handleSymbolsByGroupId.end() &&
-                    index.resolvesHandleElsewhere(handle->second))
+                for (const ThreadLifecycleFact& fact : facts.threadLifecycles)
                 {
-                    return true;
+                    if (fact.action != ThreadLifecycleAction::Create)
+                        continue;
+
+                    const auto handle = program.handleSymbolsByGroupId.find(fact.handleGroupId);
+                    if (handle != program.handleSymbolsByGroupId.end() &&
+                        index.resolvesHandleElsewhere(handle->second))
+                    {
+                        return true;
+                    }
                 }
             }
 
             // A helper this unit only sees declared turns out to take a lock for its caller, which
             // changes the lock state its accesses and lock orders are judged under.
-            if (selection.lockState())
+            if (selection.channels.helperLockEffects)
             {
                 for (const std::string& function : program.declaredFunctions)
                 {
@@ -92,6 +95,9 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 }
             }
 
+            // An entry of this unit is spawned more often, or in a loop, somewhere else.
+            if (!selection.channels.entryConcurrency)
+                return false;
             for (const auto& [id, symbol] : program.functionSymbolsById)
             {
                 if (program.declaredFunctions.contains(symbol) || !index.isThreadEntry(symbol))

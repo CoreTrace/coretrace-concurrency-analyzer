@@ -260,6 +260,51 @@ The two rules add about 2% of analysis time and 0.3% of wall time. The RSS
 ranges overlap, so no memory difference is claimed. Both selections report the
 same 880 function entries and no diagnostic on this workload.
 
+## Cross-unit facts per selected rule: follow-up measurement
+
+Measured on 2026-09-25, comparing `3065c69` (after the second-pass gate fix,
+#85) with the selection-aware project floor (#52), same machine, toolchain and
+Release settings as above. Other processes compiled on this machine throughout,
+with the load average reaching 116 during the runs, so wall-clock and
+`analysis-ms` figures are not recorded: the all-rules control, doing identical
+work on both sides, varied from 5.1 to 9.3 s from one run to the next.
+
+The argument rests on figures the load cannot move. Analysis requests are
+counted, as for the rule-aware selection above, by a throwaway counter inside
+`LlvmFunctionAnalysisProvider`, here over the whole 49-unit workload; two
+all-rules runs gave the same counts to the unit. Every function gets one
+dominator tree and one loop info in every row (65,258 of each are built), so a
+narrow run saves the collectors that walk those functions, which is what the
+requests count.
+
+| 49 units, by selection | Dominator-tree requests before | after | Loop-info requests before | after | `functions` before | after |
+| --- | --- | --- | --- | --- | --- | --- |
+| `--rules=all` (control) | 557,737 | 557,737 | 326,295 | 326,295 | 880 | 880 |
+| `--rules=data-race` | 427,216 | 361,958 | 261,037 | 195,779 | 880 | 880 |
+| `--rules=deadlock-lock-order` | 438,455 | 373,197 | 261,037 | 195,779 | 865 | 865 |
+| `--rules=missing-join` | 261,069 | 130,521 | 195,779 | 130,521 | 865 | 0 |
+| `--rules=condition-wait` | 326,327 | 130,516 | 261,037 | 130,516 | 865 | 0 |
+| `--rules=fork-after-thread` | 261,069 | 130,516 | 195,779 | 130,516 | 865 | 0 |
+
+Diagnostics are identical in every row, and no unit is reanalysed on either
+side: the gate fix had already removed the two needless second passes. A rule
+that reads no cross-unit channel now costs a project run what it costs the units
+on their own, and data-race, which reads three of the five channels, no longer
+builds the thread lifecycles and fork facts the old floor added for every rule.
+
+Process CPU time (user plus system) is less sensitive to the load than
+wall-clock time, and is given as an indication only, as the median of five
+interleaved runs: 28.4 s before and 28.8 s after for the all-rules control
+(spread 9%), 11.3 to 9.9 s for `--rules=condition-wait` (−12%), 14.2 to 11.6 s
+for `--rules=missing-join` (−19%, but with a 50% spread), and within the spread
+for the other selections. Peak RSS ranges overlap in every row, so no memory
+change is claimed.
+
+The `functions` column is the report change the selection makes: a narrow run
+of a rule that reads no entry concurrency lists what its rules computed, as a
+single-unit run of that rule already did. The 865 entries recorded above for
+`--rules=missing-join` came from the project floor and no longer appear.
+
 ## Scaling
 
 After that change, with the cross-TU thread pool active:
@@ -324,11 +369,10 @@ Ranked by measured weight, not by guess.
    above records the effect: modules are bounded by `--max-live-units`, and the
    remaining floor is the bitcode held in memory (138 MB here). Spilling it to
    a temporary file is the next step on this axis.
-4. **Reconsider unconditional fact building — completed.** The measurement above
-   records the effect. What remains on this axis is the project-mode floor: the
-   symbol index and the second-pass gate read the entry concurrency, the thread
-   lifecycles and the lock wrapper summaries of every unit whatever the rules,
-   so a narrow project run still pays for those.
+4. **Reconsider unconditional fact building — completed.** The measurements above
+   record the effect, first for a unit's own facts, then for the facts that
+   cross unit boundaries in a project analysis: each rule now reads a known set
+   of cross-unit channels, and a project run builds only those.
 
 ## Machine
 
