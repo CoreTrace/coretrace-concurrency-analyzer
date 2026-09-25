@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <initializer_list>
 #include <map>
 #include <memory>
@@ -17,6 +18,7 @@
 namespace llvm
 {
     class LLVMContext;
+    class MemoryBuffer;
     class Module;
 } // namespace llvm
 
@@ -185,17 +187,20 @@ namespace ctrace::concurrency
         }
     };
 
-    /// One unit's IR, owned for exactly as long as the analysis holds it. The context is
-    /// declared first so the module is destroyed before the context it lives in; assignment is
-    /// not offered because the generated one would replace the context under a live module.
+    /// One unit's IR, owned for exactly as long as the analysis holds it. The bytes and the
+    /// context are declared first so the module is destroyed before either; assignment is not
+    /// offered because the generated one would replace the context under a live module.
     struct LoadedUnit
     {
+        /// The bytes the module was parsed from, when this load read them from a file. They
+        /// live as long as the module and are released with it.
+        std::unique_ptr<llvm::MemoryBuffer> bitcode;
         std::unique_ptr<llvm::LLVMContext> context;
         std::unique_ptr<llvm::Module> module;
 
         LoadedUnit();
-        LoadedUnit(std::unique_ptr<llvm::LLVMContext> context,
-                   std::unique_ptr<llvm::Module> module);
+        LoadedUnit(std::unique_ptr<llvm::LLVMContext> context, std::unique_ptr<llvm::Module> module,
+                   std::unique_ptr<llvm::MemoryBuffer> bitcode = nullptr);
         ~LoadedUnit();
         LoadedUnit(LoadedUnit&&) noexcept;
         LoadedUnit& operator=(LoadedUnit&&) = delete;
@@ -220,6 +225,13 @@ namespace ctrace::concurrency
         /// `source_filename` the bitcode carries.
         void add(std::string identifier, std::string bitcode);
 
+        /// Adds a unit whose bitcode stays in the file at `path` instead of in memory. The file
+        /// is read here only to record its size and digest, and again by every load, which
+        /// fails when the file no longer holds exactly those bytes: a unit analysed twice sees
+        /// the same IR both times, or is reported as failed. Nothing stays open between loads,
+        /// and a file that cannot be read here fails the unit's first load.
+        void addFile(std::string identifier, std::filesystem::path path);
+
         [[nodiscard]] std::size_t size() const noexcept
         {
             return units_.size();
@@ -228,7 +240,8 @@ namespace ctrace::concurrency
         {
             return units_.at(index).identifier;
         }
-        /// Bytes of bitcode held for the whole analysis: the memory floor of a project.
+        /// Bytes of bitcode held for the whole analysis: the memory floor of a project. A unit
+        /// added from a file holds none.
         [[nodiscard]] std::size_t bitcodeBytes() const noexcept;
 
         /// Parses unit `index` into a context of its own. On failure the result holds no
@@ -236,10 +249,19 @@ namespace ctrace::concurrency
         [[nodiscard]] LoadedUnit load(std::size_t index, CompileError& error) const;
 
       private:
+        struct FileBitcode
+        {
+            std::filesystem::path path;
+            std::uint64_t size = 0;
+            std::uint64_t digest = 0;
+            /// Why the file could not be read when the unit was added, if it could not.
+            CompileError error;
+        };
         struct Unit
         {
             std::string identifier;
             std::string bitcode;
+            std::optional<FileBitcode> file;
         };
         std::vector<Unit> units_;
     };

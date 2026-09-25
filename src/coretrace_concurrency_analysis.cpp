@@ -15,17 +15,46 @@
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/MemoryBuffer.h>
+#include <llvm/Support/xxhash.h>
 
 #include <numeric>
+#include <string_view>
 #include <utility>
 
 namespace ctrace::concurrency
 {
+    namespace
+    {
+        void setBitcodeReadError(CompileError& error, std::string message)
+        {
+            error.code = make_error_code(CompileErrc::BitcodeReadFailed);
+            error.phase = CompilePhase::IRParse;
+            error.message = std::move(message);
+        }
+
+        /// Reads the whole file rather than mapping it: a mapping would fault if another process
+        /// truncated the file while the parser reads it.
+        llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>>
+        readBitcodeFile(const std::filesystem::path& path)
+        {
+            return llvm::MemoryBuffer::getFile(path.string(), /*IsText=*/false,
+                                               /*RequiresNullTerminator=*/false,
+                                               /*IsVolatile=*/true);
+        }
+
+        std::string cannotRead(const std::filesystem::path& path, const std::error_code& error)
+        {
+            return "cannot read bitcode from '" + path.string() + "': " + error.message();
+        }
+    } // namespace
+
     LoadedUnit::LoadedUnit() = default;
 
     LoadedUnit::LoadedUnit(std::unique_ptr<llvm::LLVMContext> context,
-                           std::unique_ptr<llvm::Module> module)
-        : context(std::move(context)), module(std::move(module))
+                           std::unique_ptr<llvm::Module> module,
+                           std::unique_ptr<llvm::MemoryBuffer> bitcode)
+        : bitcode(std::move(bitcode)), context(std::move(context)), module(std::move(module))
     {
     }
 
@@ -38,6 +67,22 @@ namespace ctrace::concurrency
         units_.push_back(Unit{.identifier = std::move(identifier), .bitcode = std::move(bitcode)});
     }
 
+    void ProjectUnitSource::addFile(std::string identifier, std::filesystem::path path)
+    {
+        FileBitcode file{.path = std::move(path)};
+        // The bytes are released as soon as their size and digest are known.
+        if (llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer = readBitcodeFile(file.path))
+        {
+            file.size = (*buffer)->getBufferSize();
+            file.digest = llvm::xxh3_64bits((*buffer)->getBuffer());
+        }
+        else
+        {
+            setBitcodeReadError(file.error, cannotRead(file.path, buffer.getError()));
+        }
+        units_.push_back(Unit{.identifier = std::move(identifier), .file = std::move(file)});
+    }
+
     std::size_t ProjectUnitSource::bitcodeBytes() const noexcept
     {
         return std::accumulate(units_.begin(), units_.end(), std::size_t{0},
@@ -48,15 +93,42 @@ namespace ctrace::concurrency
     LoadedUnit ProjectUnitSource::load(std::size_t index, CompileError& error) const
     {
         const Unit& unit = units_.at(index);
+        std::string_view bitcode = unit.bitcode;
+        std::unique_ptr<llvm::MemoryBuffer> fileBytes;
+        if (unit.file.has_value())
+        {
+            const FileBitcode& file = *unit.file;
+            if (file.error.hasError())
+            {
+                error = file.error;
+                return {};
+            }
+            llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> buffer = readBitcodeFile(file.path);
+            if (!buffer)
+            {
+                setBitcodeReadError(error, cannotRead(file.path, buffer.getError()));
+                return {};
+            }
+            if ((*buffer)->getBufferSize() != file.size ||
+                llvm::xxh3_64bits((*buffer)->getBuffer()) != file.digest)
+            {
+                setBitcodeReadError(error, "bitcode in '" + file.path.string() +
+                                               "' changed since the unit was added");
+                return {};
+            }
+            fileBytes = std::move(*buffer);
+            bitcode = std::string_view(fileBytes->getBufferStart(), fileBytes->getBufferSize());
+        }
+
         // A context of its own per load: contexts are not thread-safe, and nothing in the
         // analysis compares type pointers across units.
         auto context = std::make_unique<llvm::LLVMContext>();
         std::unique_ptr<llvm::Module> module =
-            internal::LLVMIRLoader().parseBC(unit.bitcode, unit.identifier, *context, error);
+            internal::LLVMIRLoader().parseBC(bitcode, unit.identifier, *context, error);
         if (module == nullptr)
             return {};
 
-        return {std::move(context), std::move(module)};
+        return {std::move(context), std::move(module), std::move(fileBytes)};
     }
 
     ProjectConcurrencyAnalyzer::ProjectConcurrencyAnalyzer(AnalysisOptions options)
