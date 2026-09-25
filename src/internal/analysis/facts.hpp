@@ -2,6 +2,7 @@
 #pragma once
 
 #include "lock_wrapper_summaries.hpp"
+#include "thread_completion_analysis.hpp"
 
 #include "coretrace_concurrency_analysis.hpp"
 
@@ -377,6 +378,10 @@ namespace ctrace::concurrency::internal::analysis
         /// What each function of this unit does to the locks its callers hand it. Published so a
         /// caller in another unit can see a helper defined here.
         LockWrapperSummaries lockWrapperSummaries;
+        /// The parameters each function of this unit joins on every normal return, by function
+        /// id. Published so a caller in another unit ends the thread it hands a helper defined
+        /// here.
+        std::unordered_map<std::string, std::vector<JoinedParameter>> joiningHelpers;
         /// Handle group ids naming a global that this unit joins or detaches. A thread created
         /// in one unit and joined in another is resolved, and only the whole program sees it.
         std::unordered_set<std::string> resolvedGlobalHandleIds;

@@ -3,6 +3,7 @@
 
 #include "internal/analysis/ir_utils.hpp"
 #include "internal/analysis/lock_wrapper_summaries.hpp"
+#include "internal/analysis/thread_completion_analysis.hpp"
 
 #include <string>
 #include <unordered_map>
@@ -80,6 +81,11 @@ namespace ctrace::concurrency::internal::analysis
         /// True when some unit joins or detaches the thread handle held in this global.
         [[nodiscard]] bool resolvesHandleElsewhere(const std::string& symbol) const;
 
+        /// The parameters a helper defined in some other unit joins on every normal return, or
+        /// null when no unit summarises it as joining any.
+        [[nodiscard]] const std::vector<JoinedParameter>*
+        joinedParametersOf(const std::string& symbol) const;
+
         [[nodiscard]] const ProgramDefinedGlobals& definedGlobals() const noexcept
         {
             return definedGlobals_;
@@ -102,6 +108,7 @@ namespace ctrace::concurrency::internal::analysis
         ProgramDefinedGlobals definedGlobals_;
         std::unordered_map<std::string, std::vector<ParameterLockEffect>> lockSummariesBySymbol_;
         std::unordered_set<std::string> resolvedHandleSymbols_;
+        std::unordered_map<std::string, std::vector<JoinedParameter>> joiningHelpersBySymbol_;
         bool reapsChildren_ = false;
     };
 } // namespace ctrace::concurrency::internal::analysis
