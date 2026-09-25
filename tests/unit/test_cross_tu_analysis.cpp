@@ -2,13 +2,16 @@
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
 
+#include <llvm/ADT/SmallString.h>
 #include <llvm/Bitcode/BitcodeWriter.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
+#include <llvm/Support/FileSystem.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <algorithm>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <optional>
@@ -20,6 +23,7 @@
 namespace
 {
     using ctrace::concurrency::AnalysisOptions;
+    using ctrace::concurrency::CompileErrc;
     using ctrace::concurrency::CompileError;
     using ctrace::concurrency::CompileRequest;
     using ctrace::concurrency::CompileResult;
@@ -1158,6 +1162,275 @@ namespace
         return ok;
     }
 
+    /// Bitcode files for one test, removed with it.
+    class BitcodeFiles
+    {
+      public:
+        BitcodeFiles()
+        {
+            llvm::SmallString<128> created;
+            if (!llvm::sys::fs::createUniqueDirectory("coretrace-units", created))
+                directory_ = std::string(created);
+        }
+        ~BitcodeFiles()
+        {
+            std::error_code ignored;
+            if (!directory_.empty())
+                std::filesystem::remove_all(directory_, ignored);
+        }
+        BitcodeFiles(const BitcodeFiles&) = delete;
+        BitcodeFiles& operator=(const BitcodeFiles&) = delete;
+
+        [[nodiscard]] bool ready() const
+        {
+            return !directory_.empty();
+        }
+
+        /// Writes `bytes` under `name`, replacing what was there; empty on failure.
+        [[nodiscard]] std::filesystem::path write(std::string_view name,
+                                                  std::string_view bytes) const
+        {
+            const std::filesystem::path path = directory_ / name;
+            std::ofstream out(path, std::ios::binary | std::ios::trunc);
+            out.write(bytes.data(), static_cast<std::streamsize>(bytes.size()));
+            out.close();
+            return out ? path : std::filesystem::path{};
+        }
+
+      private:
+        std::filesystem::path directory_;
+    };
+
+    /// The units of `project`, each reading its bitcode from a file of its own.
+    std::optional<ProjectUnitSource> fileBacked(const CompiledProject& project,
+                                                const BitcodeFiles& files)
+    {
+        ProjectUnitSource units;
+        for (std::size_t index = 0; index < project.units().size(); ++index)
+        {
+            const std::filesystem::path path =
+                files.write("unit-" + std::to_string(index) + ".bc", project.bitcodeAt(index));
+            if (path.empty())
+                return std::nullopt;
+            units.addFile(project.units().identifier(index), path);
+        }
+        return units;
+    }
+
+    /// A report as a reader sees it: every diagnostic, then every function summary, in the order
+    /// the report lists them.
+    std::vector<std::string> reportInOrder(const DiagnosticReport& report)
+    {
+        std::vector<std::string> lines;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+            lines.push_back(diagnostic.id + '|' + describeFinding(diagnostic));
+        for (const FunctionSummary& function : report.functions)
+            lines.push_back(function.file + '|' + function.name);
+        return lines;
+    }
+
+    /// A unit read from a file is the unit read from memory: the same report, in the same
+    /// order, under the same identifiers, for every project fixture, including one that goes
+    /// through a second pass and so reads its file twice (#51).
+    bool testFileBackedUnitsMatchMemoryBackedOnes()
+    {
+        bool ok = true;
+        std::size_t reanalysed = 0;
+        for (const ProjectFixture& fixture : everyProjectFixture())
+        {
+            CompiledProject project;
+            const BitcodeFiles files;
+            if (!compileFixture(fixture, project) ||
+                !assertTrue(files.ready(), "a scratch directory is created"))
+            {
+                return false;
+            }
+            const std::optional<ProjectUnitSource> fromFiles = fileBacked(project, files);
+            if (!assertTrue(fromFiles.has_value(), "the bitcode files are written"))
+                return false;
+
+            bool sameUnits = fromFiles->size() == project.units().size();
+            for (std::size_t index = 0; sameUnits && index < fromFiles->size(); ++index)
+                sameUnits = fromFiles->identifier(index) == project.units().identifier(index);
+
+            const ProjectAnalysisReport memory =
+                ProjectConcurrencyAnalyzer().analyze(project.units());
+            const ProjectAnalysisReport file = ProjectConcurrencyAnalyzer().analyze(*fromFiles);
+            reanalysed += file.reanalyzedUnitCount;
+            if (sameUnits && file.complete() &&
+                file.reanalyzedUnitCount == memory.reanalyzedUnitCount &&
+                reportInOrder(file.report) == reportInOrder(memory.report))
+            {
+                continue;
+            }
+
+            std::cerr << "[FAIL] " << fixture.units.front()
+                      << ": the file-backed source reports differently\n";
+            ok = false;
+        }
+        return assertTrue(reanalysed > 0,
+                          "some fixture reads a unit from its file again for a second pass") &&
+               ok;
+    }
+
+    /// A file that no longer holds the bytes it held when its unit was added fails that unit, by
+    /// name and with the reason, and the rest of the project is still analysed (#51).
+    bool testChangedTruncatedOrRemovedFileFailsItsUnit()
+    {
+        CompiledProject project;
+        const BitcodeFiles files;
+        if (!project.add("cross-tu-data-race/main.c") ||
+            !project.add("cross-tu-data-race/worker.c") || !files.ready())
+        {
+            return false;
+        }
+
+        const std::string& worker = project.bitcodeAt(1);
+        std::optional<ProjectUnitSource> units = fileBacked(project, files);
+        const std::filesystem::path changed = files.write("changed.bc", worker);
+        const std::filesystem::path truncated = files.write("truncated.bc", worker);
+        const std::filesystem::path removed = files.write("removed.bc", worker);
+        if (!units.has_value() || changed.empty() || truncated.empty() || removed.empty())
+            return false;
+        units->addFile("changed-worker.c", changed);
+        units->addFile("truncated-worker.c", truncated);
+        units->addFile("removed-worker.c", removed);
+
+        // Same size, one byte different: only the content says it changed.
+        std::string flipped = worker;
+        flipped[flipped.size() / 2] = static_cast<char>(flipped[flipped.size() / 2] ^ 0x01);
+        std::error_code removeError;
+        const bool edited =
+            !files.write("changed.bc", flipped).empty() &&
+            !files.write("truncated.bc", std::string_view(worker).substr(0, worker.size() / 2))
+                 .empty() &&
+            std::filesystem::remove(removed, removeError);
+        if (!assertTrue(edited, "the files are edited after their units were added"))
+            return false;
+
+        const ProjectAnalysisReport analysis = ProjectConcurrencyAnalyzer().analyze(*units);
+        const std::vector<ctrace::concurrency::FailedUnit>& failed = analysis.failedUnits;
+        const bool named = failed.size() == 3 && failed[0].identifier == "changed-worker.c" &&
+                           failed[1].identifier == "truncated-worker.c" &&
+                           failed[2].identifier == "removed-worker.c";
+        return assertTrue(named, "each unit whose file changed is named, in unit order") &&
+               assertTrue(named && failed[0].error.code == CompileErrc::BitcodeReadFailed &&
+                              failed[1].error.code == CompileErrc::BitcodeReadFailed &&
+                              failed[2].error.code == CompileErrc::BitcodeReadFailed,
+                          "each carries a read failure") &&
+               assertTrue(named &&
+                              failed[0].error.message.find("changed since") != std::string::npos &&
+                              failed[1].error.message.find("changed since") != std::string::npos &&
+                              failed[2].error.message.find("cannot read") != std::string::npos,
+                          "with a message saying why") &&
+               assertTrue(!analysis.complete(), "a report missing a unit is not complete") &&
+               assertTrue(countRacesOn(analysis.report, "shared_counter") > 0,
+                          "the units whose files are intact are still analysed together");
+    }
+
+    /// Bytes that are not bitcode fail the same way from a file as from memory (#51).
+    bool testMalformedFileFailsLikeMalformedMemory()
+    {
+        const BitcodeFiles files;
+        const std::filesystem::path path = files.write("not-bitcode.bc", "this is not bitcode");
+        if (!files.ready() || path.empty())
+            return false;
+
+        ProjectUnitSource fromFile;
+        fromFile.addFile("not-bitcode.c", path);
+        ProjectUnitSource fromMemory;
+        fromMemory.add("not-bitcode.c", "this is not bitcode");
+
+        CompileError fileError;
+        CompileError memoryError;
+        const LoadedUnit file = fromFile.load(0, fileError);
+        const LoadedUnit memory = fromMemory.load(0, memoryError);
+        return assertTrue(!file.ok() && !memory.ok(), "neither loads") &&
+               assertTrue(fileError.code == CompileErrc::BitcodeParseFailed &&
+                              memoryError.code == CompileErrc::BitcodeParseFailed,
+                          "both fail to parse") &&
+               assertTrue(fileError.message == memoryError.message, "with the same explanation");
+    }
+
+    /// A file that cannot be read when its unit is added leaves nothing to compare a later read
+    /// against, so the unit fails with that reason even if the file appears afterwards (#51).
+    bool testFileUnreadableWhenAddedFailsItsUnit()
+    {
+        CompiledProject project;
+        const BitcodeFiles files;
+        if (!project.add("cross-tu-data-race/worker.c") || !files.ready())
+            return false;
+
+        const std::filesystem::path late = files.write("late.bc", "");
+        std::error_code removeError;
+        if (late.empty() || !std::filesystem::remove(late, removeError))
+            return false;
+
+        ProjectUnitSource units;
+        units.addFile("late-worker.c", late);
+        if (!assertTrue(!files.write("late.bc", project.bitcodeAt(0)).empty(),
+                        "the file appears after its unit was added"))
+            return false;
+
+        CompileError error;
+        const LoadedUnit unit = units.load(0, error);
+        return assertTrue(!unit.ok(), "the unit does not load") &&
+               assertTrue(error.code == CompileErrc::BitcodeReadFailed &&
+                              error.message.find("cannot read") != std::string::npos,
+                          "and fails for the read that failed when it was added");
+    }
+
+    /// Only bytes held in memory make the memory floor: a unit read from a file holds none
+    /// between its loads (#51).
+    bool testFileBackedUnitsHoldNoBitcode()
+    {
+        CompiledProject project;
+        const BitcodeFiles files;
+        if (!project.add("cross-tu-data-race/main.c") ||
+            !project.add("cross-tu-data-race/worker.c") || !files.ready())
+        {
+            return false;
+        }
+        const std::filesystem::path worker = files.write("worker.bc", project.bitcodeAt(1));
+        if (worker.empty())
+            return false;
+
+        ProjectUnitSource mixed;
+        mixed.add(project.units().identifier(0), project.bitcodeAt(0));
+        mixed.addFile(project.units().identifier(1), worker);
+
+        return assertTrue(mixed.size() == 2, "both units are part of the source") &&
+               assertTrue(mixed.bitcodeBytes() == project.bitcodeAt(0).size(),
+                          "only the unit held in memory counts towards the bitcode held") &&
+               assertTrue(countRacesOn(ProjectConcurrencyAnalyzer().analyze(mixed).report,
+                                       "shared_counter") > 0,
+                          "and the two units are still analysed together");
+    }
+
+    /// The bound on live units holds for units read from files, and does not change what the
+    /// analysis finds (#51).
+    bool testFileBackedUnitsRespectTheLiveBound()
+    {
+        CompiledProject project;
+        const BitcodeFiles files;
+        if (!addFourUnitProject(project) || !files.ready())
+            return false;
+        const std::optional<ProjectUnitSource> units = fileBacked(project, files);
+        if (!assertTrue(units.has_value(), "the bitcode files are written"))
+            return false;
+
+        AnalysisOptions one;
+        one.maxLiveUnits = 1;
+        const ProjectAnalysisReport file = ProjectConcurrencyAnalyzer(one).analyze(*units);
+        const ProjectAnalysisReport memory =
+            ProjectConcurrencyAnalyzer(one).analyze(project.units());
+
+        return assertTrue(file.peakLiveUnits == 1, "a bound of one keeps one unit live") &&
+               assertTrue(!file.report.diagnostics.empty() &&
+                              diagnosticLines(file.report) == diagnosticLines(memory.report),
+                          "and finds what the memory-backed run finds");
+    }
+
     /// An empty project is a valid input, not a crash.
     bool testEmptyProjectIsAnEmptyReport()
     {
@@ -1205,6 +1478,12 @@ int main()
     ok = testLiveUnitBoundIsRespected() && ok;
     ok = testUnitWithAnotherAbiIsSkippedByName() && ok;
     ok = testConcurrencyDoesNotChangeTheReport() && ok;
+    ok = testFileBackedUnitsMatchMemoryBackedOnes() && ok;
+    ok = testChangedTruncatedOrRemovedFileFailsItsUnit() && ok;
+    ok = testMalformedFileFailsLikeMalformedMemory() && ok;
+    ok = testFileUnreadableWhenAddedFailsItsUnit() && ok;
+    ok = testFileBackedUnitsHoldNoBitcode() && ok;
+    ok = testFileBackedUnitsRespectTheLiveBound() && ok;
 
     if (!ok)
         return 1;
