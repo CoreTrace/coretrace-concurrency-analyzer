@@ -16,6 +16,13 @@ still change between minor releases.
   a `wait` in any unit counts, as a `wait` anywhere in the unit did before.
   `unreaped-child` therefore reads a cross-unit fact, and five rules, not six,
   have project conclusions equal to their single-unit ones.
+- A thread joined through a helper now counts as joined where the helper is
+  called: a function that joins the handle it is given on every path, a
+  `pthread_t` by value or a `std::thread` by reference, directly or through
+  another such function. `thread-arg-escape`, `thread-arg-freed` and
+  `data-race` no longer report a thread its creator waits for that way, and
+  `thread-local-escape` now reports a thread-local used after it. A helper
+  defined in another unit is not followed yet.
 
 ## v0.7.0
 

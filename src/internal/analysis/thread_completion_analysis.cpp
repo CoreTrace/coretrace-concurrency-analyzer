@@ -19,6 +19,7 @@
 
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace ctrace::concurrency::internal::analysis
@@ -74,6 +75,22 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
+        /// A call that waits for the thread whose handle is one of its operands: a join, or a
+        /// call to a helper that joins that parameter on every normal return.
+        struct JoinSite
+        {
+            const llvm::CallBase* call = nullptr;
+            unsigned operand = 0;
+            /// A `pthread_t` travels by value, loaded from the storage its creation wrote; a
+            /// `std::thread` is handed over by address.
+            bool byValue = false;
+
+            [[nodiscard]] const llvm::Value& handle() const
+            {
+                return *call->getArgOperand(operand);
+            }
+        };
+
         struct CountedLoop
         {
             const llvm::Value* induction = nullptr;
@@ -110,6 +127,28 @@ namespace ctrace::concurrency::internal::analysis
             return true;
         }
 
+        /// Blocks from which a normal return is reachable. The others only unwind, and a proof
+        /// about normal returns says nothing about them (see `completionCoversReturns`).
+        llvm::SmallPtrSet<const llvm::BasicBlock*, 32>
+        blocksReachingNormalReturn(const llvm::Function& function)
+        {
+            llvm::SmallPtrSet<const llvm::BasicBlock*, 32> reaching;
+            std::vector<const llvm::BasicBlock*> pending;
+            for (const auto& block : function)
+                if (llvm::isa<llvm::ReturnInst>(block.getTerminator()))
+                    pending.push_back(&block);
+            while (!pending.empty())
+            {
+                const auto* block = pending.back();
+                pending.pop_back();
+                if (!reaching.insert(block).second)
+                    continue;
+                for (const auto* predecessor : llvm::predecessors(block))
+                    pending.push_back(predecessor);
+            }
+            return reaching;
+        }
+
         bool arrayStorageUnchanged(const llvm::CallBase& create, const llvm::CallBase& join,
                                    const llvm::DominatorTree& dominators,
                                    const ConcurrencySymbolClassifier& classifier)
@@ -138,9 +177,9 @@ namespace ctrace::concurrency::internal::analysis
                     else if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user))
                     {
                         const auto kind = classifier.classify(*call);
-                        if (kind != CallKind::PThreadCreate && kind != CallKind::PThreadJoin &&
-                            kind != CallKind::StdThreadCtor && kind != CallKind::StdThreadJoin &&
-                            kind != CallKind::StdThreadDtor &&
+                        if (call != &join && kind != CallKind::PThreadCreate &&
+                            kind != CallKind::PThreadJoin && kind != CallKind::StdThreadCtor &&
+                            kind != CallKind::StdThreadJoin && kind != CallKind::StdThreadDtor &&
                             !llvm::isa<llvm::IntrinsicInst>(call))
                             return false;
                     }
@@ -148,7 +187,12 @@ namespace ctrace::concurrency::internal::analysis
                         return false;
                 }
             }
+            // A std::thread destroyed on the unwind path of its join is on no normal return.
+            const auto reaching = blocksReachingNormalReturn(*create.getFunction());
             for (const auto& block : *create.getFunction())
+            {
+                if (!reaching.contains(&block))
+                    continue;
                 for (const auto& instruction : block)
                 {
                     if (&instruction == &create || &instruction == &join ||
@@ -174,6 +218,7 @@ namespace ctrace::concurrency::internal::analysis
                                 return false;
                     }
                 }
+            }
             return true;
         }
 
@@ -263,9 +308,9 @@ namespace ctrace::concurrency::internal::analysis
             return result;
         }
 
-        const llvm::CallBase* joinedDereference(const llvm::CallBase& join)
+        const llvm::CallBase* joinedDereference(const JoinSite& join)
         {
-            const llvm::Value* value = join.getArgOperand(0);
+            const llvm::Value* value = &join.handle();
             llvm::SmallPtrSet<const llvm::Value*, 8> seen;
             while (seen.insert(value).second)
             {
@@ -280,7 +325,7 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
-        bool vectorJoinRange(const llvm::CallBase& create, const llvm::CallBase& join,
+        bool vectorJoinRange(const llvm::CallBase& create, const JoinSite& join,
                              const llvm::Loop& first, const llvm::Loop& second,
                              const CountedLoop& count, const llvm::DominatorTree& dominators)
         {
@@ -362,7 +407,7 @@ namespace ctrace::concurrency::internal::analysis
                             constructed = true;
                         else if (vectorMethod(*call, "~vector"))
                         {
-                            if (dominators.dominates(call, &join))
+                            if (dominators.dominates(call, join.call))
                                 return false;
                         }
                         else if (!vectorMethod(*call, "operator[]") &&
@@ -427,10 +472,10 @@ namespace ctrace::concurrency::internal::analysis
             return CountedLoop{slot, begin, end, compare->getPredicate()};
         }
 
-        const llvm::Value* handleAddress(const llvm::CallBase& call, bool join)
+        const llvm::Value* handleAddress(const llvm::Value& handle, bool byValue)
         {
-            const llvm::Value* value = call.getArgOperand(0);
-            if (join)
+            const llvm::Value* value = &handle;
+            if (byValue)
             {
                 const auto* load = llvm::dyn_cast<llvm::LoadInst>(value);
                 if (load == nullptr)
@@ -471,27 +516,26 @@ namespace ctrace::concurrency::internal::analysis
             return indexed;
         }
 
-        const llvm::Instruction* loopCompletion(const llvm::CallBase& create,
-                                                const llvm::CallBase& join,
+        const llvm::Instruction* loopCompletion(const llvm::CallBase& create, const JoinSite& join,
                                                 const llvm::LoopInfo& loops,
                                                 const llvm::DominatorTree& dominators,
                                                 const ConcurrencySymbolClassifier& classifier)
         {
             const llvm::Loop* first = loops.getLoopFor(create.getParent());
-            const llvm::Loop* second = loops.getLoopFor(join.getParent());
+            const llvm::Loop* second = loops.getLoopFor(join.call->getParent());
             if (first == nullptr || second == nullptr || first == second ||
                 first->getLoopLatch() == nullptr || second->getLoopLatch() == nullptr ||
                 !dominators.dominates(&create, first->getLoopLatch()->getTerminator()) ||
-                !dominators.dominates(&join, second->getLoopLatch()->getTerminator()) ||
+                !dominators.dominates(join.call, second->getLoopLatch()->getTerminator()) ||
                 !noEarlyNormalExit(*first) || !noEarlyNormalExit(*second))
                 return nullptr;
             const auto a = countedLoop(*first, dominators);
             const auto b = countedLoop(*second, dominators);
-            const bool indexed =
-                a && b && a->begin == b->begin && a->end == b->end &&
-                a->predicate == b->predicate &&
-                sameIndexedRange(handleAddress(create, false), handleAddress(join, true), *a, *b) &&
-                arrayStorageUnchanged(create, join, dominators, classifier);
+            const bool indexed = a && b && a->begin == b->begin && a->end == b->end &&
+                                 a->predicate == b->predicate &&
+                                 sameIndexedRange(handleAddress(*create.getArgOperand(0), false),
+                                                  handleAddress(join.handle(), true), *a, *b) &&
+                                 arrayStorageUnchanged(create, *join.call, dominators, classifier);
             if (!indexed && !(a && vectorJoinRange(create, join, *first, *second, *a, dominators)))
                 return nullptr;
             const auto* firstBranch =
@@ -507,6 +551,82 @@ namespace ctrace::concurrency::internal::analysis
                 !completionCoversReturns(create, *secondExit->getFirstNonPHIOrDbgOrLifetime()))
                 return nullptr;
             return &*secondExit->getFirstNonPHIOrDbgOrLifetime();
+        }
+
+        struct JoinedParameter
+        {
+            unsigned index = 0;
+            bool byValue = false;
+        };
+
+        /// The parameters each defined function joins on every normal return. A call passing a
+        /// thread handle there waits for that thread exactly as a join written in place does.
+        using JoiningHelpers =
+            std::unordered_map<const llvm::Function*, std::vector<JoinedParameter>>;
+
+        std::vector<JoinSite> joinSites(const llvm::Function& function,
+                                        const ConcurrencySymbolClassifier& classifier,
+                                        const JoiningHelpers& helpers)
+        {
+            std::vector<JoinSite> sites;
+            for (const llvm::BasicBlock& block : function)
+                for (const llvm::Instruction& instruction : block)
+                {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (call == nullptr || call->arg_empty())
+                        continue;
+                    const auto kind = classifier.classify(*call);
+                    if (kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin)
+                    {
+                        sites.push_back({call, 0, kind == CallKind::PThreadJoin});
+                        continue;
+                    }
+                    const auto helper = helpers.find(call->getCalledFunction());
+                    if (helper == helpers.end())
+                        continue;
+                    for (const JoinedParameter& parameter : helper->second)
+                        if (parameter.index < call->arg_size())
+                            sites.push_back({call, parameter.index, parameter.byValue});
+                }
+            return sites;
+        }
+
+        /// A function joins a parameter when a join of it, in place or through another joining
+        /// helper, stands on every path from the entry to a normal return. The parameter is
+        /// followed only through a local copy written once, so the handle joined is the one the
+        /// caller passed. Iterated to a fixed point: a helper calling a helper is found whatever
+        /// order the module lists them in.
+        JoiningHelpers collectJoiningHelpers(const llvm::Module& module,
+                                             const ConcurrencySymbolClassifier& classifier)
+        {
+            JoiningHelpers helpers;
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                for (const llvm::Function& function : module)
+                {
+                    if (function.isDeclaration())
+                        continue;
+                    const llvm::Instruction& entry = function.getEntryBlock().front();
+                    for (const JoinSite& site : joinSites(function, classifier, helpers))
+                    {
+                        const auto* parameter =
+                            llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
+                        if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
+                            continue;
+                        std::vector<JoinedParameter>& joined = helpers[&function];
+                        bool known = false;
+                        for (const JoinedParameter& existing : joined)
+                            known = known || existing.index == parameter->getArgNo();
+                        if (known)
+                            continue;
+                        joined.push_back({parameter->getArgNo(), site.byValue});
+                        changed = true;
+                    }
+                }
+            }
+            return helpers;
         }
     } // namespace
 
@@ -537,11 +657,11 @@ namespace ctrace::concurrency::internal::analysis
                                                  const ConcurrencySymbolClassifier& classifier,
                                                  LlvmFunctionAnalysisProvider& analyses)
     {
+        const JoiningHelpers helpers = collectJoiningHelpers(module, classifier);
         ThreadCompletionMap result;
         for (const llvm::Function& function : module)
         {
             std::vector<const llvm::CallBase*> creates;
-            std::vector<const llvm::CallBase*> joins;
             for (const llvm::BasicBlock& block : function)
                 for (const llvm::Instruction& instruction : block)
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
@@ -549,20 +669,21 @@ namespace ctrace::concurrency::internal::analysis
                         const auto kind = classifier.classify(*call);
                         if (kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor)
                             creates.push_back(call);
-                        else if (kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin)
-                            joins.push_back(call);
                     }
-            if (creates.empty() || joins.empty())
+            if (creates.empty())
+                continue;
+            const std::vector<JoinSite> joins = joinSites(function, classifier, helpers);
+            if (joins.empty())
                 continue;
             const auto& dominators = analyses.getDominatorTree(function);
             const auto& loops = analyses.getLoopInfo(function);
             for (const auto* create : creates)
-                for (const auto* join : joins)
+                for (const JoinSite& join : joins)
                 {
-                    if (create->arg_empty() || join->arg_empty())
+                    if (create->arg_empty())
                         continue;
                     if (const auto* barrier =
-                            loopCompletion(*create, *join, loops, dominators, classifier))
+                            loopCompletion(*create, join, loops, dominators, classifier))
                     {
                         result.emplace(create, barrier);
                         break;
@@ -570,10 +691,9 @@ namespace ctrace::concurrency::internal::analysis
                     if (loops.getLoopFor(create->getParent()) != nullptr)
                         continue;
                     const auto first = canonicalStorageGroupId(*create->getArgOperand(0));
-                    const auto second = canonicalStorageGroupId(*join->getArgOperand(0));
-                    const auto* createAddress = handleAddress(*create, false);
-                    const auto* joinAddress =
-                        handleAddress(*join, classifier.classify(*join) == CallKind::PThreadJoin);
+                    const auto second = canonicalStorageGroupId(join.handle());
+                    const auto* createAddress = handleAddress(*create->getArgOperand(0), false);
+                    const auto* joinAddress = handleAddress(join.handle(), join.byValue);
                     // Wildcard storage-group indices cannot establish handle identity.
                     bool sameAddress = createAddress && createAddress == joinAddress;
                     const auto* createGep =
@@ -588,11 +708,11 @@ namespace ctrace::concurrency::internal::analysis
                             canonicalStorageGroupId(*other->getArgOperand(0)) == first)
                             overwritten = true;
                     if (!overwritten && sameAddress && first && first == second &&
-                        arrayStorageUnchanged(*create, *join, dominators, classifier) &&
-                        dominators.dominates(create, join) &&
-                        completionCoversReturns(*create, *join))
+                        arrayStorageUnchanged(*create, *join.call, dominators, classifier) &&
+                        dominators.dominates(create, join.call) &&
+                        completionCoversReturns(*create, *join.call))
                     {
-                        result.emplace(create, join);
+                        result.emplace(create, join.call);
                         break;
                     }
                 }

@@ -84,6 +84,10 @@ Current implementation boundaries:
   boundary and nothing else does (see [docs/cross-tu-mode.md](docs/cross-tu-mode.md)).
 - Direct-call interprocedural propagation is supported for thread context, thread lifecycle, and
   lock state.
+- A join need not be written in place: a function that joins the handle it is given on every
+  normal return — a `pthread_t` by value or a `std::thread` by reference, directly or through
+  another such function — counts as a join wherever it is called, for every rule that asks
+  whether a thread has ended. Such a function defined in another unit is not followed yet.
 - `MissingJoin` supports both `pthread` and `std::thread`.
 - `DeadlockLockOrder` is intentionally conservative and does not yet model arbitrary `3+` lock
   cycles across the whole program.

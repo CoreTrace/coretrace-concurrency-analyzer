@@ -923,6 +923,8 @@ namespace
              .intent = "workers write distinct fields of a global struct"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_sequential_threads_no_fp.c",
              .intent = "a join separates the two spawns"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_read_after_helper_join_no_fp.c",
+             .intent = "a helper's join orders the worker's write before main's read (#89)"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_exclusive_branch_spawns_no_fp.c",
              .intent = "mutually exclusive branches never run two instances at once"},
@@ -1163,6 +1165,23 @@ namespace
              .intent = "the argument outlives every frame, so detaching is fine"},
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_join_loop_no_fp.c",
              .intent = "a join loop over the whole creation range keeps the frame alive"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_by_helper_no_fp.c",
+             .intent = "a helper joining the handle it is given on every path waits like a join (#89)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_by_nested_helper_no_fp.c",
+             .intent = "a helper calling a joining helper on every path joins too (#89)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_by_helper_loop_no_fp.c",
+             .intent = "a join loop through a helper over the whole creation range (#89)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_helper_joins_one_branch.c",
+             .intent = "a helper joining on one branch only cannot stand for a join (#89)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_helper_joins_other_handle.c",
+             .intent = "a helper joining another parameter does not join this thread (#89)",
+             .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_partial_join_loop.c",
              .intent = "a join loop one short of the creation range leaves a worker reading a gone frame",
              .missingJoin = 1,
@@ -1172,6 +1191,11 @@ namespace
              .intent = "a by-reference capture is safe when the std::thread is joined before return"},
             {.path = "tests/fixtures/concurrency/thread-escape/std_thread_value_capture_detached_no_fp.cpp",
              .intent = "a by-value capture leaves nothing pointing into the frame"},
+            {.path = "tests/fixtures/concurrency/thread-escape/std_thread_joined_by_helper_no_fp.cpp",
+             .intent = "a helper joining the std::thread it is given by reference waits like a join (#89)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/std_thread_helper_detaches.cpp",
+             .intent = "a helper given the std::thread by reference that detaches it joins nothing (#89)",
+             .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-escape/std_thread_pointer_arg_detached.cpp",
              .intent = "a detached std::thread handed a pointer to a local outlives the frame",
              .threadArgumentEscape = 1},
@@ -1322,6 +1346,9 @@ namespace
              .threadArgumentFreed = 1},
             {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_joined_then_freed_no_fp.c",
              .intent = "freeing after the join leaves the thread done with the memory"},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_joined_by_helper_then_freed_no_fp.c",
+             .intent = "freeing after a helper has joined the thread (#89)"},
             {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_freed_unused_no_fp.c",
              .intent = "a thread that never touches its argument cannot use it after the free"},
             {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_reassigned_then_freed_no_fp.c",
@@ -1342,6 +1369,9 @@ namespace
              .intent = "each thread updates its own thread-local copy"},
             {.path = "tests/fixtures/concurrency/thread-local/tls_published_while_alive_no_fp.c",
              .intent = "a thread-local address read while its owner still runs"},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_read_after_helper_join.c",
+             .intent = "a helper's join ends the thread, and its thread-local with it (#89)",
+             .threadLocalEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-local/tls_pointer_reassigned_no_fp.c",
              .intent = "a pointer that also receives heap memory is not known to reach a dead thread-local"},
 
