@@ -25,13 +25,17 @@ systematically missing from it, and they are the ones the project mode carries a
   protects looks unguarded.
 - **Where a thread handle is joined.** A thread started in one unit and joined in another was
   reported as leaked.
+- **Which threads a helper joins.** A `void join_worker(pthread_t)` defined in another unit is
+  opaque here, so a thread its caller hands it looks as if it never ended: its argument escapes,
+  memory freed after the call is still in use, and what is read afterwards races.
 - **Whether the program starts a thread.** A `fork` is unsafe in a threaded program, and the unit
   that forks and the unit that spawns are routinely different files.
 - **Whether the program collects its children.** The `wait` for a forked child is routinely in a
   helper of another file, the one that owns the child's pid; a fork was reported as never reaped.
 
-The joined handle and the collected child are the two places the project mode *removes* a
-finding.
+The joined handle, the joining helper and the collected child are where the project mode
+*removes* findings; the joining helper can also add one, a thread-local used once the thread that
+owns it has ended.
 
 Nothing else is shared. In particular, each unit still computes its own lock state, its own
 may-happen-in-parallel relation and its own diagnostics: those are answerable locally, and making
@@ -46,9 +50,9 @@ them global would cost precision without buying anything.
    rules out two spawns sitting on mutually exclusive branches.
 3. **Only the contradicted units are re-analysed.** A unit is re-run when the program says one of
    its functions is a thread entry it did not know about, when an `extern` it dropped turns out to
-   name real storage, when a helper it only sees declared takes a lock for its caller, when a
-   handle it creates is joined elsewhere, or when it forks and another unit starts a thread or
-   collects children. Only the channels a selected rule reads are checked. On this repository
+   name real storage, when a helper it only sees declared takes a lock for its caller or joins
+   the thread it is handed, when a handle it creates is joined elsewhere, or when it forks and
+   another unit starts a thread or collects children. Only the channels a selected rule reads are checked. On this repository
    that is 3 units out of 40.
 
 ### Symbol identity

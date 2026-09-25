@@ -102,6 +102,17 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 }
             }
 
+            // A helper this unit only sees declared turns out to join the thread it is handed,
+            // which ends that thread at the call.
+            if (selection.channels.helperJoins)
+            {
+                for (const std::string& function : program.declaredFunctions)
+                {
+                    if (index.joinedParametersOf(function) != nullptr)
+                        return true;
+                }
+            }
+
             // An entry of this unit is spawned more often, or in a loop, somewhere else.
             if (!selection.channels.entryConcurrency)
                 return false;

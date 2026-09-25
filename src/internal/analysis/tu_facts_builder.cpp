@@ -611,11 +611,38 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        const bool readsCompletions = selection.taskConcurrency() || selection.threadLifecycles ||
+                                      selection.threadArgumentEscapes ||
+                                      selection.threadArgumentFrees ||
+                                      selection.expiredThreadLocals;
+
+        // A helper defined in another unit is only a declaration here; the program supplies the
+        // parameters it joins, so a call to it still ends the thread it is handed.
+        JoiningHelpers joiningHelpers;
+        if (readsCompletions)
+        {
+            JoiningHelpers known;
+            if (crossTU && selection.channels.helperJoins)
+            {
+                for (const llvm::Function& function : module)
+                {
+                    if (!function.isDeclaration())
+                        continue;
+
+                    if (const std::vector<JoinedParameter>* joined =
+                            program->joinedParametersOf(programSymbol(function));
+                        joined != nullptr)
+                    {
+                        known.emplace(&function, *joined);
+                    }
+                }
+            }
+            joiningHelpers = collectJoiningHelpers(module, classifier, std::move(known));
+        }
+
         const ThreadCompletionMap completions =
-            selection.taskConcurrency() || selection.threadLifecycles ||
-                    selection.threadArgumentEscapes || selection.threadArgumentFrees ||
-                    selection.expiredThreadLocals
-                ? collectThreadCompletions(module, classifier, analyses)
+            readsCompletions
+                ? collectThreadCompletions(module, classifier, analyses, joiningHelpers)
                 : ThreadCompletionMap{};
         TaskConcurrencyResult taskConcurrency;
         if (selection.taskConcurrency())
@@ -628,6 +655,14 @@ namespace ctrace::concurrency::internal::analysis
         facts.spawns = std::move(spawnFacts.spawns);
         facts.entryConcurrency = std::move(spawnFacts.entryConcurrency);
         facts.lockWrapperSummaries = lockWrapperSummaries;
+        if (selection.channels.helperJoins)
+        {
+            for (const auto& [function, joined] : joiningHelpers)
+            {
+                if (!function->isDeclaration())
+                    facts.joiningHelpers.emplace(functionId(*function), joined);
+            }
+        }
         facts.sequencedEntryPairs = taskConcurrency.sequencedEntryPairs;
 
         // Replace the raw spawn-site count by the number of instances that can actually be alive at

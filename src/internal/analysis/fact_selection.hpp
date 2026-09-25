@@ -31,6 +31,8 @@ namespace ctrace::concurrency::internal::analysis
         bool programReaps = false;
         /// A thread handle another unit joins or detaches.
         bool resolvedHandles = false;
+        /// Which parameters a helper another unit defines joins, which ends a thread at the call.
+        bool helperJoins = false;
     };
 
     struct FactSelection
@@ -115,6 +117,7 @@ namespace ctrace::concurrency::internal::analysis
                     selection.channels.externGlobals = true;
                     selection.channels.helperLockEffects = true;
                     selection.channels.entryConcurrency = true;
+                    selection.channels.helperJoins = true;
                     break;
                 case RuleId::DeadlockLockOrder:
                     selection.lockOrders = true;
@@ -122,10 +125,12 @@ namespace ctrace::concurrency::internal::analysis
                     selection.threadEntries = true;
                     selection.channels.helperLockEffects = true;
                     selection.channels.entryConcurrency = true;
+                    selection.channels.helperJoins = true;
                     break;
                 case RuleId::MissingJoin:
                     selection.threadLifecycles = true;
                     selection.channels.resolvedHandles = true;
+                    selection.channels.helperJoins = true;
                     break;
                 case RuleId::ConditionWaitWithoutPredicate:
                     selection.conditionWaits = true;
@@ -140,12 +145,15 @@ namespace ctrace::concurrency::internal::analysis
                     break;
                 case RuleId::ThreadArgumentEscapesFrame:
                     selection.threadArgumentEscapes = true;
+                    selection.channels.helperJoins = true;
                     break;
                 case RuleId::ThreadArgumentFreedEarly:
                     selection.threadArgumentFrees = true;
+                    selection.channels.helperJoins = true;
                     break;
                 case RuleId::ThreadLocalOutlivesThread:
                     selection.expiredThreadLocals = true;
+                    selection.channels.helperJoins = true;
                     break;
                 case RuleId::UnsafeSignalHandler:
                     selection.signalHandlers = true;
@@ -156,6 +164,7 @@ namespace ctrace::concurrency::internal::analysis
                     selection.weakPublications = true;
                     selection.channels.externGlobals = true;
                     selection.channels.entryConcurrency = true;
+                    selection.channels.helperJoins = true;
                     break;
                 case RuleId::CompilerDiagnostic:
                     break;

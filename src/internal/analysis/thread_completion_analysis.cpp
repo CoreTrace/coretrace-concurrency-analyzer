@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace ctrace::concurrency::internal::analysis
@@ -553,17 +554,6 @@ namespace ctrace::concurrency::internal::analysis
             return &*secondExit->getFirstNonPHIOrDbgOrLifetime();
         }
 
-        struct JoinedParameter
-        {
-            unsigned index = 0;
-            bool byValue = false;
-        };
-
-        /// The parameters each defined function joins on every normal return. A call passing a
-        /// thread handle there waits for that thread exactly as a join written in place does.
-        using JoiningHelpers =
-            std::unordered_map<const llvm::Function*, std::vector<JoinedParameter>>;
-
         std::vector<JoinSite> joinSites(const llvm::Function& function,
                                         const ConcurrencySymbolClassifier& classifier,
                                         const JoiningHelpers& helpers)
@@ -591,43 +581,6 @@ namespace ctrace::concurrency::internal::analysis
             return sites;
         }
 
-        /// A function joins a parameter when a join of it, in place or through another joining
-        /// helper, stands on every path from the entry to a normal return. The parameter is
-        /// followed only through a local copy written once, so the handle joined is the one the
-        /// caller passed. Iterated to a fixed point: a helper calling a helper is found whatever
-        /// order the module lists them in.
-        JoiningHelpers collectJoiningHelpers(const llvm::Module& module,
-                                             const ConcurrencySymbolClassifier& classifier)
-        {
-            JoiningHelpers helpers;
-            bool changed = true;
-            while (changed)
-            {
-                changed = false;
-                for (const llvm::Function& function : module)
-                {
-                    if (function.isDeclaration())
-                        continue;
-                    const llvm::Instruction& entry = function.getEntryBlock().front();
-                    for (const JoinSite& site : joinSites(function, classifier, helpers))
-                    {
-                        const auto* parameter =
-                            llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
-                        if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
-                            continue;
-                        std::vector<JoinedParameter>& joined = helpers[&function];
-                        bool known = false;
-                        for (const JoinedParameter& existing : joined)
-                            known = known || existing.index == parameter->getArgNo();
-                        if (known)
-                            continue;
-                        joined.push_back({parameter->getArgNo(), site.byValue});
-                        changed = true;
-                    }
-                }
-            }
-            return helpers;
-        }
     } // namespace
 
     bool completionCoversReturns(const llvm::Instruction& start,
@@ -653,11 +606,49 @@ namespace ctrace::concurrency::internal::analysis
         return true;
     }
 
+    /// A function joins a parameter when a join of it, in place or through another joining
+    /// helper, stands on every path from the entry to a normal return. The parameter is
+    /// followed only through a local copy written once, so the handle joined is the one the
+    /// caller passed. Iterated to a fixed point: a helper calling a helper is found whatever
+    /// order the module lists them in.
+    JoiningHelpers collectJoiningHelpers(const llvm::Module& module,
+                                         const ConcurrencySymbolClassifier& classifier,
+                                         JoiningHelpers known)
+    {
+        JoiningHelpers helpers = std::move(known);
+        bool changed = true;
+        while (changed)
+        {
+            changed = false;
+            for (const llvm::Function& function : module)
+            {
+                if (function.isDeclaration())
+                    continue;
+                const llvm::Instruction& entry = function.getEntryBlock().front();
+                for (const JoinSite& site : joinSites(function, classifier, helpers))
+                {
+                    const auto* parameter =
+                        llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
+                    if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
+                        continue;
+                    std::vector<JoinedParameter>& joined = helpers[&function];
+                    bool known = false;
+                    for (const JoinedParameter& existing : joined)
+                        known = known || existing.index == parameter->getArgNo();
+                    if (known)
+                        continue;
+                    joined.push_back({parameter->getArgNo(), site.byValue});
+                    changed = true;
+                }
+            }
+        }
+        return helpers;
+    }
     ThreadCompletionMap collectThreadCompletions(const llvm::Module& module,
                                                  const ConcurrencySymbolClassifier& classifier,
-                                                 LlvmFunctionAnalysisProvider& analyses)
+                                                 LlvmFunctionAnalysisProvider& analyses,
+                                                 const JoiningHelpers& helpers)
     {
-        const JoiningHelpers helpers = collectJoiningHelpers(module, classifier);
         ThreadCompletionMap result;
         for (const llvm::Function& function : module)
         {

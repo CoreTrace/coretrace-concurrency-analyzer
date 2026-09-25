@@ -40,6 +40,16 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        for (const auto& [helperFunctionId, joinedParameters] : facts.joiningHelpers)
+        {
+            const auto it = program.functionSymbolsById.find(helperFunctionId);
+            if (it != program.functionSymbolsById.end() &&
+                !program.declaredFunctions.contains(it->second))
+            {
+                joiningHelpersBySymbol_.emplace(it->second, joinedParameters);
+            }
+        }
+
         for (const auto& [entryFunctionId, concurrency] : facts.entryConcurrency)
         {
             const auto it = program.functionSymbolsById.find(entryFunctionId);
@@ -64,6 +74,13 @@ namespace ctrace::concurrency::internal::analysis
     bool ProgramSymbolIndex::resolvesHandleElsewhere(const std::string& symbol) const
     {
         return resolvedHandleSymbols_.contains(symbol);
+    }
+
+    const std::vector<JoinedParameter>*
+    ProgramSymbolIndex::joinedParametersOf(const std::string& symbol) const
+    {
+        const auto it = joiningHelpersBySymbol_.find(symbol);
+        return it == joiningHelpersBySymbol_.end() ? nullptr : &it->second;
     }
 
     bool ProgramSymbolIndex::isThreadEntry(const std::string& symbol) const
