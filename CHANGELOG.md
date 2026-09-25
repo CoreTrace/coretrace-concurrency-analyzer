@@ -8,7 +8,7 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
-## Unreleased
+## v0.7.0
 
 - **Report change.** A narrow project analysis builds only what crosses a unit
   boundary for the selected rules. Each rule reads a known set of cross-unit
