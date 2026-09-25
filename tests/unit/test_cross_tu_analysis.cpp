@@ -318,6 +318,34 @@ namespace
                           "an inversion through helpers defined elsewhere must be reported");
     }
 
+    /// The same for a helper defined in another unit: what it does to the lock it is handed
+    /// changes the lock state workers.c is judged under, which matters to a rule reading lock
+    /// state and to no other (#52).
+    bool testLockSummaryReanalysisFollowsTheSelection()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-lock-wrapper/workers.c") ||
+            !project.add("cross-tu-lock-wrapper/sync.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport cycles =
+            ProjectConcurrencyAnalyzer(AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}})
+                .analyze(project.units());
+        const ProjectAnalysisReport waits =
+            ProjectConcurrencyAnalyzer(
+                AnalysisOptions{.enabledRules = {RuleId::ConditionWaitWithoutPredicate}})
+                .analyze(project.units());
+
+        return assertTrue(cycles.reanalyzedUnitCount == 1,
+                          "a rule reading lock state reanalyses the unit calling the helpers") &&
+               assertTrue(countDeadlocks(cycles.report) > 0,
+                          "and reports the cycle the second pass makes visible") &&
+               assertTrue(waits.reanalyzedUnitCount == 0,
+                          "a rule reading no lock state reanalyses nothing for those helpers");
+    }
+
     /// The worker unit alone cannot see what the helpers do, and must not guess.
     bool testWorkerUnitWithoutTheHelpersReportsNoCycle()
     {
@@ -808,6 +836,7 @@ int main()
     ok = testProjectModeKeepsEverySingleUnitFinding() && ok;
     ok = testNarrowRuleSelectionKeepsCrossUnitConclusions() && ok;
     ok = testExternGlobalReanalysisFollowsTheSelection() && ok;
+    ok = testLockSummaryReanalysisFollowsTheSelection() && ok;
     ok = testConstantDeclarationsTriggerNoSecondPass() && ok;
     ok = testEmptyProjectIsAnEmptyReport() && ok;
     ok = testUnreadableUnitIsReportedAndTheRestAnalysed() && ok;
