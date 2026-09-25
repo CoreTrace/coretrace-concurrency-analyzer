@@ -67,6 +67,13 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 return true;
             }
 
+            // This unit forks without collecting its children, and another unit collects them.
+            if (selection.channels.programReaps && !facts.processForks.empty() &&
+                !facts.reapsChildProcesses && index.programReapsChildren())
+            {
+                return true;
+            }
+
             // A handle this unit creates is joined by another.
             if (selection.channels.resolvedHandles)
             {

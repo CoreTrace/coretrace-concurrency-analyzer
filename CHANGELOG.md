@@ -8,6 +8,15 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased
+
+- A project analysis no longer reports `unreaped-child` for a fork whose
+  child a helper in another unit collects. Reaping is now judged against the
+  whole program, as the threads `fork-after-thread` looks for already were:
+  a `wait` in any unit counts, as a `wait` anywhere in the unit did before.
+  `unreaped-child` therefore reads a cross-unit fact, and five rules, not six,
+  have project conclusions equal to their single-unit ones.
+
 ## v0.7.0
 
 - **Report change.** A narrow project analysis builds only what crosses a unit

@@ -11,8 +11,8 @@ coretrace_concurrency_analyzer --compile-commands=build/compile_commands.json --
 
 ## What crosses the unit boundary, and why only that
 
-A translation unit is not a wrong view of the program, it is a partial one. Two facts are
-systematically missing from it, and they are the two the project mode carries across:
+A translation unit is not a wrong view of the program, it is a partial one. Some facts are
+systematically missing from it, and they are the ones the project mode carries across:
 
 - **A thread entry spawned elsewhere.** `worker.c` holds the body and never sees a
   `pthread_create` naming it, so on its own it has no reason to believe two threads run it.
@@ -24,7 +24,14 @@ systematically missing from it, and they are the two the project mode carries ac
   another unit is opaque here, so an inversion expressed through it is invisible and an access it
   protects looks unguarded.
 - **Where a thread handle is joined.** A thread started in one unit and joined in another was
-  reported as leaked. This is the one place the project mode *removes* a finding.
+  reported as leaked.
+- **Whether the program starts a thread.** A `fork` is unsafe in a threaded program, and the unit
+  that forks and the unit that spawns are routinely different files.
+- **Whether the program collects its children.** The `wait` for a forked child is routinely in a
+  helper of another file, the one that owns the child's pid; a fork was reported as never reaped.
+
+The joined handle and the collected child are the two places the project mode *removes* a
+finding.
 
 Nothing else is shared. In particular, each unit still computes its own lock state, its own
 may-happen-in-parallel relation and its own diagnostics: those are answerable locally, and making
@@ -39,8 +46,10 @@ them global would cost precision without buying anything.
    rules out two spawns sitting on mutually exclusive branches.
 3. **Only the contradicted units are re-analysed.** A unit is re-run when the program says one of
    its functions is a thread entry it did not know about, when an `extern` it dropped turns out to
-   name real storage, when a helper it only sees declared takes a lock for its caller, or when a
-   handle it creates is joined elsewhere. On this repository that is 3 units out of 40.
+   name real storage, when a helper it only sees declared takes a lock for its caller, when a
+   handle it creates is joined elsewhere, or when it forks and another unit starts a thread or
+   collects children. Only the channels a selected rule reads are checked. On this repository
+   that is 3 units out of 40.
 
 ### Symbol identity
 

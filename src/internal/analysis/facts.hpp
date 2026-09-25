@@ -367,7 +367,8 @@ namespace ctrace::concurrency::internal::analysis
         std::vector<ExpiredThreadLocalFact> expiredThreadLocals;
         std::vector<SignalHandlerFact> signalHandlers;
         std::vector<WeakPublicationFact> weakPublications;
-        /// Some part of the program collects its terminated children.
+        /// Some part of the program collects its terminated children. Equal to the unit's own
+        /// answer when a single unit is under analysis, and wider once the whole program is known.
         bool reapsChildProcesses = false;
         /// Some part of the program starts a thread. Equal to `!spawns.empty()` when a single
         /// unit is under analysis, and wider once the whole program is known.

@@ -519,6 +519,66 @@ namespace
                           "the unreaped child is visible from the forking unit alone");
     }
 
+    /// A child forked in one unit and reaped by a helper in another is collected. Reaping is
+    /// judged against the whole program, like the threads a fork is judged against (#89).
+    bool testChildReapedInAnotherUnitIsCollected()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-reaped-elsewhere/main.c") ||
+            !project.add("cross-tu-reaped-elsewhere/reaper.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(project.units());
+
+        return assertTrue(countRule(analysis.report, RuleId::UnreapedChildProcess) == 0,
+                          "a child reaped by a helper in another unit is not left a zombie");
+    }
+
+    /// The forking unit alone must still report the child: it genuinely cannot know. Without
+    /// this, the test above would pass even if the rule never looked at the fork.
+    bool testForkingUnitAloneStillReportsTheChild()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-reaped-elsewhere/main.c"))
+            return false;
+
+        const DiagnosticReport report = SingleTUConcurrencyAnalyzer().analyze(project.moduleAt(0));
+
+        return assertTrue(countRule(report, RuleId::UnreapedChildProcess) == 1,
+                          "the forking unit alone has no evidence the child is ever collected");
+    }
+
+    /// The reaping elsewhere changes what the forking unit concludes for unreaped-child, and
+    /// for no other rule: fork-after-thread asks about threads, not about waits (#89).
+    bool testReapingReanalysisFollowsTheSelection()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-reaped-elsewhere/main.c") ||
+            !project.add("cross-tu-reaped-elsewhere/reaper.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport reaping =
+            ProjectConcurrencyAnalyzer(
+                AnalysisOptions{.enabledRules = {RuleId::UnreapedChildProcess}})
+                .analyze(project.units());
+        const ProjectAnalysisReport forking =
+            ProjectConcurrencyAnalyzer(
+                AnalysisOptions{.enabledRules = {RuleId::ForkAfterThreadCreation}})
+                .analyze(project.units());
+
+        return assertTrue(reaping.reanalyzedUnitCount == 1,
+                          "unreaped-child reanalyses the unit that forks without reaping") &&
+               assertTrue(countRule(reaping.report, RuleId::UnreapedChildProcess) == 0,
+                          "and the second pass sees the child collected") &&
+               assertTrue(forking.reanalyzedUnitCount == 0,
+                          "fork-after-thread reanalyses nothing for a wait in another unit");
+    }
+
     /// Pins the frontier rather than a finding: two real defects in this fixture are invisible,
     /// and both need work that does not exist yet. When either becomes visible this test fails,
     /// which is the point — it is how the analyzer announces that it grew.
@@ -619,6 +679,7 @@ namespace
             {.units = {"cross-tu-handle-lifecycle/start.c", "cross-tu-handle-lifecycle/stop.c",
                        "cross-tu-handle-lifecycle/main.c"}},
             {.units = {"cross-tu-lock-wrapper/workers.c", "cross-tu-lock-wrapper/sync.c"}},
+            {.units = {"cross-tu-reaped-elsewhere/main.c", "cross-tu-reaped-elsewhere/reaper.c"}},
             {.units = {"cross-tu-vtable-declaration/widget.cpp",
                        "cross-tu-vtable-declaration/main.cpp"},
              .compileArgs = cxx},
@@ -641,9 +702,9 @@ namespace
     /// The rules no fact from another unit can change: their project conclusions are the
     /// single-unit ones, so a project analysis owes them no program-wide work (#52).
     constexpr RuleId kUnitLocalRules[] = {
-        RuleId::ConditionWaitWithoutPredicate, RuleId::UnreapedChildProcess,
-        RuleId::ThreadArgumentEscapesFrame,    RuleId::UnsafeSignalHandler,
-        RuleId::ThreadArgumentFreedEarly,      RuleId::ThreadLocalOutlivesThread,
+        RuleId::ConditionWaitWithoutPredicate, RuleId::ThreadArgumentEscapesFrame,
+        RuleId::UnsafeSignalHandler,           RuleId::ThreadArgumentFreedEarly,
+        RuleId::ThreadLocalOutlivesThread,
     };
 
     /// The rules that read which thread entries reach each function; every other rule leaves
@@ -951,8 +1012,8 @@ namespace
     /// single-unit run does (#52). A rule reading no entry concurrency lists no function merely
     /// because a thread reaches it: only functions carrying one of its diagnostics. For the
     /// rules no other unit can inform, those are the single-unit diagnostics, so the summaries
-    /// are the single-unit ones. missing-join and fork-after-thread are left out of that last
-    /// comparison on purpose: another unit legitimately changes what they report.
+    /// are the single-unit ones. missing-join, fork-after-thread and unreaped-child are left out
+    /// of that last comparison on purpose: another unit legitimately changes what they report.
     bool testNarrowFunctionsMatchWhatTheRulesComputed()
     {
         const auto readsEntryConcurrency = [](RuleId rule)
@@ -1040,6 +1101,9 @@ int main()
     ok = testUnresolvedExternIsNotTracked() && ok;
     ok = testIdiomaticServiceReportsWhatCrossesTheProgram() && ok;
     ok = testForkingUnitAloneDoesNotSeeTheThreads() && ok;
+    ok = testChildReapedInAnotherUnitIsCollected() && ok;
+    ok = testForkingUnitAloneStillReportsTheChild() && ok;
+    ok = testReapingReanalysisFollowsTheSelection() && ok;
     ok = testIdiomaticServiceKeepsItsKnownBlindSpots() && ok;
     ok = testHandleJoinedInAnotherUnitIsNotOutstanding() && ok;
     ok = testCreatingUnitAloneStillReportsTheHandle() && ok;

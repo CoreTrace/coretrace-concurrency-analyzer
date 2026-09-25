@@ -769,7 +769,8 @@ namespace ctrace::concurrency::internal::analysis
         {
             const ProcessLifecycleCollector processCollector(classifier);
             ProcessLifecycleCollection processes = processCollector.collect(module);
-            facts.reapsChildProcesses = processes.reapsChildren;
+            facts.reapsChildProcesses =
+                processes.reapsChildren || (crossTU && program->programReapsChildren());
 
             bool execChanged = true;
             while (execChanged)

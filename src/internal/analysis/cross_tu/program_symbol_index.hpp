@@ -60,6 +60,14 @@ namespace ctrace::concurrency::internal::analysis
             return !spawnSitesByEntry_.empty();
         }
 
+        /// True when some unit of the program collects its terminated children. Like the
+        /// threads a fork is judged against, the wait is routinely in another file than the
+        /// fork: a helper that owns the child's pid.
+        [[nodiscard]] bool programReapsChildren() const noexcept
+        {
+            return reapsChildren_;
+        }
+
         /// True when a global declared here has a definition in another unit, so accesses to it
         /// describe real shared state rather than an unresolved symbol.
         [[nodiscard]] bool isDefinedSomewhere(const std::string& symbol) const;
@@ -94,5 +102,6 @@ namespace ctrace::concurrency::internal::analysis
         ProgramDefinedGlobals definedGlobals_;
         std::unordered_map<std::string, std::vector<ParameterLockEffect>> lockSummariesBySymbol_;
         std::unordered_set<std::string> resolvedHandleSymbols_;
+        bool reapsChildren_ = false;
     };
 } // namespace ctrace::concurrency::internal::analysis
