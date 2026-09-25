@@ -27,6 +27,8 @@ namespace ctrace::concurrency::internal::analysis
         bool entryConcurrency = false;
         /// Whether some unit starts a thread, which makes a fork elsewhere unsafe.
         bool programThreads = false;
+        /// Whether some unit collects terminated children, which reaps a fork elsewhere.
+        bool programReaps = false;
         /// A thread handle another unit joins or detaches.
         bool resolvedHandles = false;
     };
@@ -134,6 +136,7 @@ namespace ctrace::concurrency::internal::analysis
                     break;
                 case RuleId::UnreapedChildProcess:
                     selection.processLifecycle = true;
+                    selection.channels.programReaps = true;
                     break;
                 case RuleId::ThreadArgumentEscapesFrame:
                     selection.threadArgumentEscapes = true;

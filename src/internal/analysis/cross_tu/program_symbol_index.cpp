@@ -16,6 +16,7 @@ namespace ctrace::concurrency::internal::analysis
     {
         const ProgramSymbolFacts& program = facts.program;
         definedGlobals_.insert(program.definedGlobals.begin(), program.definedGlobals.end());
+        reapsChildren_ = reapsChildren_ || facts.reapsChildProcesses;
 
         // `entryConcurrency` is already corrected by this unit's own may-happen-in-parallel
         // analysis: two spawns on mutually exclusive branches count as one instance. Re-counting

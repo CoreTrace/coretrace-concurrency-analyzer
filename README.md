@@ -43,8 +43,9 @@ What each of the newer rules establishes, and what it deliberately does not:
   An `exec` reachable from the forking function settles the question and suppresses the report.
   *Not proven:* that the thread creation actually runs before the fork.
 - **`unreaped-child`** — a `fork` whose pid is never waited on leaves every finished child in the
-  process table. Handing `SIGCHLD` to `SIG_IGN` counts as reaping. *Not tracked:* which pid a
-  given `wait` collects; `SA_NOCLDWAIT` through `sigaction` is unrecognized.
+  process table. Handing `SIGCHLD` to `SIG_IGN` counts as reaping, and in a project analysis a
+  `wait` in any unit counts. *Not tracked:* which pid a given `wait` collects; `SA_NOCLDWAIT`
+  through `sigaction` is unrecognized.
 - **`thread-arg-escape`** — a thread argument outlives the call that passed it unless the creator
   waits, so a pointer to a local dangles as soon as that function returns. *Covers*
   `pthread_create`, and `std::thread` when an address of a local is stored in what it copies: a
@@ -79,8 +80,8 @@ What each of the newer rules establishes, and what it deliberately does not:
   (Dekker) ordering, ABA, and in a project analysis flags with external linkage.
 
 Current implementation boundaries:
-- Whole-project analysis reads a `compile_commands.json`; four kinds of fact cross the unit
-  boundary and nothing else does.
+- Whole-project analysis reads a `compile_commands.json`; six kinds of fact cross the unit
+  boundary and nothing else does (see [docs/cross-tu-mode.md](docs/cross-tu-mode.md)).
 - Direct-call interprocedural propagation is supported for thread context, thread lifecycle, and
   lock state.
 - `MissingJoin` supports both `pthread` and `std::thread`.
