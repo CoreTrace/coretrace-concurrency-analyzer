@@ -468,8 +468,13 @@ namespace ctrace::concurrency::internal::analysis
         {
             ProgramSymbolFacts program;
             program.abiKey = module.getTargetTriple() + '|' + module.getDataLayoutStr();
+            // Only storage the access analysis can follow: a constant such as a vtable or type
+            // information declared here and defined elsewhere never becomes shared state, so it
+            // must not make this unit worth a second pass.
             for (const llvm::GlobalVariable& global : module.globals())
             {
+                if (!canBeSharedState(global))
+                    continue;
                 (global.isDeclaration() ? program.declaredGlobals : program.definedGlobals)
                     .insert(programSymbol(global));
             }

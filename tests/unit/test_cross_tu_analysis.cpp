@@ -225,6 +225,55 @@ namespace
                           "a global defined in another unit must still be tracked");
     }
 
+    /// A second pass is owed to a unit only when the program-wide view can change a fact a
+    /// selected rule reads. The mutable global defined in state.c changes what app.c's accesses
+    /// mean, which matters to a rule reading accesses and to no other (#52).
+    bool testExternGlobalReanalysisFollowsTheSelection()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-extern-global/app.c") ||
+            !project.add("cross-tu-extern-global/state.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport races =
+            ProjectConcurrencyAnalyzer(AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}})
+                .analyze(project.units());
+        const ProjectAnalysisReport waits =
+            ProjectConcurrencyAnalyzer(
+                AnalysisOptions{.enabledRules = {RuleId::ConditionWaitWithoutPredicate}})
+                .analyze(project.units());
+
+        return assertTrue(races.reanalyzedUnitCount == 1,
+                          "a rule reading accesses reanalyses the unit that declares the global") &&
+               assertTrue(countRacesOn(races.report, "g_shared_state") > 0,
+                          "and reports the race the second pass makes visible") &&
+               assertTrue(waits.reanalyzedUnitCount == 0,
+                          "a rule reading no access reanalyses nothing for that global");
+    }
+
+    /// A vtable and type information declared here and defined in another unit are constant
+    /// data no thread writes. The program-wide view changes nothing about this unit, so it
+    /// must not be analysed a second time (#52).
+    bool testConstantDeclarationsTriggerNoSecondPass()
+    {
+        CompiledProject project;
+        const std::vector<std::string> args = {"-std=c++20"};
+        if (!project.add("cross-tu-vtable-declaration/widget.cpp", args) ||
+            !project.add("cross-tu-vtable-declaration/main.cpp", args))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport analysis =
+            ProjectConcurrencyAnalyzer().analyze(project.units());
+        return assertTrue(analysis.complete(), "both units are analysed") &&
+               assertTrue(analysis.reanalyzedUnitCount == 0,
+                          "declaring a vtable and type information defined elsewhere triggers no "
+                          "second pass");
+    }
+
     /// The same application unit alone must stay silent, or the test above would prove nothing.
     bool testUnresolvedExternIsNotTracked()
     {
@@ -267,6 +316,34 @@ namespace
 
         return assertTrue(countDeadlocks(analysis.report) > 0,
                           "an inversion through helpers defined elsewhere must be reported");
+    }
+
+    /// The same for a helper defined in another unit: what it does to the lock it is handed
+    /// changes the lock state workers.c is judged under, which matters to a rule reading lock
+    /// state and to no other (#52).
+    bool testLockSummaryReanalysisFollowsTheSelection()
+    {
+        CompiledProject project;
+        if (!project.add("cross-tu-lock-wrapper/workers.c") ||
+            !project.add("cross-tu-lock-wrapper/sync.c"))
+        {
+            return false;
+        }
+
+        const ProjectAnalysisReport cycles =
+            ProjectConcurrencyAnalyzer(AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}})
+                .analyze(project.units());
+        const ProjectAnalysisReport waits =
+            ProjectConcurrencyAnalyzer(
+                AnalysisOptions{.enabledRules = {RuleId::ConditionWaitWithoutPredicate}})
+                .analyze(project.units());
+
+        return assertTrue(cycles.reanalyzedUnitCount == 1,
+                          "a rule reading lock state reanalyses the unit calling the helpers") &&
+               assertTrue(countDeadlocks(cycles.report) > 0,
+                          "and reports the cycle the second pass makes visible") &&
+               assertTrue(waits.reanalyzedUnitCount == 0,
+                          "a rule reading no lock state reanalyses nothing for those helpers");
     }
 
     /// The worker unit alone cannot see what the helpers do, and must not guess.
@@ -758,6 +835,9 @@ int main()
     ok = testWorkerUnitWithoutTheHelpersReportsNoCycle() && ok;
     ok = testProjectModeKeepsEverySingleUnitFinding() && ok;
     ok = testNarrowRuleSelectionKeepsCrossUnitConclusions() && ok;
+    ok = testExternGlobalReanalysisFollowsTheSelection() && ok;
+    ok = testLockSummaryReanalysisFollowsTheSelection() && ok;
+    ok = testConstantDeclarationsTriggerNoSecondPass() && ok;
     ok = testEmptyProjectIsAnEmptyReport() && ok;
     ok = testUnreadableUnitIsReportedAndTheRestAnalysed() && ok;
     ok = testReloadingAUnitYieldsTheSameProgram() && ok;

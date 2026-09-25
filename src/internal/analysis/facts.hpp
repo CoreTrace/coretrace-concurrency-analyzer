@@ -340,7 +340,8 @@ namespace ctrace::concurrency::internal::analysis
         /// Target triple and data layout. Two units may only exchange byte offsets and lock
         /// identities when both were compiled against the same ones.
         std::string abiKey;
-        /// Globals this unit defines, and globals it only declares.
+        /// Globals this unit defines, and globals it only declares, among those threads can
+        /// share (`canBeSharedState`).
         std::unordered_set<std::string> definedGlobals;
         std::unordered_set<std::string> declaredGlobals;
         /// Program symbol of every function, keyed by the function id the other facts use.

@@ -41,18 +41,23 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                    std::to_string(diagnostic.location.column) + '|' + diagnostic.message;
         }
 
-        /// True when the program-wide view contradicts what this unit concluded alone. Only these
-        /// units are worth analysing a second time. Decided from the facts alone: the unit's
-        /// module need not be live.
-        bool crossTUChangesFacts(const TUFacts& facts, const ProgramSymbolIndex& index)
+        /// True when the program-wide view contradicts a fact this unit concluded alone and a
+        /// selected rule reads. Only these units are worth analysing a second time. Decided from
+        /// the facts alone: the unit's module need not be live.
+        bool crossTUChangesFacts(const TUFacts& facts, const ProgramSymbolIndex& index,
+                                 const FactSelection& selection)
         {
             const ProgramSymbolFacts& program = facts.program;
 
-            // An `extern` this unit dropped as unresolved turns out to name real storage.
-            for (const std::string& global : program.declaredGlobals)
+            // An `extern` this unit dropped as unresolved turns out to name real storage, which
+            // changes what its accesses mean.
+            if (selection.accesses)
             {
-                if (index.isDefinedSomewhere(global))
-                    return true;
+                for (const std::string& global : program.declaredGlobals)
+                {
+                    if (index.isDefinedSomewhere(global))
+                        return true;
+                }
             }
 
             // This unit forks, and the threads that make the fork unsafe are started elsewhere.
@@ -76,11 +81,15 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 }
             }
 
-            // A helper this unit only sees declared turns out to take a lock for its caller.
-            for (const std::string& function : program.declaredFunctions)
+            // A helper this unit only sees declared turns out to take a lock for its caller, which
+            // changes the lock state its accesses and lock orders are judged under.
+            if (selection.lockState())
             {
-                if (index.lockSummaryFor(function) != nullptr)
-                    return true;
+                for (const std::string& function : program.declaredFunctions)
+                {
+                    if (index.lockSummaryFor(function) != nullptr)
+                        return true;
+                }
             }
 
             for (const auto& [id, symbol] : program.functionSymbolsById)
@@ -265,7 +274,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
             llvm::DefaultThreadPool pool(llvm::hardware_concurrency(bound));
             for (const std::size_t index : compatible)
             {
-                if (!crossTUChangesFacts(factsByUnit[index], programIndex))
+                if (!crossTUChangesFacts(factsByUnit[index], programIndex, selection))
                     continue;
 
                 ++analysis.reanalyzedUnitCount;
