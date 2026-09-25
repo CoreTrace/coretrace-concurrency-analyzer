@@ -8,6 +8,19 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased
+
+- A project analysis no longer analyses a unit twice because it declares a
+  constant that another unit defines. Every C++ unit that uses a polymorphic
+  class declares its vtable and type information, and each such declaration
+  sent the unit through a second pass that could change nothing, since no
+  thread writes a constant. The second pass is also skipped when the selected
+  rules do not read what the program-wide view would change: an `extern`
+  global matters to rules reading shared accesses, a helper's lock effects to
+  rules reading lock state. On the documented 49-unit workload, 2 units were
+  reanalysed for every selection and none are now; the analysis takes 9 to 15%
+  less time, with identical reports.
+
 ## v0.6.0
 
 - **Default change.** Three new rules run by default, as every rule does:

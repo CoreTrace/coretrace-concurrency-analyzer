@@ -538,21 +538,22 @@ namespace ctrace::concurrency::internal::analysis
         return !relativePath.empty() && *relativePath.begin() != "..";
     }
 
+    bool canBeSharedState(const llvm::GlobalVariable& global)
+    {
+        return !global.isConstant() && !global.isThreadLocal() &&
+               !isSynchronizationPrimitiveType(global.getValueType());
+    }
+
     bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global,
                                  const ProgramDefinedGlobals* programDefined)
     {
-        if (global.isConstant() || global.isThreadLocal())
+        if (!canBeSharedState(global))
             return false;
 
         // An `extern` with no definition in sight designates nothing this analysis can reason
         // about. Once the whole program is known, the same declaration may name real storage.
-        if (global.isDeclaration() &&
-            (programDefined == nullptr || !programDefined->contains(global.getGlobalIdentifier())))
-        {
-            return false;
-        }
-
-        return !isSynchronizationPrimitiveType(global.getValueType());
+        return !global.isDeclaration() || (programDefined != nullptr &&
+                                           programDefined->contains(global.getGlobalIdentifier()));
     }
 
     bool designatesSynchronizationPrimitive(const llvm::Value& pointerOperand)

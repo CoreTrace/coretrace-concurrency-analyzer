@@ -36,6 +36,10 @@ namespace ctrace::concurrency::internal::analysis
     /// unresolved symbol, so it drops both; a whole-project run knows the difference.
     using ProgramDefinedGlobals = std::unordered_set<std::string>;
 
+    /// True when a global is storage threads can share, whether or not this unit defines it:
+    /// not constant, not thread-local, and not a synchronization object the runtime owns.
+    [[nodiscard]] bool canBeSharedState(const llvm::GlobalVariable& global);
+
     [[nodiscard]] bool shouldTrackSharedGlobal(const llvm::GlobalVariable& global,
                                                const ProgramDefinedGlobals* programDefined);
 
