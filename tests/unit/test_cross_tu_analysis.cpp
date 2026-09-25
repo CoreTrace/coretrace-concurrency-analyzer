@@ -25,6 +25,7 @@ namespace
     using ctrace::concurrency::CompileResult;
     using ctrace::concurrency::Diagnostic;
     using ctrace::concurrency::DiagnosticReport;
+    using ctrace::concurrency::FunctionSummary;
     using ctrace::concurrency::InMemoryIRCompiler;
     using ctrace::concurrency::IRFormat;
     using ctrace::concurrency::LoadedUnit;
@@ -555,6 +556,15 @@ namespace
 
     /// Everything a diagnostic says, in a form two reports can be compared by. With a rule,
     /// only that rule's diagnostics, so a narrow run can be compared against a full one.
+    /// What a diagnostic reports, without its id: the id numbers the diagnostics of one report,
+    /// so it moves when another rule's findings are added or removed.
+    std::string describeFinding(const Diagnostic& diagnostic)
+    {
+        return diagnostic.location.file + ':' + std::to_string(diagnostic.location.line) + ':' +
+               std::to_string(diagnostic.location.column) + '|' + diagnostic.message + '|' +
+               symbolOf(diagnostic).value_or("");
+    }
+
     std::vector<std::string> diagnosticLines(const DiagnosticReport& report,
                                              std::optional<RuleId> onlyRule = std::nullopt)
     {
@@ -564,14 +574,85 @@ namespace
             if (onlyRule.has_value() && diagnostic.ruleId != *onlyRule)
                 continue;
 
-            lines.push_back(diagnostic.id + '|' + diagnostic.location.file + ':' +
-                            std::to_string(diagnostic.location.line) + ':' +
-                            std::to_string(diagnostic.location.column) + '|' + diagnostic.message +
-                            '|' + symbolOf(diagnostic).value_or(""));
+            lines.push_back(diagnostic.id + '|' + describeFinding(diagnostic));
         }
         std::sort(lines.begin(), lines.end());
         return lines;
     }
+
+    /// A rule's findings in a report, comparable between reports made with different rules.
+    std::vector<std::string> ruleFindings(const DiagnosticReport& report, RuleId rule)
+    {
+        std::vector<std::string> findings;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+        {
+            if (diagnostic.ruleId == rule)
+                findings.push_back(describeFinding(diagnostic));
+        }
+        std::sort(findings.begin(), findings.end());
+        return findings;
+    }
+
+    /// The functions a report summarises, comparable between reports.
+    std::vector<std::string> summarisedFunctions(const DiagnosticReport& report)
+    {
+        std::vector<std::string> functions;
+        for (const FunctionSummary& function : report.functions)
+            functions.push_back(function.file + '|' + function.name);
+        std::sort(functions.begin(), functions.end());
+        return functions;
+    }
+
+    struct ProjectFixture
+    {
+        std::vector<std::string_view> units;
+        std::vector<std::string> compileArgs;
+    };
+
+    /// Every project fixture, each exercising what one kind of cross-unit fact changes.
+    std::vector<ProjectFixture> everyProjectFixture()
+    {
+        const std::vector<std::string> cxx = {"-std=c++20"};
+        return {
+            {.units = {"cross-tu-data-race/main.c", "cross-tu-data-race/worker.c"}},
+            {.units = {"cross-tu-extern-global/app.c", "cross-tu-extern-global/state.c"}},
+            {.units = {"cross-tu-handle-lifecycle/start.c", "cross-tu-handle-lifecycle/stop.c",
+                       "cross-tu-handle-lifecycle/main.c"}},
+            {.units = {"cross-tu-lock-wrapper/workers.c", "cross-tu-lock-wrapper/sync.c"}},
+            {.units = {"cross-tu-vtable-declaration/widget.cpp",
+                       "cross-tu-vtable-declaration/main.cpp"},
+             .compileArgs = cxx},
+            {.units = {"idiomatic-cxx-service/worker.cpp", "idiomatic-cxx-service/supervisor.cpp",
+                       "idiomatic-cxx-service/main.cpp"},
+             .compileArgs = idiomaticServiceArgs()},
+        };
+    }
+
+    bool compileFixture(const ProjectFixture& fixture, CompiledProject& project)
+    {
+        for (const std::string_view unit : fixture.units)
+        {
+            if (!project.add(unit, fixture.compileArgs))
+                return false;
+        }
+        return true;
+    }
+
+    /// The rules no fact from another unit can change: their project conclusions are the
+    /// single-unit ones, so a project analysis owes them no program-wide work (#52).
+    constexpr RuleId kUnitLocalRules[] = {
+        RuleId::ConditionWaitWithoutPredicate, RuleId::UnreapedChildProcess,
+        RuleId::ThreadArgumentEscapesFrame,    RuleId::UnsafeSignalHandler,
+        RuleId::ThreadArgumentFreedEarly,      RuleId::ThreadLocalOutlivesThread,
+    };
+
+    /// The rules that read which thread entries reach each function; every other rule leaves
+    /// the function summaries to what it computed, as a single-unit run does.
+    constexpr RuleId kEntryConcurrencyRules[] = {
+        RuleId::DataRaceGlobal,
+        RuleId::DeadlockLockOrder,
+        RuleId::WeakPublicationOrdering,
+    };
 
     /// Four units with findings that cross the program: enough to exercise a bound below the
     /// unit count, and a mix of rules.
@@ -756,6 +837,39 @@ namespace
                           "and re-analyse the same units");
     }
 
+    /// Beyond the two rules above: every rule, on every project fixture, reports alone exactly
+    /// what it reports among all the rules, whatever facts a narrow run leaves out (#52).
+    bool everyRuleAloneMatchesTheFullRun()
+    {
+        bool ok = true;
+        for (const ProjectFixture& fixture : everyProjectFixture())
+        {
+            CompiledProject project;
+            if (!compileFixture(fixture, project))
+                return false;
+
+            const ProjectAnalysisReport full =
+                ProjectConcurrencyAnalyzer().analyze(project.units());
+            for (const RuleId rule : AnalysisOptions::allAvailable().enabledRules)
+            {
+                const ProjectAnalysisReport narrow =
+                    ProjectConcurrencyAnalyzer(AnalysisOptions{.enabledRules = {rule}})
+                        .analyze(project.units());
+                const std::vector<std::string> findings = ruleFindings(narrow.report, rule);
+                if (narrow.complete() && findings == ruleFindings(full.report, rule) &&
+                    findings.size() == narrow.report.diagnostics.size())
+                {
+                    continue;
+                }
+
+                std::cerr << "[FAIL] " << fixture.units.front() << ": " << toString(rule)
+                          << " alone does not report what the full run reports for it\n";
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
     /// A narrow `--rules` selection must reach the same conclusions about the program as a
     /// full run does. What crosses a unit boundary is not a rule's private business: the
     /// spawn in one unit and the worker body in another, or the handle created here and
@@ -802,7 +916,105 @@ namespace
                           "a missing-join-only run still sees the join in the other unit") &&
                assertTrue(countMissingJoins(joinFull.report) == 0, "as the full run does") &&
                assertTrue(joinNarrow.complete() && raceNarrow.complete(),
-                          "a narrow selection analyses every unit of the project");
+                          "a narrow selection analyses every unit of the project") &&
+               everyRuleAloneMatchesTheFullRun();
+    }
+
+    /// A rule no fact from another unit can change owes the program nothing: on any project, no
+    /// unit is analysed a second time for it (#52).
+    bool testUnitLocalRulesReanalyseNothing()
+    {
+        bool ok = true;
+        for (const ProjectFixture& fixture : everyProjectFixture())
+        {
+            CompiledProject project;
+            if (!compileFixture(fixture, project))
+                return false;
+
+            for (const RuleId rule : kUnitLocalRules)
+            {
+                const ProjectAnalysisReport analysis =
+                    ProjectConcurrencyAnalyzer(AnalysisOptions{.enabledRules = {rule}})
+                        .analyze(project.units());
+                if (analysis.reanalyzedUnitCount == 0)
+                    continue;
+
+                std::cerr << "[FAIL] " << fixture.units.front() << ": " << toString(rule)
+                          << " reanalysed " << analysis.reanalyzedUnitCount << " unit(s)\n";
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    /// A narrow project run summarises the functions its rules computed something about, as a
+    /// single-unit run does (#52). A rule reading no entry concurrency lists no function merely
+    /// because a thread reaches it: only functions carrying one of its diagnostics. For the
+    /// rules no other unit can inform, those are the single-unit diagnostics, so the summaries
+    /// are the single-unit ones. missing-join and fork-after-thread are left out of that last
+    /// comparison on purpose: another unit legitimately changes what they report.
+    bool testNarrowFunctionsMatchWhatTheRulesComputed()
+    {
+        const auto readsEntryConcurrency = [](RuleId rule)
+        {
+            return std::find(std::begin(kEntryConcurrencyRules), std::end(kEntryConcurrencyRules),
+                             rule) != std::end(kEntryConcurrencyRules);
+        };
+        const auto isUnitLocal = [](RuleId rule)
+        {
+            return std::find(std::begin(kUnitLocalRules), std::end(kUnitLocalRules), rule) !=
+                   std::end(kUnitLocalRules);
+        };
+
+        bool ok = true;
+        for (const ProjectFixture& fixture : everyProjectFixture())
+        {
+            CompiledProject project;
+            if (!compileFixture(fixture, project))
+                return false;
+
+            for (const RuleId rule : AnalysisOptions::allAvailable().enabledRules)
+            {
+                if (readsEntryConcurrency(rule))
+                    continue;
+
+                const AnalysisOptions options{.enabledRules = {rule}};
+                const DiagnosticReport report =
+                    ProjectConcurrencyAnalyzer(options).analyze(project.units()).report;
+
+                bool onlyDiagnosed = true;
+                for (const FunctionSummary& function : report.functions)
+                {
+                    onlyDiagnosed = onlyDiagnosed && function.hasDiagnostics &&
+                                    !function.threadReachable && function.threadEntries.empty();
+                }
+                if (!onlyDiagnosed)
+                {
+                    std::cerr << "[FAIL] " << fixture.units.front() << ": " << toString(rule)
+                              << " summarises functions it computed nothing about\n";
+                    ok = false;
+                }
+
+                if (!isUnitLocal(rule))
+                    continue;
+
+                std::vector<std::string> singleUnit;
+                for (std::size_t index = 0; index < fixture.units.size(); ++index)
+                {
+                    const std::vector<std::string> unitFunctions = summarisedFunctions(
+                        SingleTUConcurrencyAnalyzer(options).analyze(project.moduleAt(index)));
+                    singleUnit.insert(singleUnit.end(), unitFunctions.begin(), unitFunctions.end());
+                }
+                std::sort(singleUnit.begin(), singleUnit.end());
+                if (summarisedFunctions(report) != singleUnit)
+                {
+                    std::cerr << "[FAIL] " << fixture.units.front() << ": " << toString(rule)
+                              << " summarises other functions than its single-unit runs\n";
+                    ok = false;
+                }
+            }
+        }
+        return ok;
     }
 
     /// An empty project is a valid input, not a crash.
@@ -837,6 +1049,8 @@ int main()
     ok = testNarrowRuleSelectionKeepsCrossUnitConclusions() && ok;
     ok = testExternGlobalReanalysisFollowsTheSelection() && ok;
     ok = testLockSummaryReanalysisFollowsTheSelection() && ok;
+    ok = testUnitLocalRulesReanalyseNothing() && ok;
+    ok = testNarrowFunctionsMatchWhatTheRulesComputed() && ok;
     ok = testConstantDeclarationsTriggerNoSecondPass() && ok;
     ok = testEmptyProjectIsAnEmptyReport() && ok;
     ok = testUnreadableUnitIsReportedAndTheRestAnalysed() && ok;
