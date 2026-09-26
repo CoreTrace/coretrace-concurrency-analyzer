@@ -529,18 +529,6 @@ entry:
         request.inputFile = fixturePath("tests/fixtures/empty.c").string();
         request.format = IRFormat::BC;
 
-        // compilerlib detects the macOS sysroot once per process and keeps the answer, a failed
-        // one included (coretrace-compiler#98): detected under an unusable TMPDIR, it would stay
-        // broken for every later compilation of this process. Detect it under the real TMPDIR
-        // first, here, so the test does not depend on what ran before it or poison what runs
-        // after. The limit that follows: this checks the bitcode path once the sysroot has been
-        // detected; it does not show that a first compilation succeeds under an unusable TMPDIR
-        // on macOS, where the detection itself needs one.
-        llvm::LLVMContext probeContext;
-        if (!assertTrue(compiler.compile(request, probeContext).success,
-                        "the BC compile should succeed with the real TMPDIR"))
-            return false;
-
         ScopedEnvVar tmpdirOverride("TMPDIR", "/dev/null");
         llvm::LLVMContext context;
         const ctrace::concurrency::CompileResult result = compiler.compile(request, context);
