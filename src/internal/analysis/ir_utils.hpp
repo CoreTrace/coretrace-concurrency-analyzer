@@ -116,15 +116,11 @@ namespace ctrace::concurrency::internal::analysis
                                                                const llvm::DataLayout* layout,
                                                                unsigned argumentIndex,
                                                                const std::string& objectId);
-    /// Resolves the tracked root of a pointer, together with the byte range it designates.
-    /// `byteSize` is the extent of the access; zero means unknown and conservatively covers the
-    /// whole object.
+    /// Resolves the tracked root of a pointer: where in it the pointer points, with `byteSize` as
+    /// the extent (zero when unknown), and the object the pointer designates.
     [[nodiscard]] std::optional<RootBinding>
     resolveTrackedRoot(const llvm::Value& value, const llvm::DataLayout* layout,
                        std::uint64_t byteSize,
-                       const ProgramDefinedGlobals* programDefined = nullptr);
-    [[nodiscard]] std::optional<RootBinding>
-    resolveTrackedRoot(const llvm::Value& value,
                        const ProgramDefinedGlobals* programDefined = nullptr);
     [[nodiscard]] std::optional<AliasResolvedGlobal>
     resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,

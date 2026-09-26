@@ -931,6 +931,25 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/data_race_opaque_call_on_same_field.c",
              .intent = "a call without a body handed the field the worker writes still races (#99)",
              .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_opaque_call_from_array_element.c",
+             .intent = "an element pointer handed on reaches later elements of its array (#99)",
+             .dataRace = 1, .racingSymbol = "values"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_opaque_call_reaches_earlier_element.c",
+             .intent = "an element pointer handed on reaches earlier elements of its array (#99)",
+             .dataRace = 1, .racingSymbol = "values"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_clears_member_array_tail.c",
+             .intent = "a helper clearing from inside an array member reaches the rest of it (#99)",
+             .dataRace = 1, .racingSymbol = "buffer"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_array_element_sibling_field_no_fp.c",
+             .intent = "an element pointer reaches its array, not the field next to it (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_opaque_call_from_array_element.c",
+             .intent = "a call without a body handed an element pointer reaches its array (#99)",
+             .dataRace = 1, .racingSymbol = "values"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_sequential_threads_no_fp.c",
              .intent = "a join separates the two spawns"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_read_after_helper_join_no_fp.c",
