@@ -16,10 +16,13 @@ still change between minor releases.
   therefore no longer fails with `temporary_bitcode_file_creation_failed` when
   the temporary directory is unusable, and that code is no longer produced. This
   is not a promise of no disk access: sources and headers are still read, and on
-  macOS the sysroot detection uses the temporary directory; a detection that
-  fails there is kept for the rest of the run (CoreTrace/coretrace-compiler#98).
-- coretrace-compiler moves to v0.8.0-31-g8387000, which adds that in-memory
-  output (CoreTrace/coretrace-compiler#95).
+  macOS the sysroot detection uses the temporary directory, so a unit that
+  includes a system header needs a usable one.
+- coretrace-compiler moves to v0.9.0-2-g8ae9765, which adds that in-memory
+  output (CoreTrace/coretrace-compiler#95) and no longer keeps a failed macOS
+  sysroot detection for the rest of the run: when the temporary directory was
+  unusable for one unit, the next units detect the sysroot again instead of all
+  failing on their system headers (CoreTrace/coretrace-compiler#98).
 - A project analysis with the cache no longer holds every unit's bitcode in
   memory: a unit is read from its cache entry each time it is analysed, and a
   unit whose entry changed meanwhile is reported as failed rather than analysed

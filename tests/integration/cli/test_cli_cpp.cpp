@@ -734,9 +734,9 @@ namespace
     /// created in, every one of them still succeeds, textual or bitcode, instrumented or not, and
     /// a project analysis without the cache. This says nothing of other disk access: the compiler
     /// still reads sources and headers, and the macOS sysroot detection uses the temporary
-    /// directory, which is why the source includes no system header. A detection that fails is
-    /// kept for the rest of the run (coretrace-compiler#98), so under an unusable TMPDIR on macOS a
-    /// source that does include one fails, and so does every later unit of the same run.
+    /// directory, which is why the source includes no system header: under an unusable TMPDIR on
+    /// macOS, a source that does include one fails, while the next units, once the directory is
+    /// usable again, detect the sysroot anew (coretrace-compiler#98).
     bool testCompilationNeedsNoTemporaryBitcodeFile()
     {
         bool ok = true;
