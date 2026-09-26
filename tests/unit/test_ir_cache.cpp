@@ -5,6 +5,8 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <system_error>
@@ -196,6 +198,58 @@ namespace
         const CompileCommand command{.file = "never-stored.c", .arguments = {}};
         return assertTrue(!cache->lookup(command).has_value(), "an unknown command misses");
     }
+    std::string readAll(const std::filesystem::path& path)
+    {
+        std::ifstream in(path, std::ios::in | std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+
+    /// An entry says where its bitcode is only while it is valid, and the file there holds the
+    /// stored bitcode: a project analysis reads the unit from it instead of keeping the bytes in
+    /// memory (#51).
+    bool testEntryPathFollowsTheEntryValidity()
+    {
+        const TemporaryDirectory scratch;
+        const std::filesystem::path header = scratch.write("header.h", "int shared;\n");
+        const std::filesystem::path source = scratch.write("unit.c", "#include \"header.h\"\n");
+        const std::filesystem::path depfile = scratch.write(
+            "unit.d", "unit.bc: " + source.string() + " \\\n  " + header.string() + "\n");
+
+        const std::optional<IRCache> cache = IRCache::open(scratch.path() / "cache");
+        if (!assertTrue(cache.has_value(), "the cache directory can be created"))
+            return false;
+
+        const CompileCommand command{.file = source.string(), .arguments = {"-std=c17"}};
+        const std::optional<std::filesystem::path> stored =
+            cache->store(command, "BITCODE", depfile);
+        const std::optional<std::filesystem::path> found = cache->lookupPath(command);
+        const bool valid =
+            assertTrue(stored.has_value(), "a complete entry says where its bitcode is") &&
+            assertTrue(found.has_value() && *found == *stored, "and a lookup finds it there") &&
+            assertTrue(readAll(*found) == "BITCODE", "the file there holds the stored bitcode");
+
+        std::ofstream(header, std::ios::out | std::ios::trunc) << "long shared;\n";
+        return valid && assertTrue(!cache->lookupPath(command).has_value(),
+                                   "a changed dependency takes the path away");
+    }
+
+    /// An entry that cannot be completed is not reported as stored, and nothing can be found.
+    bool testIncompleteEntryIsNotReportedAsStored()
+    {
+        const TemporaryDirectory scratch;
+        const std::filesystem::path source = scratch.write("unit.c", "int shared;\n");
+
+        const std::optional<IRCache> cache = IRCache::open(scratch.path() / "cache");
+        if (!assertTrue(cache.has_value(), "the cache directory can be created"))
+            return false;
+
+        const CompileCommand command{.file = source.string(), .arguments = {}};
+        const std::optional<std::filesystem::path> stored =
+            cache->store(command, "BITCODE", scratch.path() / "missing.d");
+        return assertTrue(!stored.has_value(), "without a dependency list there is no entry") &&
+               assertTrue(!cache->lookupPath(command).has_value(), "and nothing to find");
+    }
+
 } // namespace
 
 int main()
@@ -210,6 +264,8 @@ int main()
     ok = testRemovedDependencyInvalidatesTheEntry() && ok;
     ok = testDifferentFlagsDoNotShareAnEntry() && ok;
     ok = testMissingEntryIsAMiss() && ok;
+    ok = testEntryPathFollowsTheEntryValidity() && ok;
+    ok = testIncompleteEntryIsNotReportedAsStored() && ok;
 
     if (!ok)
         return 1;

@@ -194,8 +194,7 @@ analysis serially at 0.44 GB.
 
 The floor is the bitcode itself: 138 MB held for the whole run, plus the
 facts. The ceiling above it is roughly 45 MB per live unit on this workload.
-Spilling bitcode to a temporary file would lower the floor without changing the
-API; see `docs/cross-tu-mode.md`.
+With the cache, that floor is now gone: see "Bitcode read from the cache" below.
 
 ## Facts per selected rule: follow-up measurement
 
@@ -305,6 +304,39 @@ of a rule that reads no entry concurrency lists what its rules computed, as a
 single-unit run of that rule already did. The 865 entries recorded above for
 `--rules=missing-join` came from the project floor and no longer appear.
 
+## Bitcode read from the cache: follow-up measurement
+
+Measured on 2026-09-26 on the 49-unit workload, comparing `main` at `6c275ac`
+(every unit's bitcode held in memory for the whole run) with the change that
+reads a unit's bitcode from its cache entry each time it is analysed (#51).
+Same machine, toolchain and Release settings as above, a frozen copy of each
+binary, and `0 compiled, 49 reused, 0 failed` on every run. The reports are
+identical (diagnostics and `functions`, `meta` excluded). Eight interleaved
+runs per bound, in the order **A B B A B A A B**.
+
+Memory is the peak memory footprint from `/usr/bin/time -l`, which counts the
+process's compressed pages. The machine was compressing heavily during the runs
+(about 2.7 million pages in the compressor), and the resident size then misses
+what was compressed: the bitcode A holds and no longer touches is exactly such
+memory. Peak RSS is therefore not used here; its ranges overlap.
+
+| 49 units, warm cache | A: bitcode in memory | B: bitcode from the cache | Difference |
+| --- | --- | --- | --- |
+| `bitcode-mb` | 138 | 0 | |
+| Peak footprint, 8 live units (MB, median [range]) | 769.7 [748.0–774.7] | 607.5 [520.7–610.9] | −162 MB (−21%) |
+| Peak footprint, 1 live unit (MB, median [range]) | 360.7 [334.9–372.8] | 200.8 [191.4–211.9] | −160 MB (−44%) |
+
+The ranges do not overlap at either bound. The difference is the 138 MiB of
+bitcode (145 MB) plus what the allocator kept around it. Time is not claimed:
+the load average ran from 16 to 46 during the runs, and `analysis-ms`, `load-ms`
+and total wall time moved in both directions from run to run. Each load now
+reads its unit's file and checks its size and digest before parsing; at one
+live unit, where loads do not contend, the median `load-ms` was 2987 against
+2943.
+
+Without the cache (`--no-cache`) nothing changes: nothing is written to disk,
+so the bitcode stays in memory, and that floor remains.
+
 ## Scaling
 
 After that change, with the cross-TU thread pool active:
@@ -365,10 +397,10 @@ Ranked by measured weight, not by guess.
    its effect: 90.5% fewer constructions on the 49-unit workload. The call
    sites of a unit are now resolved once and shared, where three collectors
    each walked them before.
-3. **Bound memory in cross-TU mode — completed for modules.** The measurement
-   above records the effect: modules are bounded by `--max-live-units`, and the
-   remaining floor is the bitcode held in memory (138 MB here). Spilling it to
-   a temporary file is the next step on this axis.
+3. **Bound memory in cross-TU mode — completed.** The measurements above
+   record the effect: modules are bounded by `--max-live-units`, and with the
+   cache the bitcode is read from the cache entries instead of held (138 MB
+   here). Without the cache it is still held, since that mode writes nothing.
 4. **Reconsider unconditional fact building — completed.** The measurements above
    record the effect, first for a unit's own facts, then for the facts that
    cross unit boundaries in a project analysis: each rule now reads a known set
