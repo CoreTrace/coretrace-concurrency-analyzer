@@ -8,6 +8,19 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased
+
+- Compiling to bitcode no longer goes through a temporary file: the compiler
+  hands the bitcode over in memory, byte for byte what the file held, in every
+  mode (a single file or a project, instrumented or not). A bitcode compilation
+  therefore no longer fails with `temporary_bitcode_file_creation_failed` when
+  the temporary directory is unusable, and that code is no longer produced. This
+  is not a promise of no disk access: sources and headers are still read, and on
+  macOS the sysroot detection uses the temporary directory; a detection that
+  fails there is kept for the rest of the run (CoreTrace/coretrace-compiler#98).
+- coretrace-compiler moves to v0.8.0-31-g8387000, which adds that in-memory
+  output (CoreTrace/coretrace-compiler#95).
+
 ## v0.7.1
 
 Fixes for joins and waits delegated to a helper (#89): a thread joined, or a

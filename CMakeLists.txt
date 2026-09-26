@@ -74,7 +74,6 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/compile_command_builder.cpp
     src/internal/compilation_backend.cpp
     src/internal/ir_loader.cpp
-    src/internal/temporary_bitcode_file.cpp
     src/coretrace_concurrency_analyzer.cpp
 )
 

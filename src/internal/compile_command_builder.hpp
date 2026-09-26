@@ -3,7 +3,6 @@
 
 #include "coretrace_concurrency_analyzer.hpp"
 
-#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -14,8 +13,8 @@ namespace ctrace::concurrency::internal
       public:
         [[nodiscard]] static std::vector<std::string> buildLL(const CompileRequest& request);
 
-        [[nodiscard]] static std::vector<std::string>
-        buildBC(const CompileRequest& request, const std::filesystem::path& outputPath);
+        /// Bitcode is returned in memory, so no output file is named.
+        [[nodiscard]] static std::vector<std::string> buildBC(const CompileRequest& request);
 
       private:
         [[nodiscard]] static bool hasExactToken(const std::vector<std::string>& args,

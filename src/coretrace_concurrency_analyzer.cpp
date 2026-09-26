@@ -4,15 +4,12 @@
 #include "internal/compile_command_builder.hpp"
 #include "internal/compilation_backend.hpp"
 #include "internal/ir_loader.hpp"
-#include "internal/temporary_bitcode_file.hpp"
 
 #include <llvm/IR/LLVMContext.h>
 
 #include <filesystem>
 #include <fstream>
-#include <limits>
 #include <memory>
-#include <optional>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -27,44 +24,6 @@ namespace ctrace::concurrency
             result.error.code = make_error_code(code);
             result.error.phase = phase;
             result.error.message = std::move(message);
-        }
-
-        bool readBinaryFile(const std::filesystem::path& path, std::string& out)
-        {
-            out.clear();
-            std::ifstream in(path, std::ios::in | std::ios::binary);
-            if (!in)
-                return false;
-
-            in.seekg(0, std::ios::end);
-            if (!in)
-                return false;
-
-            const std::streampos endPos = in.tellg();
-            if (endPos < 0)
-                return false;
-
-            const std::size_t byteCount = static_cast<std::size_t>(endPos);
-            if (byteCount > static_cast<std::size_t>(std::numeric_limits<std::streamsize>::max()))
-                return false;
-
-            out.resize(byteCount);
-            in.seekg(0, std::ios::beg);
-            if (!in)
-            {
-                out.clear();
-                return false;
-            }
-
-            const std::streamsize expected = static_cast<std::streamsize>(out.size());
-            in.read(out.data(), expected);
-            if (in.gcount() != expected || in.bad())
-            {
-                out.clear();
-                return false;
-            }
-
-            return true;
         }
 
         bool validateInputFile(const std::string& inputFile, CompileError& error)
@@ -187,15 +146,12 @@ namespace ctrace::concurrency
             return result;
         }
 
-        const std::optional<internal::TemporaryBitcodeFile> bitcodeFile =
-            internal::TemporaryBitcodeFile::create(result.error);
-        if (!bitcodeFile)
-            return result;
-
-        const std::vector<std::string> args =
-            internal::CompileCommandBuilder::buildBC(request, bitcodeFile->path());
+        // No file is written for the bitcode here, temporary or not: the backend returns the bytes
+        // an output file would hold. Keeping them afterwards, as the IR cache does, is the
+        // caller's choice.
+        const std::vector<std::string> args = internal::CompileCommandBuilder::buildBC(request);
         internal::BackendCompileOutput backendResult =
-            backend_->compileBCToFile(args, request.instrument);
+            backend_->compileBCToMemory(args, request.instrument);
         result.diagnostics = std::move(backendResult.diagnostics);
 
         if (!backendResult.success)
@@ -205,12 +161,14 @@ namespace ctrace::concurrency
             return result;
         }
 
-        if (!readBinaryFile(bitcodeFile->path(), result.llvmBitcode))
+        if (backendResult.llvmBitcode.empty())
         {
-            setCompileError(result, CompilePhase::BackendCompile, CompileErrc::BitcodeReadFailed,
-                            bitcodeFile->path().string());
+            setCompileError(result, CompilePhase::BackendCompile, CompileErrc::MissingIROutput,
+                            "compiler backend returned an empty bitcode payload in bc mode");
             return result;
         }
+
+        result.llvmBitcode = std::move(backendResult.llvmBitcode);
 
         result.module = irLoader_->parseBC(result.llvmBitcode, context, result.error);
         if (!result.module)

@@ -25,6 +25,8 @@ namespace ctrace::concurrency
         InputFileDoesNotExist,
         InputFileNotRegular,
         InputFileNotReadable,
+        /// No longer produced: bitcode is compiled in memory. Kept so the codes after it keep
+        /// their values.
         TemporaryBitcodeFileCreationFailed,
         BackendCompilationFailed,
         MissingIROutput,
