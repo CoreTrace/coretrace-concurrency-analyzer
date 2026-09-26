@@ -10,11 +10,11 @@ endif()
 
 # A tag of this project has to build the same way in a year as it does today,
 # and GIT_TAG main would let the compiler backend drift underneath a fixed tag.
-# The commit below is v0.7.0-33-g866fa76, the tree this project is validated
+# The commit below is v0.8.0-31-g8387000, the tree this project is validated
 # against; move it deliberately, as its own commit, not as a side effect.
 FetchContent_Declare(
     cc
     GIT_REPOSITORY https://github.com/CoreTrace/coretrace-compiler.git
-    GIT_TAG 866fa76403f29e4fefda99770e04d284175f4408
+    GIT_TAG 83870006fb2efdb0ff6c66b2d03c0b5f95d82d6c
 )
 FetchContent_MakeAvailable(cc)
