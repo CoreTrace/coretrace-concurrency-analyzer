@@ -11,6 +11,7 @@ namespace ctrace::concurrency::internal
         bool success = false;
         std::string diagnostics;
         std::string llvmIR;
+        std::string llvmBitcode;
     };
 
     class ICompilationBackend
@@ -21,8 +22,10 @@ namespace ctrace::concurrency::internal
         [[nodiscard]] virtual BackendCompileOutput
         compileLLToMemory(const std::vector<std::string>& args, bool instrument) const = 0;
 
+        /// The bitcode the arguments ask for, held in memory: neither an output file nor a
+        /// temporary file is written for it.
         [[nodiscard]] virtual BackendCompileOutput
-        compileBCToFile(const std::vector<std::string>& args, bool instrument) const = 0;
+        compileBCToMemory(const std::vector<std::string>& args, bool instrument) const = 0;
     };
 
     class CompilerLibBackend final : public ICompilationBackend
@@ -31,7 +34,7 @@ namespace ctrace::concurrency::internal
         [[nodiscard]] BackendCompileOutput compileLLToMemory(const std::vector<std::string>& args,
                                                              bool instrument) const override;
 
-        [[nodiscard]] BackendCompileOutput compileBCToFile(const std::vector<std::string>& args,
-                                                           bool instrument) const override;
+        [[nodiscard]] BackendCompileOutput compileBCToMemory(const std::vector<std::string>& args,
+                                                             bool instrument) const override;
     };
 } // namespace ctrace::concurrency::internal

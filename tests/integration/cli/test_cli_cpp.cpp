@@ -713,16 +713,67 @@ namespace
         }
 
         {
+            // Bitcode is compiled in memory: no temporary file is needed, so a TMPDIR nothing can
+            // be created in does not stop it. The source includes no system header, because on
+            // macOS the sysroot probe does use the temporary directory.
             const RunResult result = runAnalyzer(
-                {fixturePath("hello.c").string(), "--ir-format=bc"}, "TMPDIR=/dev/null");
-            ok = assertTrue(result.exitCode == 1,
-                            "invalid TMPDIR should fail temporary bitcode creation") &&
-                 ok;
-            ok = assertContains(result.output, "temporary_bitcode_file_creation_failed",
-                                "TMPDIR failure output") &&
+                {fixturePath("empty.c").string(), "--ir-format=bc"}, "TMPDIR=/dev/null");
+            ok = assertTrue(result.exitCode == 0,
+                            "an unusable TMPDIR should not stop a bitcode compilation\noutput:\n" +
+                                result.output) &&
                  ok;
         }
 
+        return ok;
+    }
+
+    /// No mode of compilation writes a temporary bitcode file: with a TMPDIR nothing can be
+    /// created in, every one of them still succeeds, textual or bitcode, instrumented or not, and
+    /// a project analysis without the cache. This says nothing of other disk access: the compiler
+    /// still reads sources and headers, and the macOS sysroot detection uses the temporary
+    /// directory, which is why the source includes no system header. A detection that fails is
+    /// kept for the rest of the run (coretrace-compiler#98), so under an unusable TMPDIR on macOS a
+    /// source that does include one fails, and so does every later unit of the same run.
+    bool testCompilationNeedsNoTemporaryBitcodeFile()
+    {
+        bool ok = true;
+        const std::string source = fixturePath("empty.c").string();
+        for (const std::string format : {"--ir-format=ll", "--ir-format=bc"})
+        {
+            for (const bool instrument : {false, true})
+            {
+                std::vector<std::string> args = {source, format};
+                if (instrument)
+                    args.push_back("--instrument");
+                const RunResult result = runAnalyzer(args, "TMPDIR=/dev/null");
+                ok = assertTrue(result.exitCode == 0,
+                                format + (instrument ? " --instrument" : "") +
+                                    " should not need a temporary file\noutput:\n" +
+                                    result.output) &&
+                     ok;
+            }
+        }
+
+        const std::filesystem::path projectDir = makeTempDir("ctrace-cli-no-temp");
+        if (!assertTrue(!projectDir.empty(), "project directory should be created"))
+            return false;
+        const std::filesystem::path database = projectDir / "compile_commands.json";
+        {
+            std::ofstream out(database);
+            out << "[{\"directory\": \"" << projectDir.string() << "\", \"file\": \"" << source
+                << "\", \"arguments\": [\"clang\", \"-c\", \"" << source
+                << "\", \"-o\", \"empty.o\"]}]\n";
+        }
+        const RunResult project = runAnalyzer(
+            {"--compile-commands=" + database.string(), "--no-cache"}, "TMPDIR=/dev/null");
+        ok = assertTrue(project.exitCode == 0,
+                        "a project analysis without the cache should not need a temporary "
+                        "file\noutput:\n" +
+                            project.output) &&
+             ok;
+
+        std::error_code ec;
+        std::filesystem::remove_all(projectDir, ec);
         return ok;
     }
 
@@ -808,6 +859,7 @@ int main()
     ok = testRuleSelectionAndNewChecks() && ok;
     ok = testInputValidationFailuresAndBackendDiagnostics() && ok;
     ok = testPermissionRelatedInputFailures() && ok;
+    ok = testCompilationNeedsNoTemporaryBitcodeFile() && ok;
 
     if (!ok)
         return 1;

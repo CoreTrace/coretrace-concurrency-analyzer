@@ -4,7 +4,6 @@
 #include "internal/compilation_backend.hpp"
 #include "internal/compile_command_builder.hpp"
 #include "internal/ir_loader.hpp"
-#include "internal/temporary_bitcode_file.hpp"
 
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
@@ -37,7 +36,6 @@ namespace
     using ctrace::concurrency::internal::ICompilationBackend;
     using ctrace::concurrency::internal::IIRLoader;
     using ctrace::concurrency::internal::LLVMIRLoader;
-    using ctrace::concurrency::internal::TemporaryBitcodeFile;
 
     constexpr std::string_view kValidLL = R"(
 ; ModuleID = 'fake'
@@ -60,16 +58,6 @@ entry:
                             [token](const std::string& arg) { return arg == token; }) != args.end();
     }
 
-    bool hasOutputPair(const std::vector<std::string>& args, const std::string& outputPath)
-    {
-        for (std::size_t index = 1; index < args.size(); ++index)
-        {
-            if (args[index - 1] == "-o" && args[index] == outputPath)
-                return true;
-        }
-        return false;
-    }
-
     bool isOutputFlagVariant(const std::string& arg)
     {
         if (arg == "-o")
@@ -88,34 +76,6 @@ entry:
         }
 
         return false;
-    }
-
-    bool hasOutputFlagVariantOutsideFinalPair(const std::vector<std::string>& args,
-                                              const std::string& outputPath)
-    {
-        for (std::size_t index = 0; index < args.size(); ++index)
-        {
-            if (args[index] == "-o" && index + 1 < args.size() && args[index + 1] == outputPath)
-            {
-                ++index;
-                continue;
-            }
-
-            if (isOutputFlagVariant(args[index]))
-                return true;
-        }
-
-        return false;
-    }
-
-    std::optional<std::filesystem::path> findOutputPath(const std::vector<std::string>& args)
-    {
-        for (std::size_t index = 1; index < args.size(); ++index)
-        {
-            if (args[index - 1] == "-o")
-                return std::filesystem::path(args[index]);
-        }
-        return std::nullopt;
     }
 
     class ScopedEnvVar final
@@ -162,8 +122,8 @@ entry:
             return llHandler_(args, instrument);
         }
 
-        BackendCompileOutput compileBCToFile(const std::vector<std::string>& args,
-                                             bool instrument) const override
+        BackendCompileOutput compileBCToMemory(const std::vector<std::string>& args,
+                                               bool instrument) const override
         {
             return bcHandler_(args, instrument);
         }
@@ -453,26 +413,20 @@ entry:
                           "BC backend failure should be tagged with BackendCompile phase");
     }
 
-    bool testInMemoryCompilerReportsBitcodeReadFailureWhenOutputMissing()
+    bool testInMemoryCompilerWithMissingBCOutput()
     {
         auto backend = std::make_shared<FakeBackend>(
             [](const std::vector<std::string>&, bool) { return BackendCompileOutput{}; },
-            [](const std::vector<std::string>& args, bool)
+            [](const std::vector<std::string>&, bool)
             {
-                const std::optional<std::filesystem::path> outputPath = findOutputPath(args);
-                if (outputPath.has_value())
-                {
-                    std::error_code ec;
-                    std::filesystem::remove(*outputPath, ec);
-                }
-
                 BackendCompileOutput output;
                 output.success = true;
+                output.diagnostics = "fake bc success without payload\n";
+                output.llvmBitcode.clear();
                 return output;
             });
 
-        auto loader = std::make_shared<LLVMIRLoader>();
-        InMemoryIRCompiler compiler(backend, loader);
+        InMemoryIRCompiler compiler(backend, std::make_shared<LLVMIRLoader>());
 
         CompileRequest request;
         request.inputFile = fixturePath("tests/fixtures/hello.c").string();
@@ -481,11 +435,12 @@ entry:
         llvm::LLVMContext context;
         const ctrace::concurrency::CompileResult result = compiler.compile(request, context);
 
-        return assertTrue(!result.success, "missing bitcode file should fail") &&
-               assertTrue(result.error.code == make_error_code(CompileErrc::BitcodeReadFailed),
-                          "missing bitcode file should map to BitcodeReadFailed") &&
+        return assertTrue(!result.success,
+                          "BC compile should fail when bitcode payload is empty") &&
+               assertTrue(result.error.code == make_error_code(CompileErrc::MissingIROutput),
+                          "empty BC payload should map to MissingIROutput") &&
                assertTrue(result.error.phase == CompilePhase::BackendCompile,
-                          "missing bitcode file should use BackendCompile phase");
+                          "empty BC payload should be tagged with BackendCompile phase");
     }
 
     bool testInMemoryCompilerUsesFallbackErrorWhenBCLoaderReturnsNoError()
@@ -496,6 +451,7 @@ entry:
                                                      {
                                                          BackendCompileOutput output;
                                                          output.success = true;
+                                                         output.llvmBitcode = "not bitcode";
                                                          return output;
                                                      });
 
@@ -531,6 +487,7 @@ entry:
                                                      {
                                                          BackendCompileOutput output;
                                                          output.success = true;
+                                                         output.llvmBitcode = "not bitcode";
                                                          return output;
                                                      });
 
@@ -561,24 +518,97 @@ entry:
                           "custom BC loader message should be preserved");
     }
 
-    bool testInMemoryCompilerFailsWhenTemporaryBitcodeCreationFails()
+    /// Bitcode is compiled in memory, so a TMPDIR nothing can be created in does not stop it.
+    /// The source includes no system header: on macOS the sysroot probe does use the temporary
+    /// directory, and what it writes there is not bitcode.
+    bool testInMemoryCompilerNeedsNoTemporaryFile()
     {
-        ScopedEnvVar tmpdirOverride("TMPDIR", "/dev/null");
         InMemoryIRCompiler compiler;
 
         CompileRequest request;
-        request.inputFile = fixturePath("tests/fixtures/hello.c").string();
+        request.inputFile = fixturePath("tests/fixtures/empty.c").string();
         request.format = IRFormat::BC;
 
+        // compilerlib detects the macOS sysroot once per process and keeps the answer, a failed
+        // one included (coretrace-compiler#98): detected under an unusable TMPDIR, it would stay
+        // broken for every later compilation of this process. Detect it under the real TMPDIR
+        // first, here, so the test does not depend on what ran before it or poison what runs
+        // after. The limit that follows: this checks the bitcode path once the sysroot has been
+        // detected; it does not show that a first compilation succeeds under an unusable TMPDIR
+        // on macOS, where the detection itself needs one.
+        llvm::LLVMContext probeContext;
+        if (!assertTrue(compiler.compile(request, probeContext).success,
+                        "the BC compile should succeed with the real TMPDIR"))
+            return false;
+
+        ScopedEnvVar tmpdirOverride("TMPDIR", "/dev/null");
         llvm::LLVMContext context;
         const ctrace::concurrency::CompileResult result = compiler.compile(request, context);
 
-        return assertTrue(!result.success, "invalid TMPDIR should fail BC compile") &&
-               assertTrue(result.error.code ==
-                              make_error_code(CompileErrc::TemporaryBitcodeFileCreationFailed),
-                          "TMPDIR failure should map to TemporaryBitcodeFileCreationFailed") &&
-               assertTrue(result.error.phase == CompilePhase::BuildCommand,
-                          "TMPDIR failure should be reported as BuildCommand phase");
+        return assertTrue(result.success, "an unusable TMPDIR should not stop a BC compile") &&
+               assertTrue(result.module != nullptr && !result.llvmBitcode.empty(),
+                          "the BC compile should still return its module and bitcode");
+    }
+
+    /// Every bitcode compilation goes through the in-memory output, once, naming no output file
+    /// a fallback could write or read, and the module is parsed from exactly the bytes that
+    /// output returned. Instrumented or not, there is no other way for bitcode to arrive.
+    bool testBitcodeCompilationUsesTheMemoryOutput()
+    {
+        bool ok = true;
+        for (const bool instrument : {false, true})
+        {
+            int bitcodeCalls = 0;
+            bool instrumentSeen = !instrument;
+            std::vector<std::string> argsSeen;
+            auto backend = std::make_shared<FakeBackend>(
+                [](const std::vector<std::string>&, bool) { return BackendCompileOutput{}; },
+                [&](const std::vector<std::string>& args, bool instrumented)
+                {
+                    ++bitcodeCalls;
+                    argsSeen = args;
+                    instrumentSeen = instrumented;
+                    BackendCompileOutput output;
+                    output.success = true;
+                    output.llvmBitcode = "bitcode held in memory";
+                    return output;
+                });
+
+            std::string parsed;
+            auto loader = std::make_shared<FakeLoader>(
+                [](std::string_view, llvm::LLVMContext&, CompileError&)
+                { return std::unique_ptr<llvm::Module>{}; },
+                [&](std::string_view bitcode, llvm::LLVMContext& context, CompileError&)
+                {
+                    parsed = std::string(bitcode);
+                    return makeValidModule(context);
+                });
+
+            InMemoryIRCompiler compiler(backend, loader);
+            CompileRequest request;
+            request.inputFile = fixturePath("tests/fixtures/hello.c").string();
+            request.format = IRFormat::BC;
+            request.instrument = instrument;
+            request.extraCompileArgs = {"-o", "stale.bc"};
+
+            llvm::LLVMContext context;
+            const ctrace::concurrency::CompileResult result = compiler.compile(request, context);
+
+            const std::string mode = instrument ? "instrumented" : "plain";
+            ok = assertTrue(result.success, mode + " BC compile should succeed") &&
+                 assertTrue(bitcodeCalls == 1,
+                            mode + " BC compile should ask the memory output once") &&
+                 assertTrue(instrumentSeen == instrument,
+                            mode + " BC compile should pass the instrumentation choice through") &&
+                 assertTrue(!hasOutputFlagVariant(argsSeen),
+                            mode + " BC compile should name no output file") &&
+                 assertTrue(
+                     parsed == "bitcode held in memory" &&
+                         result.llvmBitcode == "bitcode held in memory",
+                     mode + " BC module should come from the bytes the memory output returned") &&
+                 ok;
+        }
+        return ok;
     }
 
     bool testInMemoryCompilerWithRealBackendAndDefaultCtor()
@@ -802,8 +832,7 @@ entry:
             assertTrue(hasToken(llArgs, "-S"), "LL args should include -S") &&
             assertTrue(hasToken(llArgs, "-g"), "LL args should include -g");
 
-        const std::filesystem::path outputPath = fixturePath("build/test-output.bc");
-        const std::vector<std::string> bcArgs = CompileCommandBuilder::buildBC(request, outputPath);
+        const std::vector<std::string> bcArgs = CompileCommandBuilder::buildBC(request);
         const bool bcOk =
             assertTrue(countToken(bcArgs, request.inputFile) == 1,
                        "BC args should include input file only once") &&
@@ -811,8 +840,8 @@ entry:
             assertTrue(hasToken(bcArgs, "-c"), "BC args should include -c") &&
             assertTrue(hasToken(bcArgs, "-g"), "BC args should include -g") &&
             assertTrue(!hasToken(bcArgs, "-S"), "BC args should not include -S") &&
-            assertTrue(hasOutputPair(bcArgs, outputPath.string()),
-                       "BC args should include -o <outputPath>");
+            assertTrue(!hasOutputFlagVariant(bcArgs),
+                       "BC args should name no output file: the bitcode is held in memory");
 
         return llOk && bcOk;
     }
@@ -832,66 +861,11 @@ entry:
             assertTrue(hasToken(llArgs, "-Winvalid"), "LL args should preserve -Winvalid") &&
             assertTrue(hasToken(llArgs, "-DVALUE=1"), "LL args should preserve defines");
 
-        const std::filesystem::path outputPath = fixturePath("build/output-attached.bc");
-        const std::vector<std::string> bcArgs = CompileCommandBuilder::buildBC(request, outputPath);
-        const bool hasStaleOutputFlag =
-            hasOutputFlagVariantOutsideFinalPair(bcArgs, outputPath.string());
-        const bool bcOk =
-            assertTrue(countToken(bcArgs, "-o") == 1, "BC args should contain exactly one -o") &&
-            assertTrue(hasOutputPair(bcArgs, outputPath.string()),
-                       "BC args should target requested output path") &&
-            assertTrue(
-                !hasStaleOutputFlag,
-                "BC args should strip stale attached -o variants before appending final pair");
+        const std::vector<std::string> bcArgs = CompileCommandBuilder::buildBC(request);
+        const bool bcOk = assertTrue(!hasOutputFlagVariant(bcArgs),
+                                     "BC args should strip all -o* output flags and add none");
 
         return llOk && bcOk;
-    }
-
-    bool testTemporaryBitcodeFileMoveAssignmentAndSelfAssignment()
-    {
-        CompileError firstError;
-        CompileError secondError;
-        std::filesystem::path movedPath;
-        std::filesystem::path oldSecondPath;
-
-        {
-            std::optional<TemporaryBitcodeFile> first = TemporaryBitcodeFile::create(firstError);
-            std::optional<TemporaryBitcodeFile> second = TemporaryBitcodeFile::create(secondError);
-
-            const bool created =
-                assertTrue(first.has_value() && second.has_value(),
-                           "temporary bitcode files should be created for move test") &&
-                assertTrue(std::filesystem::exists(first->path()),
-                           "first temp bitcode file should exist") &&
-                assertTrue(std::filesystem::exists(second->path()),
-                           "second temp bitcode file should exist");
-            if (!created)
-                return false;
-
-            const std::filesystem::path firstPath = first->path();
-            oldSecondPath = second->path();
-
-            *second = std::move(*first);
-            const bool moveAssignOk =
-                assertTrue(second->path() == firstPath,
-                           "move assignment should transfer path from source to destination") &&
-                assertTrue(first->path().empty(),
-                           "moved-from temporary file path should be empty") &&
-                assertTrue(!std::filesystem::exists(oldSecondPath),
-                           "move assignment should cleanup destination's old file");
-            if (!moveAssignOk)
-                return false;
-
-            movedPath = second->path();
-            *second = std::move(*second);
-            const bool selfAssignOk = assertTrue(second->path() == movedPath,
-                                                 "self move-assignment should preserve path");
-            if (!selfAssignOk)
-                return false;
-        }
-
-        return assertTrue(!std::filesystem::exists(movedPath),
-                          "temporary bitcode file destructor should cleanup moved path");
     }
 } // namespace
 
@@ -905,10 +879,11 @@ int main()
     ok = testInMemoryCompilerWithMissingLLOutput() && ok;
     ok = testInMemoryCompilerUsesFallbackErrorWhenLLLoaderReturnsNoError() && ok;
     ok = testInMemoryCompilerWithBCBackendFailure() && ok;
-    ok = testInMemoryCompilerReportsBitcodeReadFailureWhenOutputMissing() && ok;
+    ok = testInMemoryCompilerWithMissingBCOutput() && ok;
     ok = testInMemoryCompilerUsesFallbackErrorWhenBCLoaderReturnsNoError() && ok;
     ok = testInMemoryCompilerPreservesBCLoaderError() && ok;
-    ok = testInMemoryCompilerFailsWhenTemporaryBitcodeCreationFails() && ok;
+    ok = testInMemoryCompilerNeedsNoTemporaryFile() && ok;
+    ok = testBitcodeCompilationUsesTheMemoryOutput() && ok;
     ok = testInMemoryCompilerWithRealBackendAndDefaultCtor() && ok;
     ok = testInMemoryCompilerWithNullDependencyFallbackCtor() && ok;
     ok = testInMemoryCompilerRejectsEmptyInputRequest() && ok;
@@ -919,7 +894,6 @@ int main()
     ok = testIRLoaderErrorMapping() && ok;
     ok = testCompileCommandBuilderAvoidsDuplicateInputFile() && ok;
     ok = testCompileCommandBuilderStripsAttachedOutputFlags() && ok;
-    ok = testTemporaryBitcodeFileMoveAssignmentAndSelfAssignment() && ok;
 
     if (!ok)
         return 1;

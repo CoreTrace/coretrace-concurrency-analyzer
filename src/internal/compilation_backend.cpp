@@ -15,6 +15,7 @@ namespace ctrace::concurrency::internal
             output.success = raw.success;
             output.diagnostics = std::move(raw.diagnostics);
             output.llvmIR = std::move(raw.llvmIR);
+            output.llvmBitcode = std::move(raw.llvmBitcode);
             return output;
         }
     } // namespace
@@ -27,11 +28,11 @@ namespace ctrace::concurrency::internal
         return toBackendOutput(std::move(raw));
     }
 
-    BackendCompileOutput CompilerLibBackend::compileBCToFile(const std::vector<std::string>& args,
-                                                             bool instrument) const
+    BackendCompileOutput CompilerLibBackend::compileBCToMemory(const std::vector<std::string>& args,
+                                                               bool instrument) const
     {
         compilerlib::CompileResult raw =
-            compilerlib::compile(args, compilerlib::OutputMode::ToFile, instrument);
+            compilerlib::compile(args, compilerlib::OutputMode::ToMemoryBitcode, instrument);
         return toBackendOutput(std::move(raw));
     }
 } // namespace ctrace::concurrency::internal

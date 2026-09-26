@@ -70,8 +70,7 @@ namespace ctrace::concurrency::internal
         return args;
     }
 
-    std::vector<std::string> CompileCommandBuilder::buildBC(const CompileRequest& request,
-                                                            const std::filesystem::path& outputPath)
+    std::vector<std::string> CompileCommandBuilder::buildBC(const CompileRequest& request)
     {
         std::vector<std::string> args = request.extraCompileArgs;
         forceUnoptimizedCodegen(args);
@@ -80,8 +79,6 @@ namespace ctrace::concurrency::internal
         appendIfMissing(args, "-emit-llvm");
         appendIfMissing(args, "-c");
         appendIfMissing(args, "-g");
-        args.push_back("-o");
-        args.push_back(outputPath.string());
         if (!hasExactToken(args, request.inputFile))
             args.push_back(request.inputFile);
         return args;
