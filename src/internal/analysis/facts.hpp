@@ -90,11 +90,18 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         /// Composes a callee-relative region with the region its argument already points at.
+        ///
+        /// A callee region of unknown extent starting at its parameter covers the whole object
+        /// the parameter designates. In the caller, that object is what the argument designates,
+        /// so it takes the argument's extent: a member handed to a helper bounds what the helper
+        /// may reach, as it already does for an effect inferred at the caller's own call.
         [[nodiscard]] MemoryRegion rebasedOn(const MemoryRegion& base) const noexcept
         {
             MemoryRegion composed = *this;
             composed.hasKnownOffset = hasKnownOffset && base.hasKnownOffset;
             composed.byteOffset = byteOffset + base.byteOffset;
+            if (hasKnownOffset && byteOffset == 0 && byteSize == 0)
+                composed.byteSize = base.byteSize;
             return composed;
         }
 

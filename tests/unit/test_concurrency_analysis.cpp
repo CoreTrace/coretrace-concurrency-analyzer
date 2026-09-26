@@ -834,10 +834,8 @@ namespace
              .intent = "the thread that hands the object over keeps using it",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency-cxx20/cpp_object_owns_its_thread_race.cpp",
-             .intent = "a constructor that starts a thread leaves it running for its caller; "
-                       "libstdc++ routes the member through one more accessor than libc++ and "
-                       "so reports the same race twice",
-             .dataRace = 1, .requiresCxx20 = true, .countsAreMinimums = true},
+             .intent = "a constructor that starts a thread leaves it running for its caller",
+             .dataRace = 1, .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_helper_joins_before_returning_no_fp.cpp",
              .intent = "a helper that waits for its thread hands nothing back",
@@ -921,6 +919,18 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_disjoint_struct_fields_no_fp.c",
              .intent = "workers write distinct fields of a global struct"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_writes_sibling_field_no_fp.c",
+             .intent = "a helper's write to the field it is handed stays at that field's offset (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_writes_same_field.c",
+             .intent = "a helper handed the field the worker writes still races (#99)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_opaque_call_on_sibling_field_no_fp.c",
+             .intent = "a call without a body reaches only the field it is handed, not the whole global (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_opaque_call_on_same_field.c",
+             .intent = "a call without a body handed the field the worker writes still races (#99)",
+             .dataRace = 1, .racingSymbol = "shared"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_sequential_threads_no_fp.c",
              .intent = "a join separates the two spawns"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_read_after_helper_join_no_fp.c",
@@ -966,7 +976,7 @@ namespace
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/cpp_iterator_invalidation_race.cpp",
              .intent = "vector insertion races with iteration; counts vary with standard-library lowering",
-             .dataRace = 3,
+             .dataRace = 2,
              .requiresCxx20 = true,
              .countsAreMinimums = true},
             {.path = "tests/fixtures/concurrency/data-race/cpp_lambda_capture_race.cpp",
@@ -979,7 +989,7 @@ namespace
              .countsAreMinimums = true},
             {.path = "tests/fixtures/concurrency/data-race/cpp_shared_ptr_race.cpp",
              .intent = "the shared pointer object races despite its atomic reference count; library-dependent accesses",
-             .dataRace = 6,
+             .dataRace = 5,
              .requiresCxx20 = true,
              .countsAreMinimums = true},
             {.path = "tests/fixtures/concurrency/data-race/data_race_lazy_init.c",
