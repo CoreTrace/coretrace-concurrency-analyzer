@@ -20,6 +20,15 @@ still change between minor releases.
   fails there is kept for the rest of the run (CoreTrace/coretrace-compiler#98).
 - coretrace-compiler moves to v0.8.0-31-g8387000, which adds that in-memory
   output (CoreTrace/coretrace-compiler#95).
+- A project analysis with the cache no longer holds every unit's bitcode in
+  memory: a unit is read from its cache entry each time it is analysed, and a
+  unit whose entry changed meanwhile is reported as failed rather than analysed
+  on different IR. On the 49-unit workload the peak memory footprint drops by
+  about 160 MB (138 MiB of bitcode), from 770 to 608 MB at eight live units and
+  from 361 to 201 MB at one. `--no-cache` neither reads nor writes the cache,
+  so the bitcode stays in memory there. `ProjectUnitSource::addFile` is the
+  library side: a unit whose bitcode stays in a file, read and checked against
+  its size and digest at every load.
 
 ## v0.7.1
 

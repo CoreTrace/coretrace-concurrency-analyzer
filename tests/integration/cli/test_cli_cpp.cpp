@@ -2,13 +2,16 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace
@@ -777,6 +780,181 @@ namespace
         return ok;
     }
 
+    /// A project whose compile database sits in its own directory, with the cache beside it:
+    /// the two units of cross-tu-data-race, which race only when read together, and a generated
+    /// unit holding more than a megabyte of bitcode, so that `bitcode-mb` tells bytes kept in
+    /// memory from none.
+    std::filesystem::path writeCacheProject(const std::filesystem::path& directory)
+    {
+        const std::filesystem::path big = directory / "big.c";
+        {
+            std::ofstream out(big);
+            out << "static const char blob[] = \"" << std::string(1500000, 'x') << "\";\n"
+                << "int read_blob(int index) { return blob[index]; }\n";
+        }
+
+        const std::vector<std::filesystem::path> sources = {
+            fixturePath("concurrency-project/cross-tu-data-race/main.c"),
+            fixturePath("concurrency-project/cross-tu-data-race/worker.c"), big};
+        const std::filesystem::path database = directory / "compile_commands.json";
+        std::ofstream out(database);
+        out << "[";
+        for (std::size_t index = 0; index < sources.size(); ++index)
+        {
+            const std::string source = sources[index].string();
+            out << (index == 0 ? "" : ",") << "{\"directory\": \"" << directory.string()
+                << "\", \"file\": \"" << source << "\", \"arguments\": [\"clang\", \"-c\", \""
+                << source << "\", \"-o\", \"unit" << index << ".o\"]}";
+        }
+        out << "]\n";
+        return database;
+    }
+
+    /// The JSON report without its `meta` object, which records timings: what two runs must
+    /// agree on.
+    std::string reportWithoutMeta(const std::string& output)
+    {
+        const std::size_t begin = output.find("{\n  \"diagnostics\"");
+        const std::size_t end = output.find("\"meta\"", begin);
+        if (begin == std::string::npos || end == std::string::npos)
+            return {};
+        return output.substr(begin, end - begin);
+    }
+
+    /// The value `--verbose` printed for `key`, or -1 when it printed none.
+    long verboseNumber(const std::string& output, std::string_view key)
+    {
+        const std::string label = std::string(key) + ": ";
+        const std::size_t at = output.find(label);
+        if (at == std::string::npos)
+            return -1;
+        return std::stol(output.substr(at + label.size()));
+    }
+
+    /// With the cache, a project unit's bitcode stays in its cache entry and is read from there
+    /// when the unit is analysed, whether the run compiled it or reused it: none is kept in
+    /// memory. Without the cache it is kept in memory. The reports are the same either way (#51).
+    bool testCachedProjectKeepsNoBitcodeInMemory()
+    {
+        const std::filesystem::path directory = makeTempDir("ctrace-cli-cache-memory");
+        if (!assertTrue(!directory.empty(), "project directory should be created"))
+            return false;
+        const std::string database = "--compile-commands=" + writeCacheProject(directory).string();
+
+        const RunResult noCache =
+            runAnalyzer({database, "--no-cache", "--verbose", "--format=json"});
+        const RunResult first = runAnalyzer({database, "--verbose", "--format=json"});
+        const RunResult second = runAnalyzer({database, "--verbose", "--format=json"});
+
+        const std::string expected = reportWithoutMeta(noCache.output);
+        bool ok = assertTrue(noCache.exitCode == 0 && first.exitCode == 0 && second.exitCode == 0,
+                             "the three runs should succeed\noutput:\n" + noCache.output +
+                                 first.output + second.output) &&
+                  assertTrue(expected.find("shared_counter") != std::string::npos,
+                             "the reference report should hold the cross-unit race");
+        ok = assertTrue(verboseNumber(noCache.output, "bitcode-mb") >= 1,
+                        "without the cache the bitcode is kept in memory") &&
+             ok;
+        ok = assertContains(first.output, "units: 3 compiled, 0 reused", "first cached run") &&
+             assertTrue(verboseNumber(first.output, "bitcode-mb") == 0,
+                        "units compiled and stored are read back from the cache") &&
+             ok;
+        ok = assertContains(second.output, "units: 0 compiled, 3 reused", "second cached run") &&
+             assertTrue(verboseNumber(second.output, "bitcode-mb") == 0,
+                        "units reused are read from the cache") &&
+             ok;
+        ok = assertTrue(reportWithoutMeta(first.output) == expected &&
+                            reportWithoutMeta(second.output) == expected,
+                        "cached runs report exactly what the run without the cache reports") &&
+             ok;
+
+        std::error_code ec;
+        std::filesystem::remove_all(directory, ec);
+        return ok;
+    }
+
+    /// Every file of a directory, by name, with its contents.
+    std::vector<std::pair<std::string, std::string>> snapshot(const std::filesystem::path& root)
+    {
+        std::vector<std::pair<std::string, std::string>> files;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(root, ec))
+        {
+            std::ifstream in(entry.path(), std::ios::binary);
+            files.emplace_back(
+                entry.path().filename().string(),
+                std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>()));
+        }
+        std::sort(files.begin(), files.end());
+        return files;
+    }
+
+    /// `--no-cache` neither writes the cache nor reads it. Not writing: a run creates no cache
+    /// directory, and leaves an existing one byte for byte as it was. Not reading: an entry is
+    /// poisoned with another unit's bitcode, which a cached run does pick up, and a run without
+    /// the cache still reports what it reported before. This is a guarantee about the cache
+    /// only; compiling still reads sources and headers (#51).
+    bool testNoCacheNeitherReadsNorWritesTheCache()
+    {
+        const std::filesystem::path directory = makeTempDir("ctrace-cli-no-cache");
+        if (!assertTrue(!directory.empty(), "project directory should be created"))
+            return false;
+        const std::string database = "--compile-commands=" + writeCacheProject(directory).string();
+        const std::filesystem::path cacheDir = directory / ".coretrace-ir-cache";
+
+        const RunResult before = runAnalyzer({database, "--no-cache", "--format=json"});
+        const std::string expected = reportWithoutMeta(before.output);
+        bool ok = assertTrue(before.exitCode == 0 && !expected.empty(),
+                             "a run without the cache should succeed\noutput:\n" + before.output) &&
+                  assertTrue(!std::filesystem::exists(cacheDir),
+                             "a run without the cache should create no cache");
+
+        const RunResult cached = runAnalyzer({database, "--format=json"});
+        ok = assertTrue(reportWithoutMeta(cached.output) == expected,
+                        "a cached run should fill the cache and report the same") &&
+             ok;
+
+        // main.c's entry now holds worker.c's bitcode; the dependency lists still vouch for it.
+        std::filesystem::path mainEntry;
+        std::filesystem::path workerEntry;
+        std::error_code ec;
+        for (const auto& entry : std::filesystem::directory_iterator(cacheDir, ec))
+        {
+            if (entry.path().extension() != ".deps")
+                continue;
+            std::ifstream in(entry.path());
+            const std::string deps((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+            std::filesystem::path bitcode = entry.path();
+            bitcode.replace_extension(".bc");
+            if (deps.find("cross-tu-data-race/main.c") != std::string::npos)
+                mainEntry = bitcode;
+            else if (deps.find("cross-tu-data-race/worker.c") != std::string::npos)
+                workerEntry = bitcode;
+        }
+        if (!assertTrue(!mainEntry.empty() && !workerEntry.empty(),
+                        "the cache should hold an entry for each unit"))
+            return false;
+        std::filesystem::copy_file(workerEntry, mainEntry,
+                                   std::filesystem::copy_options::overwrite_existing, ec);
+
+        const RunResult poisoned = runAnalyzer({database, "--format=json"});
+        ok = assertTrue(reportWithoutMeta(poisoned.output) != expected,
+                        "a cached run should read the poisoned entry") &&
+             ok;
+
+        const auto cacheBefore = snapshot(cacheDir);
+        const RunResult after = runAnalyzer({database, "--no-cache", "--format=json"});
+        ok = assertTrue(reportWithoutMeta(after.output) == expected,
+                        "a run without the cache should not read the poisoned entry") &&
+             assertTrue(snapshot(cacheDir) == cacheBefore,
+                        "a run without the cache should leave the cache as it was") &&
+             ok;
+
+        std::filesystem::remove_all(directory, ec);
+        return ok;
+    }
+
     bool testPermissionRelatedInputFailures()
     {
         bool ok = true;
@@ -860,6 +1038,8 @@ int main()
     ok = testInputValidationFailuresAndBackendDiagnostics() && ok;
     ok = testPermissionRelatedInputFailures() && ok;
     ok = testCompilationNeedsNoTemporaryBitcodeFile() && ok;
+    ok = testCachedProjectKeepsNoBitcodeInMemory() && ok;
+    ok = testNoCacheNeitherReadsNorWritesTheCache() && ok;
 
     if (!ok)
         return 1;

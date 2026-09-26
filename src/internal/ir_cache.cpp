@@ -154,6 +154,14 @@ namespace ctrace::concurrency::internal
 
     std::optional<std::string> IRCache::lookup(const CompileCommand& command) const
     {
+        const std::optional<std::filesystem::path> bitcode = lookupPath(command);
+        if (!bitcode.has_value())
+            return std::nullopt;
+        return readFile(*bitcode);
+    }
+
+    std::optional<std::filesystem::path> IRCache::lookupPath(const CompileCommand& command) const
+    {
         const std::string key = keyFor(command);
         const std::optional<std::string> dependencyList = readFile(directory_ / (key + ".deps"));
         const std::optional<std::string> storedStamp = readFile(directory_ / (key + ".stamp"));
@@ -183,19 +191,24 @@ namespace ctrace::concurrency::internal
         if (toHex(stamp.final()) != *storedStamp)
             return std::nullopt;
 
-        return readFile(directory_ / (key + ".bc"));
+        std::filesystem::path bitcode = directory_ / (key + ".bc");
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(bitcode, ec))
+            return std::nullopt;
+        return bitcode;
     }
 
-    void IRCache::store(const CompileCommand& command, const std::string& bitcode,
-                        const std::filesystem::path& depfile) const
+    std::optional<std::filesystem::path> IRCache::store(const CompileCommand& command,
+                                                        const std::string& bitcode,
+                                                        const std::filesystem::path& depfile) const
     {
         const std::optional<std::string> fragment = readFile(depfile);
         if (!fragment.has_value())
-            return;
+            return std::nullopt;
 
         const std::vector<std::string> dependencies = parseDependencyFile(*fragment);
         if (dependencies.empty())
-            return;
+            return std::nullopt;
 
         llvm::SHA256 stamp;
         std::string dependencyList;
@@ -203,7 +216,7 @@ namespace ctrace::concurrency::internal
         {
             const std::optional<std::string> contents = readFile(path);
             if (!contents.has_value())
-                return;
+                return std::nullopt;
 
             stamp.update(llvm::StringRef(*contents));
             dependencyList += path;
@@ -214,11 +227,14 @@ namespace ctrace::concurrency::internal
         // The stamp is written last: an entry is only usable once its bitcode and dependency list
         // are both on disk.
         if (!writeFileAtomically(directory_ / (key + ".bc"), bitcode))
-            return;
+            return std::nullopt;
 
         if (!writeFileAtomically(directory_ / (key + ".deps"), dependencyList))
-            return;
+            return std::nullopt;
 
-        writeFileAtomically(directory_ / (key + ".stamp"), toHex(stamp.final()));
+        if (!writeFileAtomically(directory_ / (key + ".stamp"), toHex(stamp.final())))
+            return std::nullopt;
+
+        return directory_ / (key + ".bc");
     }
 } // namespace ctrace::concurrency::internal

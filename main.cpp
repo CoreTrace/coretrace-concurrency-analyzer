@@ -9,6 +9,7 @@
 
 #include <llvm/IR/Module.h>
 #include <llvm/IR/LLVMContext.h>
+#include <llvm/Support/MemoryBuffer.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <sys/resource.h>
@@ -43,7 +44,8 @@ namespace
             << "  --instrument             Enable compilerlib instrumentation mode\n"
             << "  --compile-commands=PATH  Analyse a whole project from a compile_commands.json\n"
             << "                           instead of a single file (implies --analyze)\n"
-            << "  --no-cache               Recompile every unit instead of reusing cached IR\n"
+            << "  --no-cache               Recompile every unit, and neither read nor write the\n"
+            << "                           IR cache; the bitcode is then kept in memory\n"
             << "  --max-live-units=N       Most units held in memory at once during a project\n"
             << "                           analysis (default: one per hardware thread)\n"
             << "\n"
@@ -507,7 +509,10 @@ namespace
 
         // Only the bitcode is kept from this loop. The analysis parses each unit when it gets
         // to it and lets the module go afterwards, so the number of modules in memory is bound
-        // by the number of workers rather than by the size of the project.
+        // by the number of workers rather than by the size of the project. With the cache, even
+        // the bitcode is not kept: a unit whose entry is on disk is read from it when analysed,
+        // so the memory floor is what the cache could not hold. Without the cache nothing is read
+        // from or written to it, and the bitcode stays in memory.
         ctrace::concurrency::InMemoryIRCompiler compiler;
         internal::LLVMIRLoader irLoader;
         ctrace::concurrency::ProjectUnitSource units;
@@ -519,17 +524,27 @@ namespace
         {
             if (cache.has_value())
             {
-                if (std::optional<std::string> cached = cache->lookup(command))
+                if (const std::optional<std::filesystem::path> entry = cache->lookupPath(command))
                 {
-                    // Parsed once here to prove the entry readable, then dropped: an entry
-                    // that does not parse is unusable, not a sign that the unit is broken, so
-                    // it falls through to compilation exactly as before.
-                    llvm::LLVMContext probeContext;
-                    ctrace::concurrency::CompileError parseError;
-                    if (irLoader.parseBC(*cached, probeContext, parseError) != nullptr)
+                    // Parsed once here to prove the entry readable, then dropped with its bytes:
+                    // an entry that does not parse is unusable, not a sign that the unit is
+                    // broken, so it falls through to compilation exactly as before.
+                    bool readable = false;
+                    if (const llvm::ErrorOr<std::unique_ptr<llvm::MemoryBuffer>> cached =
+                            llvm::MemoryBuffer::getFile(entry->string(), /*IsText=*/false,
+                                                        /*RequiresNullTerminator=*/false,
+                                                        /*IsVolatile=*/true))
+                    {
+                        llvm::LLVMContext probeContext;
+                        ctrace::concurrency::CompileError parseError;
+                        readable = irLoader.parseBC(std::string_view((*cached)->getBufferStart(),
+                                                                     (*cached)->getBufferSize()),
+                                                    probeContext, parseError) != nullptr;
+                    }
+                    if (readable)
                     {
                         ++reusedUnits;
-                        units.add(command.file, std::move(*cached));
+                        units.addFile(command.file, *entry);
                         continue;
                     }
                 }
@@ -561,20 +576,25 @@ namespace
                 continue;
             }
 
+            std::optional<std::filesystem::path> stored;
             if (cache.has_value())
             {
                 // Stored against the command as the database states it, without the flags added
                 // to obtain the dependency list.
-                cache->store(command, result.llvmBitcode, depfile);
+                stored = cache->store(command, result.llvmBitcode, depfile);
                 std::error_code removeError;
                 std::filesystem::remove(depfile, removeError);
             }
 
             // The module the compiler parsed reads from the bitcode buffer, so it goes first;
-            // the analysis parses the same bytes again when it reaches this unit.
+            // the analysis parses the same bytes again when it reaches this unit, from the cache
+            // entry when there is one, and from memory otherwise.
             result.module.reset();
             ++compiledUnits;
-            units.add(command.file, std::move(result.llvmBitcode));
+            if (stored.has_value())
+                units.addFile(command.file, *stored);
+            else
+                units.add(command.file, std::move(result.llvmBitcode));
         }
 
         if (units.size() == 0)
@@ -587,6 +607,11 @@ namespace
         const ctrace::concurrency::ProjectAnalysisReport analysis =
             ctrace::concurrency::ProjectConcurrencyAnalyzer(analysisOptions).analyze(units);
         const auto finishedAt = std::chrono::steady_clock::now();
+
+        // The analysis is done with the bitcode: what it held in memory goes before the report
+        // is rendered.
+        const std::size_t heldBitcodeBytes = units.bitcodeBytes();
+        units = {};
 
         if (verbose)
         {
@@ -605,7 +630,7 @@ namespace
                          << "load-ms: " << analysis.loadMilliseconds << "\n"
                          << "reanalyzed-units: " << analysis.reanalyzedUnitCount << "\n"
                          << "live-units-max: " << analysis.peakLiveUnits << "\n"
-                         << "bitcode-mb: " << units.bitcodeBytes() / (1024 * 1024) << "\n"
+                         << "bitcode-mb: " << heldBitcodeBytes / (1024 * 1024) << "\n"
                          << "peak-rss-mb: " << peakResidentMegabytes() << "\n";
         }
 

@@ -26,11 +26,17 @@ namespace ctrace::concurrency::internal
         /// Bitcode stored for this command, if every input still hashes to what it did then.
         [[nodiscard]] std::optional<std::string> lookup(const CompileCommand& command) const;
 
-        /// Records bitcode alongside the dependency list the compiler wrote to `depfile`.
-        /// Failure to store is silent: a cache that cannot be written is a slow run, not a wrong
-        /// one.
-        void store(const CompileCommand& command, const std::string& bitcode,
-                   const std::filesystem::path& depfile) const;
+        /// Where the bitcode stored for this command is, if every input still hashes to what it
+        /// did then.
+        [[nodiscard]] std::optional<std::filesystem::path>
+        lookupPath(const CompileCommand& command) const;
+
+        /// Records bitcode alongside the dependency list the compiler wrote to `depfile`, and
+        /// returns where the bitcode is once the entry is complete. Failure to store is not an
+        /// error: a cache that cannot be written is a slow run, not a wrong one.
+        std::optional<std::filesystem::path> store(const CompileCommand& command,
+                                                   const std::string& bitcode,
+                                                   const std::filesystem::path& depfile) const;
 
         /// Where the compiler should write the dependency list for this command.
         [[nodiscard]] std::filesystem::path depfilePathFor(const CompileCommand& command) const;
