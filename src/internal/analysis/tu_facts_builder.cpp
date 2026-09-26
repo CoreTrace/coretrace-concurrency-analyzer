@@ -415,7 +415,7 @@ namespace ctrace::concurrency::internal::analysis
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
             const TaskConcurrencyResult& taskConcurrency,
             const ProgramDefinedGlobals* programDefined,
-            const std::unordered_set<std::string>& sharedObjectIds)
+            const std::unordered_set<std::string>& sharedObjectIds, const llvm::DataLayout& layout)
         {
             std::vector<DirectCallBinding> bindings;
 
@@ -446,7 +446,11 @@ namespace ctrace::concurrency::internal::analysis
                      ++argumentIndex)
                 {
                     const llvm::Value& operand = *site.call->getArgOperand(argumentIndex);
-                    std::optional<RootBinding> root = resolveTrackedRoot(operand, programDefined);
+                    // Resolved against the layout, like the accesses themselves: without it every
+                    // indexing step reads as an unknown offset, and a member handed to a helper
+                    // would stand for the whole object the helper's accesses are projected onto.
+                    std::optional<RootBinding> root =
+                        resolveTrackedRoot(operand, &layout, 0, programDefined);
                     if (!root.has_value())
                         root = sharedObjectArgument(operand, sharedObjectIds);
 
@@ -1052,9 +1056,9 @@ namespace ctrace::concurrency::internal::analysis
                                    });
         }
 
-        const std::vector<DirectCallBinding> directCallBindings =
-            buildDirectCallBindings(directCallSites, lockPropagation.effectiveHeldLocksByCall,
-                                    taskConcurrency, programDefined, sharedObjectIds);
+        const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
+            directCallSites, lockPropagation.effectiveHeldLocksByCall, taskConcurrency,
+            programDefined, sharedObjectIds, module.getDataLayout());
 
         bool changed = true;
         while (changed)
