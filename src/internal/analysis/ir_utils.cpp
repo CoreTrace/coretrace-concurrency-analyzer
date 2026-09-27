@@ -56,8 +56,10 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        struct AccessPathWalk;
         const llvm::Value* followLocalPointerCopy(const llvm::LoadInst& load,
-                                                  llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
+                                                  llvm::SmallPtrSetImpl<const llvm::Value*>& seen,
+                                                  AccessPathWalk* walk);
         const llvm::Value*
         followStoredPointerValue(const llvm::LoadInst& load,
                                  llvm::SmallPtrSetImpl<const llvm::Value*>& seen);
@@ -395,7 +397,7 @@ namespace ctrace::concurrency::internal::analysis
                 }
 
                 if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(current))
-                    return followLocalPointerCopy(*load, seen);
+                    return followLocalPointerCopy(*load, seen, walk);
 
                 if (const auto* call = llvm::dyn_cast<llvm::CallBase>(current))
                     return constantReturnedFunction(*call);
@@ -406,8 +408,12 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
+        /// Follows a pointer read back from the local variable it was stored in. The indexing that
+        /// produced the stored pointer belongs to the same access path as the indexing applied
+        /// after the read, so the walk goes on through it.
         const llvm::Value* followLocalPointerCopy(const llvm::LoadInst& load,
-                                                  llvm::SmallPtrSetImpl<const llvm::Value*>& seen)
+                                                  llvm::SmallPtrSetImpl<const llvm::Value*>& seen,
+                                                  AccessPathWalk* walk)
         {
             const llvm::Value* slot = load.getPointerOperand()->stripPointerCastsAndAliases();
             const auto* alloca = llvm::dyn_cast<llvm::AllocaInst>(slot);
@@ -447,7 +453,7 @@ namespace ctrace::concurrency::internal::analysis
             if (storedValue == nullptr)
                 return nullptr;
 
-            return resolveCopiedValue(*storedValue, seen);
+            return resolveCopiedValue(*storedValue, seen, walk);
         }
 
         const llvm::Value* followStoredPointerValue(const llvm::LoadInst& load,
