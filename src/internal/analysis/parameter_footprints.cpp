@@ -1,0 +1,522 @@
+// SPDX-License-Identifier: Apache-2.0
+#include "parameter_footprints.hpp"
+
+#include "concurrency_symbol_classifier.hpp"
+#include "ir_utils.hpp"
+
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/Function.h>
+#include <llvm/IR/InstrTypes.h>
+#include <llvm/IR/Instructions.h>
+#include <llvm/IR/IntrinsicInst.h>
+#include <llvm/IR/Operator.h>
+
+#include <algorithm>
+#include <deque>
+#include <optional>
+#include <unordered_map>
+
+namespace ctrace::concurrency::internal::analysis
+{
+    namespace
+    {
+        /// Beyond this many separate ranges a footprint keeps their span instead, which only
+        /// ever widens it.
+        // ponytail: one span past 16 ranges; a real interval set if wide objects need more.
+        constexpr std::size_t kMaxRangesPerKind = 16;
+
+        /// How a value relates to the parameter's object: a pointer into it, whose place the
+        /// access path gives, or something reached from it — a pointer loaded out of it, or one
+        /// the path cannot follow — which may point anywhere the object leads.
+        enum class Reach
+        {
+            IntoObject,
+            FromObject,
+        };
+
+        ParameterFootprint wholeObject()
+        {
+            ParameterFootprint footprint;
+            footprint.readsWholeObject = true;
+            footprint.writesWholeObject = true;
+            return footprint;
+        }
+
+        void mergeRanges(std::vector<ParameterFootprint::Range>& ranges)
+        {
+            if (ranges.empty())
+                return;
+
+            std::sort(ranges.begin(), ranges.end(),
+                      [](const ParameterFootprint::Range& lhs, const ParameterFootprint::Range& rhs)
+                      { return lhs.begin < rhs.begin; });
+
+            std::vector<ParameterFootprint::Range> merged{ranges.front()};
+            for (auto it = std::next(ranges.begin()); it != ranges.end(); ++it)
+            {
+                ParameterFootprint::Range& last = merged.back();
+                if (it->begin < last.end)
+                {
+                    last.end = std::max(last.end, it->end);
+                    last.isAtomic = last.isAtomic && it->isAtomic;
+                    continue;
+                }
+                merged.push_back(*it);
+            }
+
+            if (merged.size() > kMaxRangesPerKind)
+            {
+                ParameterFootprint::Range span{merged.front().begin, merged.front().end, true};
+                for (const ParameterFootprint::Range& range : merged)
+                {
+                    span.end = std::max(span.end, range.end);
+                    span.isAtomic = span.isAtomic && range.isAtomic;
+                }
+                merged = {span};
+            }
+
+            ranges = std::move(merged);
+        }
+
+        bool isIgnoredIntrinsic(const llvm::CallBase& call)
+        {
+            if (llvm::isa<llvm::DbgInfoIntrinsic>(call))
+                return true;
+
+            const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(&call);
+            if (intrinsic == nullptr)
+                return false;
+
+            switch (intrinsic->getIntrinsicID())
+            {
+            case llvm::Intrinsic::lifetime_start:
+            case llvm::Intrinsic::lifetime_end:
+            case llvm::Intrinsic::assume:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        /// Builds one footprint by following every value derived from the parameter.
+        class FootprintBuilder
+        {
+          public:
+            FootprintBuilder(const llvm::Argument& parameter, const llvm::DataLayout& layout)
+                : parameter_(parameter), layout_(layout)
+            {
+                note(parameter, Reach::IntoObject);
+            }
+
+            [[nodiscard]] bool nextUse(const llvm::Use*& use, Reach& reach)
+            {
+                while (pendingUses_.empty())
+                {
+                    if (pendingValues_.empty())
+                        return false;
+
+                    const llvm::Value* value = pendingValues_.front();
+                    pendingValues_.pop_front();
+                    for (const llvm::Use& valueUse : value->uses())
+                        pendingUses_.push_back(&valueUse);
+                }
+
+                use = pendingUses_.front();
+                pendingUses_.pop_front();
+                reach = reach_.at(use->get());
+                return true;
+            }
+
+            void note(const llvm::Value& value, Reach reach)
+            {
+                const auto [it, inserted] = reach_.emplace(&value, reach);
+                if (inserted)
+                {
+                    pendingValues_.push_back(&value);
+                    return;
+                }
+
+                if (reach == Reach::FromObject && it->second == Reach::IntoObject)
+                {
+                    it->second = Reach::FromObject;
+                    pendingValues_.push_back(&value);
+                }
+            }
+
+            void touchWholeObject(AccessKind kind)
+            {
+                (kind == AccessKind::Write ? footprint_.writesWholeObject
+                                           : footprint_.readsWholeObject) = true;
+            }
+
+            void escape()
+            {
+                footprint_.readsWholeObject = true;
+                footprint_.writesWholeObject = true;
+            }
+
+            /// Records an access through `pointer`, of `byteSize` bytes or, when zero, of the
+            /// whole object `pointer` designates.
+            void touch(const llvm::Value& pointer, Reach reach, AccessKind kind,
+                       std::uint64_t byteSize, bool isAtomic)
+            {
+                if (reach == Reach::FromObject)
+                {
+                    touchWholeObject(kind);
+                    return;
+                }
+
+                const std::optional<MemoryRegion> region = placeInObject(pointer, byteSize);
+                if (!region.has_value())
+                {
+                    touchWholeObject(kind);
+                    return;
+                }
+
+                addRange(kind, region->byteOffset,
+                         region->byteOffset + static_cast<std::int64_t>(region->byteSize),
+                         isAtomic);
+            }
+
+            /// Adds what a callee does through the pointer it is handed here.
+            void touchThroughCallee(const llvm::Value& pointer, Reach reach,
+                                    const ParameterFootprint& callee)
+            {
+                if (callee.empty())
+                    return;
+
+                const std::optional<RootBinding> root =
+                    reach == Reach::IntoObject ? rootInObject(pointer) : std::nullopt;
+                if (!root.has_value() || !root->region.hasKnownOffset)
+                {
+                    if (!callee.reads.empty() || callee.readsWholeObject)
+                        touchWholeObject(AccessKind::Read);
+                    if (!callee.writes.empty() || callee.writesWholeObject)
+                        touchWholeObject(AccessKind::Write);
+                    return;
+                }
+
+                const std::int64_t shift = root->region.byteOffset;
+                for (const ParameterFootprint::Range& range : callee.reads)
+                    addRange(AccessKind::Read, range.begin + shift, range.end + shift,
+                             range.isAtomic);
+                for (const ParameterFootprint::Range& range : callee.writes)
+                    addRange(AccessKind::Write, range.begin + shift, range.end + shift,
+                             range.isAtomic);
+
+                if (callee.readsWholeObject)
+                    touchDesignated(*root, AccessKind::Read);
+                if (callee.writesWholeObject)
+                    touchDesignated(*root, AccessKind::Write);
+            }
+
+            [[nodiscard]] ParameterFootprint finish()
+            {
+                mergeRanges(footprint_.reads);
+                mergeRanges(footprint_.writes);
+                return std::move(footprint_);
+            }
+
+          private:
+            std::optional<RootBinding> rootInObject(const llvm::Value& pointer) const
+            {
+                std::optional<RootBinding> root = resolveTrackedRoot(pointer, &layout_, 0);
+                if (!root.has_value() || root->kind != RootBindingKind::Argument ||
+                    root->argumentIndex != parameter_.getArgNo())
+                {
+                    return std::nullopt;
+                }
+                return root;
+            }
+
+            std::optional<MemoryRegion> placeInObject(const llvm::Value& pointer,
+                                                      std::uint64_t byteSize) const
+            {
+                const std::optional<RootBinding> root =
+                    resolveTrackedRoot(pointer, &layout_, byteSize);
+                if (!root.has_value() || root->kind != RootBindingKind::Argument ||
+                    root->argumentIndex != parameter_.getArgNo())
+                {
+                    return std::nullopt;
+                }
+
+                const MemoryRegion region = byteSize != 0 ? root->region : root->designated;
+                if (!region.hasKnownOffset || region.byteSize == 0)
+                    return std::nullopt;
+                return region;
+            }
+
+            void touchDesignated(const RootBinding& root, AccessKind kind)
+            {
+                const MemoryRegion& designated = root.designated;
+                if (!designated.hasKnownOffset || designated.byteSize == 0)
+                {
+                    touchWholeObject(kind);
+                    return;
+                }
+
+                addRange(kind, designated.byteOffset,
+                         designated.byteOffset + static_cast<std::int64_t>(designated.byteSize),
+                         false);
+            }
+
+            void addRange(AccessKind kind, std::int64_t begin, std::int64_t end, bool isAtomic)
+            {
+                (kind == AccessKind::Write ? footprint_.writes : footprint_.reads)
+                    .push_back({begin, end, isAtomic});
+            }
+
+            const llvm::Argument& parameter_;
+            const llvm::DataLayout& layout_;
+            ParameterFootprint footprint_;
+            std::unordered_map<const llvm::Value*, Reach> reach_;
+            std::deque<const llvm::Value*> pendingValues_;
+            std::deque<const llvm::Use*> pendingUses_;
+        };
+
+        /// Lifecycle calls whose first argument is the thread handle they write.
+        bool writesThreadHandle(CallKind kind)
+        {
+            switch (kind)
+            {
+            case CallKind::PThreadCreate:
+            case CallKind::StdThreadCtor:
+            case CallKind::StdJThreadCtor:
+            case CallKind::StdThreadMove:
+            case CallKind::StdThreadJoin:
+            case CallKind::StdThreadDetach:
+            case CallKind::StdThreadDtor:
+                return true;
+            default:
+                return false;
+            }
+        }
+
+        /// Whether a value of this type may hold an address. Plain numbers do not lead anywhere,
+        /// and following them would take every copy of a field for an escape.
+        bool mayCarryAddress(const llvm::Type* type)
+        {
+            return !type->isVoidTy() && !type->isIntegerTy() && !type->isFloatingPointTy();
+        }
+
+        std::uint64_t storeSizeOf(const llvm::DataLayout& layout, llvm::Type* type)
+        {
+            if (type == nullptr || !type->isSized())
+                return 0;
+
+            return layout.getTypeStoreSize(type).getFixedValue();
+        }
+
+        std::uint64_t constantLength(const llvm::MemIntrinsic& intrinsic)
+        {
+            const auto* length = llvm::dyn_cast<llvm::ConstantInt>(intrinsic.getLength());
+            return length == nullptr ? 0 : length->getZExtValue();
+        }
+
+        /// The value read back from a local variable the pointer was stored in carries the
+        /// pointer on. A variable used any other way lets the pointer escape.
+        bool forwardThroughLocalVariable(const llvm::AllocaInst& variable, Reach reach,
+                                         FootprintBuilder& builder)
+        {
+            for (const llvm::User* user : variable.users())
+            {
+                if (llvm::isa<llvm::StoreInst>(user))
+                    continue;
+
+                if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
+                {
+                    builder.note(*load, reach);
+                    continue;
+                }
+
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+                    call != nullptr && isIgnoredIntrinsic(*call))
+                {
+                    continue;
+                }
+
+                return false;
+            }
+
+            return true;
+        }
+    } // namespace
+
+    bool ParameterFootprint::empty() const noexcept
+    {
+        return reads.empty() && writes.empty() && !readsWholeObject && !writesWholeObject;
+    }
+
+    ParameterFootprints::ParameterFootprints(const ConcurrencySymbolClassifier& classifier,
+                                             const llvm::DataLayout& layout)
+        : classifier_(classifier), layout_(layout)
+    {
+    }
+
+    ParameterFootprint ParameterFootprints::of(const llvm::Function& function,
+                                               unsigned argumentIndex)
+    {
+        const auto key = std::make_pair(&function, argumentIndex);
+        if (const auto cached = cache_.find(key); cached != cache_.end())
+            return cached->second;
+
+        if (function.isDeclaration() || argumentIndex >= function.arg_size() ||
+            !inProgress_.insert(key).second)
+        {
+            return wholeObject();
+        }
+
+        ParameterFootprint footprint = compute(function, argumentIndex);
+        inProgress_.erase(key);
+        cache_.emplace(key, footprint);
+        return footprint;
+    }
+
+    ParameterFootprint ParameterFootprints::compute(const llvm::Function& function,
+                                                    unsigned argumentIndex)
+    {
+        const llvm::Argument& parameter = *function.getArg(argumentIndex);
+        if (!parameter.getType()->isPointerTy())
+            return {};
+
+        FootprintBuilder builder(parameter, layout_);
+        const llvm::Use* use = nullptr;
+        Reach reach = Reach::IntoObject;
+        while (builder.nextUse(use, reach))
+        {
+            const llvm::Value& value = *use->get();
+            const llvm::User* user = use->getUser();
+
+            if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(user))
+            {
+                if (gep->getPointerOperand() == &value)
+                    builder.note(*gep, reach);
+                else
+                    builder.escape();
+                continue;
+            }
+
+            if (llvm::isa<llvm::BitCastInst>(user) || llvm::isa<llvm::AddrSpaceCastInst>(user))
+            {
+                builder.note(*user, reach);
+                continue;
+            }
+
+            if (llvm::isa<llvm::PHINode>(user) || llvm::isa<llvm::SelectInst>(user))
+            {
+                builder.note(*user, Reach::FromObject);
+                continue;
+            }
+
+            if (llvm::isa<llvm::ICmpInst>(user) || llvm::isa<llvm::ReturnInst>(user))
+                continue;
+
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
+            {
+                builder.touch(value, reach, AccessKind::Read, storeSizeOf(layout_, load->getType()),
+                              load->isAtomic());
+                // What is read out of the object may lead further into memory the object owns.
+                if (mayCarryAddress(load->getType()))
+                    builder.note(*load, Reach::FromObject);
+                continue;
+            }
+
+            if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+            {
+                if (store->getPointerOperand() == &value)
+                {
+                    builder.touch(value, reach, AccessKind::Write,
+                                  storeSizeOf(layout_, store->getValueOperand()->getType()),
+                                  store->isAtomic());
+                    continue;
+                }
+
+                const auto* variable = llvm::dyn_cast<llvm::AllocaInst>(
+                    store->getPointerOperand()->stripPointerCasts());
+                if (variable == nullptr || !forwardThroughLocalVariable(*variable, reach, builder))
+                    builder.escape();
+                continue;
+            }
+
+            if (const auto* atomicRmw = llvm::dyn_cast<llvm::AtomicRMWInst>(user))
+            {
+                if (atomicRmw->getPointerOperand() != &value)
+                {
+                    builder.escape();
+                    continue;
+                }
+                builder.touch(value, reach, AccessKind::Write,
+                              storeSizeOf(layout_, atomicRmw->getType()), true);
+                continue;
+            }
+
+            if (const auto* exchange = llvm::dyn_cast<llvm::AtomicCmpXchgInst>(user))
+            {
+                if (exchange->getPointerOperand() != &value)
+                {
+                    builder.escape();
+                    continue;
+                }
+                builder.touch(value, reach, AccessKind::Write,
+                              storeSizeOf(layout_, exchange->getCompareOperand()->getType()), true);
+                continue;
+            }
+
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user))
+            {
+                if (isIgnoredIntrinsic(*call))
+                    continue;
+
+                if (!call->isArgOperand(use))
+                {
+                    // Called through, or bundled: nothing says what happens to it.
+                    builder.escape();
+                    continue;
+                }
+
+                const unsigned argumentNumber = call->getArgOperandNo(use);
+                if (const auto* intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(call))
+                {
+                    const bool isDestination = argumentNumber == 0;
+                    builder.touch(value, reach,
+                                  isDestination ? AccessKind::Write : AccessKind::Read,
+                                  constantLength(*intrinsic), false);
+                    continue;
+                }
+
+                // Synchronization is understood where it happens, not as data. Starting, joining
+                // or detaching a thread still writes the handle it is given, which is part of the
+                // object when the object holds its thread.
+                if (const CallKind kind = classifier_.classify(*call); kind != CallKind::Unknown)
+                {
+                    if (writesThreadHandle(kind) && argumentNumber == 0)
+                        builder.touch(value, reach, AccessKind::Write, 0, false);
+                    continue;
+                }
+
+                const llvm::Function* callee = classifier_.directCallee(*call);
+                if (callee != nullptr && !callee->isDeclaration() &&
+                    argumentNumber < callee->arg_size())
+                {
+                    builder.touchThroughCallee(value, reach, of(*callee, argumentNumber));
+                }
+                else if (!call->doesNotAccessMemory(argumentNumber))
+                {
+                    builder.touch(value, reach,
+                                  call->onlyReadsMemory(argumentNumber) ? AccessKind::Read
+                                                                        : AccessKind::Write,
+                                  0, false);
+                }
+
+                // A pointer returned by a call handed the object may lead anywhere it does.
+                if (mayCarryAddress(call->getType()) && !call->use_empty())
+                    builder.note(*call, Reach::FromObject);
+                continue;
+            }
+
+            builder.escape();
+        }
+
+        return builder.finish();
+    }
+} // namespace ctrace::concurrency::internal::analysis
