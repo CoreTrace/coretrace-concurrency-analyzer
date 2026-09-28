@@ -817,8 +817,7 @@ namespace ctrace::concurrency::internal::analysis
 
     std::optional<std::string> objectFieldLockId(const llvm::Value& value,
                                                  const llvm::DataLayout* layout,
-                                                 unsigned argumentIndex,
-                                                 const RootBinding& object)
+                                                 unsigned argumentIndex, const RootBinding& object)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;
         AccessPathWalk walk;

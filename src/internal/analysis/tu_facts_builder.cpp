@@ -401,7 +401,8 @@ namespace ctrace::concurrency::internal::analysis
 
             // Only a pointer read out of the slot is the object; the slot's own address is the
             // variable holding it.
-            const auto* load = llvm::dyn_cast<llvm::LoadInst>(operand.stripPointerCastsAndAliases());
+            const auto* load =
+                llvm::dyn_cast<llvm::LoadInst>(operand.stripPointerCastsAndAliases());
             if (load == nullptr)
                 return std::nullopt;
 
@@ -636,9 +637,9 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;
         if (selection.accesses)
         {
-            pendingAccesses = SharedAccessCollector(classifier, analyses)
-                                  .collect(module, programDefined, &sharedObjectIds,
-                                           &localObjectIds);
+            pendingAccesses =
+                SharedAccessCollector(classifier, analyses)
+                    .collect(module, programDefined, &sharedObjectIds, &localObjectIds);
 
             std::unordered_map<std::string, std::unordered_set<const llvm::Instruction*>>
                 trackedAccessesByFunction;
@@ -1172,9 +1173,9 @@ namespace ctrace::concurrency::internal::analysis
                         bindingIt->second.region, bindingIt->second.designated);
                     propagatedAccess.fact.functionId = callBinding.callerFunctionId;
                     propagatedAccess.fact.region = propagatedAccess.root.region;
-                    propagatedAccess.fact.heldLocks =
-                        mergeHeldLocks(locksAtCallSite(propagatedAccess.fact.heldLocks, callBinding),
-                                       callBinding.callsiteHeldLocks);
+                    propagatedAccess.fact.heldLocks = mergeHeldLocks(
+                        locksAtCallSite(propagatedAccess.fact.heldLocks, callBinding),
+                        callBinding.callsiteHeldLocks);
                     propagatedAccess.fact.inRootTask = callBinding.callerInRootTask;
                     propagatedAccess.fact.liveEntries = mergeLiveEntries(
                         propagatedAccess.fact.liveEntries, callBinding.callsiteLiveEntries);
@@ -1248,8 +1249,9 @@ namespace ctrace::concurrency::internal::analysis
 
                     AccessFact remapped = access;
                     remapped.functionId = callBinding.callerFunctionId;
-                    remapped.heldLocks = mergeHeldLocks(locksAtCallSite(remapped.heldLocks, callBinding),
-                                                        callBinding.callsiteHeldLocks);
+                    remapped.heldLocks =
+                        mergeHeldLocks(locksAtCallSite(remapped.heldLocks, callBinding),
+                                       callBinding.callsiteHeldLocks);
                     remapped.inRootTask = callBinding.callerInRootTask;
                     remapped.liveEntries =
                         mergeLiveEntries(remapped.liveEntries, callBinding.callsiteLiveEntries);
