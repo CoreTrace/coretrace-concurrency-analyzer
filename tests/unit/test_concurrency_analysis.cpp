@@ -1334,7 +1334,8 @@ namespace
 
             // --- imported thread-escape fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_loop_variable.c",
-             .intent = "workers receive the loop-counter address; with the counter escaped, no join range is provable",
+             .intent = "workers receive the loop-counter address; with the counter escaped, no join range is provable, and the loop's increment races with their reads",
+             .dataRace = 1,
              .missingJoin = 1,
              .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_stack_ptr.c",
