@@ -238,6 +238,11 @@ namespace ctrace::concurrency::internal::analysis
         const llvm::Instruction* instruction = nullptr;
         RootBinding root;
         AccessFact fact;
+        /// An effect inferred at a call for what the callee's own accesses already show there.
+        /// The publication analysis, which reads each function apart from its callees, needs
+        /// it; the access facts do not, since the callee's accesses reach the call with the
+        /// locks held around them.
+        bool restatesCalleeAccesses = false;
     };
 
     /// Unordered pair of thread entries proven to never overlap, because one is joined before the

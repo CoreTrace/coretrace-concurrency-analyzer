@@ -4,6 +4,7 @@
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
+#include "parameter_footprints.hpp"
 
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
@@ -73,127 +74,15 @@ namespace ctrace::concurrency::internal::analysis
             return classifier.classify(call) == CallKind::Unknown;
         }
 
-        /// What a callee does to memory it does not own, following direct calls.
-        enum class SharedMemoryEffect
+        /// Records an access to `root`, whose region is the bytes the access touches.
+        void appendAccessTo(std::vector<PendingAccess>& accesses, const llvm::Function& function,
+                            const llvm::Instruction& instruction, RootBinding root, AccessKind kind,
+                            AliasProvenance aliasProvenance, bool isAtomic, bool coarseCallEffect)
         {
-            /// Touches only its own frame: it neither makes a caller's accesses plain nor atomic.
-            None,
-            AtomicOnly,
-            Plain,
-        };
-
-        /// The coarse effect inferred for a call summarizes the callee's work, so a callee whose
-        /// every operation on memory it does not own is atomic must not be reported as a plain
-        /// access: that is what turned a correct `std::atomic` wrapper into a race. A helper that
-        /// touches no such memory at all, like the function a standard library computes the
-        /// memory order with, changes nothing either way.
-        ///
-        /// Answering this from the callee body rather than from its interprocedural summary keeps
-        /// the result identical whether or not the summary reaches the caller, which differs
-        /// between standard library implementations.
-        using SharedMemoryEffectCache =
-            std::unordered_map<const llvm::Function*, SharedMemoryEffect>;
-
-        SharedMemoryEffect sharedMemoryEffect(const llvm::Function& function,
-                                              const ConcurrencySymbolClassifier& classifier,
-                                              SharedMemoryEffectCache& cache,
-                                              std::unordered_set<const llvm::Function*>& visiting)
-        {
-            if (const auto cached = cache.find(&function); cached != cache.end())
-                return cached->second;
-
-            if (function.isDeclaration())
-                return SharedMemoryEffect::Plain;
-
-            // A call back into a function still being examined adds nothing of its own; the
-            // operations elsewhere in the cycle decide the answer.
-            if (!visiting.insert(&function).second)
-                return SharedMemoryEffect::None;
-
-            bool sawAtomic = false;
-            bool sawPlain = false;
-            for (const llvm::BasicBlock& block : function)
-            {
-                for (const llvm::Instruction& instruction : block)
-                {
-                    if (llvm::isa<llvm::AtomicRMWInst>(instruction) ||
-                        llvm::isa<llvm::AtomicCmpXchgInst>(instruction))
-                    {
-                        sawAtomic = true;
-                        continue;
-                    }
-
-                    if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(&instruction))
-                    {
-                        if (llvm::isa<llvm::AllocaInst>(
-                                load->getPointerOperand()->stripPointerCastsAndAliases()))
-                            continue;
-
-                        (load->isAtomic() ? sawAtomic : sawPlain) = true;
-                        continue;
-                    }
-
-                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
-                    {
-                        if (llvm::isa<llvm::AllocaInst>(
-                                store->getPointerOperand()->stripPointerCastsAndAliases()))
-                            continue;
-
-                        (store->isAtomic() ? sawAtomic : sawPlain) = true;
-                        continue;
-                    }
-
-                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                    if (call == nullptr || llvm::isa<llvm::DbgInfoIntrinsic>(call))
-                        continue;
-
-                    const llvm::Function* callee = classifier.directCallee(*call);
-                    if (callee == nullptr)
-                    {
-                        sawPlain = true;
-                        continue;
-                    }
-
-                    switch (sharedMemoryEffect(*callee, classifier, cache, visiting))
-                    {
-                    case SharedMemoryEffect::None:
-                        break;
-                    case SharedMemoryEffect::AtomicOnly:
-                        sawAtomic = true;
-                        break;
-                    case SharedMemoryEffect::Plain:
-                        sawPlain = true;
-                        break;
-                    }
-                }
-            }
-
-            visiting.erase(&function);
-            const SharedMemoryEffect result = sawPlain    ? SharedMemoryEffect::Plain
-                                              : sawAtomic ? SharedMemoryEffect::AtomicOnly
-                                                          : SharedMemoryEffect::None;
-            cache.emplace(&function, result);
-            return result;
-        }
-
-        void appendAccess(std::vector<PendingAccess>& accesses, const llvm::Function& function,
-                          const llvm::Instruction& instruction, const llvm::Value& pointerOperand,
-                          AccessKind kind, AliasProvenance aliasProvenance,
-                          const MemoryScope& scope, std::uint64_t byteSize = 0,
-                          bool isAtomic = false, bool coarseCallEffect = false)
-        {
-            const std::optional<RootBinding> root =
-                resolveTrackedRoot(pointerOperand, &scope.layout, byteSize, scope.programDefined);
-            if (!root.has_value())
-                return;
-
             PendingAccess access;
             access.function = &function;
             access.instruction = &instruction;
-            access.root = *root;
-            // An access of unknown extent may reach the whole object the pointer designates.
-            if (byteSize == 0)
-                access.root.region = root->designated;
+            access.root = std::move(root);
             access.fact.functionId = functionId(function);
             access.fact.kind = kind;
             access.fact.aliasProvenance = aliasProvenance;
@@ -204,6 +93,23 @@ namespace ctrace::concurrency::internal::analysis
             access.fact.loweredLocation = locations.loweredLocation;
             access.fact.userLocation = locations.userLocation;
             accesses.push_back(std::move(access));
+        }
+
+        void appendAccess(std::vector<PendingAccess>& accesses, const llvm::Function& function,
+                          const llvm::Instruction& instruction, const llvm::Value& pointerOperand,
+                          AccessKind kind, AliasProvenance aliasProvenance,
+                          const MemoryScope& scope, std::uint64_t byteSize = 0)
+        {
+            std::optional<RootBinding> root =
+                resolveTrackedRoot(pointerOperand, &scope.layout, byteSize, scope.programDefined);
+            if (!root.has_value())
+                return;
+
+            // An access of unknown extent may reach the whole object the pointer designates.
+            if (byteSize == 0)
+                root->region = root->designated;
+            appendAccessTo(accesses, function, instruction, std::move(*root), kind, aliasProvenance,
+                           false, false);
         }
 
         /// Byte count of a memory intrinsic when it is a compile-time constant; zero otherwise,
@@ -244,23 +150,43 @@ namespace ctrace::concurrency::internal::analysis
             return std::nullopt;
         }
 
+        /// The effect a call may have on what each pointer argument designates.
+        ///
+        /// A callee defined here is read for what it does to that argument: the bytes it reads
+        /// and writes, apart, and atomically or not. Most of that is its own accesses, which
+        /// reach the call anyway, with the locks held around them; that part is marked as
+        /// restating them. The rest is what no access shows: whatever it reaches through pointers
+        /// it loads or once the argument escapes, and the thread handles it starts, joins or
+        /// detaches. A callee without a body may do anything the declaration allows to the whole
+        /// object the argument designates.
         void appendCallMemoryEffectAccesses(std::vector<PendingAccess>& accesses,
                                             const llvm::Function& function,
                                             const llvm::CallBase& call, llvm::AAResults& aaResults,
                                             const ConcurrencySymbolClassifier& classifier,
                                             const MemoryScope& scope,
-                                            SharedMemoryEffectCache& effectCache)
+                                            ParameterFootprints& footprints)
         {
             if (!shouldInferCallMemoryEffects(call, classifier))
                 return;
 
             const llvm::Function* callee = classifier.directCallee(call);
-            std::unordered_set<const llvm::Function*> visiting;
-            const bool atomicEffect =
-                callee != nullptr && sharedMemoryEffect(*callee, classifier, effectCache,
-                                                        visiting) == SharedMemoryEffect::AtomicOnly;
+            const bool calleeIsDefined = callee != nullptr && !callee->isDeclaration();
 
             std::unordered_set<std::string> seenEffects;
+            auto appendEffect = [&](const RootBinding& root, const MemoryRegion& region,
+                                    AccessKind kind, bool isAtomic, bool restates)
+            {
+                RootBinding effectRoot = root;
+                effectRoot.region = region;
+                const std::string key = callEffectKey(effectRoot, kind) + (isAtomic ? "|a" : "");
+                if (!seenEffects.insert(key).second)
+                    return;
+
+                appendAccessTo(accesses, function, call, std::move(effectRoot), kind,
+                               AliasProvenance::Direct, isAtomic, true);
+                accesses.back().restatesCalleeAccesses = restates;
+            };
+
             for (const llvm::Use& argument : call.args())
             {
                 const llvm::Value* value = argument.get();
@@ -273,17 +199,53 @@ namespace ctrace::concurrency::internal::analysis
                     continue;
 
                 const llvm::MemoryLocation location = llvm::MemoryLocation::getBeforeOrAfter(value);
-                const std::optional<AccessKind> kind =
+                const std::optional<AccessKind> allowed =
                     accessKindFromModRef(aaResults.getModRefInfo(&call, location));
-                if (!kind.has_value())
+                if (!allowed.has_value())
                     continue;
 
-                const std::string key = callEffectKey(*root, *kind);
-                if (!seenEffects.insert(key).second)
+                const unsigned argumentNumber = call.getArgOperandNo(&argument);
+                if (!calleeIsDefined || argumentNumber >= callee->arg_size())
+                {
+                    appendEffect(*root, root->designated, *allowed, false, false);
                     continue;
+                }
 
-                appendAccess(accesses, function, call, *value, *kind, AliasProvenance::Direct,
-                             scope, 0, atomicEffect, true);
+                const ParameterFootprint footprint = footprints.of(*callee, argumentNumber);
+                auto appendExtent = [&](const ParameterFootprint::Extent& extent, bool restates)
+                {
+                    for (const AccessKind kind : {AccessKind::Read, AccessKind::Write})
+                    {
+                        // Alias analysis may still prove the callee leaves the object unwritten.
+                        if (kind == AccessKind::Write && *allowed == AccessKind::Read)
+                            continue;
+
+                        const bool wholeObject = kind == AccessKind::Write
+                                                     ? extent.writesWholeObject
+                                                     : extent.readsWholeObject;
+                        if (wholeObject)
+                        {
+                            appendEffect(*root, root->designated, kind, false, restates);
+                            continue;
+                        }
+
+                        for (const ParameterFootprint::Range& range :
+                             kind == AccessKind::Write ? extent.writes : extent.reads)
+                        {
+                            const MemoryRegion calleeRegion{
+                                .hasKnownOffset = true,
+                                .byteOffset = range.begin,
+                                .byteSize = static_cast<std::uint64_t>(range.end - range.begin),
+                            };
+                            appendEffect(*root,
+                                         calleeRegion.rebasedOn(root->region, root->designated),
+                                         kind, range.isAtomic, restates);
+                        }
+                    }
+                };
+                // What no access shows first, so a restatement never hides it.
+                appendExtent(footprint.unshown, false);
+                appendExtent(footprint.all, true);
             }
         }
     } // namespace
@@ -308,8 +270,8 @@ namespace ctrace::concurrency::internal::analysis
                 trackedGlobals.push_back(&global);
         }
 
-        SharedMemoryEffectCache effectCache;
         const llvm::DataLayout& layout = module.getDataLayout();
+        ParameterFootprints footprints(classifier_, layout);
         static const std::unordered_set<std::string> kNoSharedObjects;
         const std::unordered_set<std::string>& sharedObjects =
             sharedObjectIds != nullptr ? *sharedObjectIds : kNoSharedObjects;
@@ -341,7 +303,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
                     {
                         appendCallMemoryEffectAccesses(accesses, function, *call, aaResults,
-                                                       classifier_, scope, effectCache);
+                                                       classifier_, scope, footprints);
                         continue;
                     }
 

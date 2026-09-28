@@ -59,6 +59,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/atomic_operations.cpp
     src/internal/analysis/publication_analysis.cpp
     src/internal/analysis/publication_ordering_checker.cpp
+    src/internal/analysis/parameter_footprints.cpp
     src/internal/analysis/shared_access_collector.cpp
     src/internal/analysis/shared_object_binding_collector.cpp
     src/internal/analysis/signal_handler_collector.cpp

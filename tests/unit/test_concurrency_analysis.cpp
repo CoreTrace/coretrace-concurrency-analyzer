@@ -837,6 +837,27 @@ namespace
              .intent = "a constructor that starts a thread leaves it running for its caller",
              .dataRace = 1, .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_joins_its_thread_in_destructor_no_fp.cpp",
+             .intent = "the destructor's call to the base one reaches the thread member only "
+                       "(#99)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_assigns_its_thread_in_constructor_no_fp.cpp",
+             .intent = "a thread assigned in the constructor body races with nothing the owner "
+                       "touches (#99)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_destructor_writes_before_join_race.cpp",
+             .intent = "a destructor writing the thread's field before the join still races (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_destructor_helper_reads_before_join_race.cpp",
+             .intent = "a destructor reading the thread's field through a helper still races (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_member_joined_while_detached_race.cpp",
+             .intent = "joining and detaching one thread member through methods race (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_helper_joins_before_returning_no_fp.cpp",
              .intent = "a helper that waits for its thread hands nothing back",
              .requiresCxx20 = true},
@@ -950,6 +971,31 @@ namespace
                      "data_race_opaque_call_from_array_element.c",
              .intent = "a call without a body handed an element pointer reaches its array (#99)",
              .dataRace = 1, .racingSymbol = "values"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_writes_array_element_no_fp.c",
+             .intent = "a helper's sized write through an element pointer stays at it (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_writes_array_element.c",
+             .intent = "a helper handed the element the worker writes still races, once (#99)",
+             .dataRace = 1, .racingSymbol = "values"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_only_reads_no_fp.c",
+             .intent = "a helper that only reads is a read at its call site (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_writes_through_stored_pointer.c",
+             .intent = "a helper writing through a pointer the global holds reaches the global "
+                       "(#99)",
+             .dataRace = 1, .racingSymbol = "list"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_writes_through_chosen_field.c",
+             .intent = "a helper writing through a field chosen at run time may write either (#99)",
+             .dataRace = 1, .racingSymbol = "pair"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_under_global_lock_no_fp.c",
+             .intent = "a helper's guarded update is guarded at its call sites too (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_reads_through_stored_pointer_no_fp.c",
+             .intent = "a helper reading through a pointer the global holds only reads it (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_helper_hands_on_stored_pointer.c",
+             .intent = "a helper handing on a pointer the global holds reaches the global (#99)",
+             .dataRace = 1, .racingSymbol = "list"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_sequential_threads_no_fp.c",
              .intent = "a join separates the two spawns"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_read_after_helper_join_no_fp.c",
