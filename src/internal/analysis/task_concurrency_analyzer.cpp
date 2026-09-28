@@ -8,16 +8,25 @@
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
 
+#include <llvm/Analysis/LoopInfo.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/CFG.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
 
+#include <algorithm>
 #include <deque>
+#include <map>
 #include <optional>
+#include <set>
 #include <string_view>
+#include <tuple>
+#include <utility>
 #include <vector>
 
 namespace ctrace::concurrency::internal::analysis
@@ -26,19 +35,91 @@ namespace ctrace::concurrency::internal::analysis
     {
         /// Operand carrying the thread handle, for every lifecycle call this analysis inspects.
         constexpr unsigned kHandleOperandIndex = 0;
+        /// Operand of a `std::thread` move naming the thread it moves from.
+        constexpr unsigned kMoveSourceOperandIndex = 1;
         constexpr unsigned kPThreadEntryOperandIndex = 2;
         constexpr unsigned kStdThreadCallableOperandIndex = 1;
 
         constexpr std::string_view kProgramEntryFunction = "main";
+        constexpr std::string_view kGlobalStoragePrefix = "global:";
+        constexpr std::string_view kParameterStoragePrefix = "arg:";
+        constexpr std::string_view kUnknownIndex = "[*]";
+
+        /// Beyond this many indexing steps a handle is no longer named: a recursive call that
+        /// keeps descending into an object would otherwise name ever longer paths.
+        // ponytail: fixed depth; follow recursive structures if deep object graphs need it.
+        constexpr std::size_t kMaxHandleSteps = 16;
+
+        /// Where a join has certainly waited for its thread: after a `std::thread::join`, which
+        /// throws otherwise, and after a `pthread_join` whose result is unused; on the branch
+        /// taken when its result, compared with zero, reads as success. A result used any other
+        /// way gives no such place, and the join then ends nothing.
+        struct JoinSuccess
+        {
+            const llvm::Instruction* after = nullptr;
+            const llvm::BasicBlock* branch = nullptr;
+            const llvm::BasicBlock* successor = nullptr;
+
+            /// Dominance, not reachability: the failure branch may rejoin the success one, and an
+            /// invoked join has returned only past its normal edge.
+            [[nodiscard]] bool covers(const llvm::Instruction& point,
+                                      const llvm::DominatorTree& dominators) const
+            {
+                if (after != nullptr)
+                    return after != &point && dominators.dominates(after, &point);
+                return dominators.dominates(llvm::BasicBlockEdge(branch, successor),
+                                            point.getParent());
+            }
+        };
+
+        bool isZero(const llvm::Value* value)
+        {
+            const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+            return constant != nullptr && constant->isZero();
+        }
+
+        std::optional<JoinSuccess> joinSuccessOf(const llvm::CallBase& join, CallKind kind)
+        {
+            if (kind == CallKind::StdThreadJoin || join.use_empty())
+                return JoinSuccess{.after = &join};
+            if (!join.hasOneUse())
+                return std::nullopt;
+
+            const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(*join.user_begin());
+            if (compare == nullptr || !compare->isEquality() || !compare->hasOneUse())
+                return std::nullopt;
+
+            const llvm::Value* other =
+                compare->getOperand(0) == &join ? compare->getOperand(1) : compare->getOperand(0);
+            const auto* branch = llvm::dyn_cast<llvm::BranchInst>(*compare->user_begin());
+            if (!isZero(other) || branch == nullptr || !branch->isConditional())
+                return std::nullopt;
+
+            const bool successWhenTrue = compare->getPredicate() == llvm::CmpInst::ICMP_EQ;
+            return JoinSuccess{
+                .branch = branch->getParent(),
+                .successor = branch->getSuccessor(successWhenTrue ? 0 : 1),
+            };
+        }
 
         struct SpawnSite
         {
             const llvm::Instruction* instruction = nullptr;
+            /// The handle the thread ends up in: where it was created, or where a move carried it.
             std::string handleGroupId;
             std::string entryFunctionId;
         };
 
         struct JoinSite
+        {
+            const llvm::Instruction* instruction = nullptr;
+            std::string handleGroupId;
+            std::optional<JoinSuccess> success;
+        };
+
+        /// A `std::thread` moved into storage from anywhere but a thread the same function started
+        /// there: the storage then holds a thread this analysis did not see start.
+        struct AdoptionSite
         {
             const llvm::Instruction* instruction = nullptr;
             std::string handleGroupId;
@@ -48,6 +129,7 @@ namespace ctrace::concurrency::internal::analysis
         {
             std::vector<SpawnSite> spawns;
             std::vector<JoinSite> joins;
+            std::vector<AdoptionSite> adoptions;
         };
 
         bool isSpawnCall(CallKind kind)
@@ -79,6 +161,7 @@ namespace ctrace::concurrency::internal::analysis
                                                      bool includeExternalEntries)
         {
             FunctionLifecycleSites sites;
+            std::map<std::string, std::vector<AdoptionSite>> movesFrom;
 
             for (const llvm::BasicBlock& block : function)
             {
@@ -99,7 +182,26 @@ namespace ctrace::concurrency::internal::analysis
                         sites.joins.push_back(JoinSite{
                             .instruction = &instruction,
                             .handleGroupId = *handleGroupId,
+                            .success = joinSuccessOf(*call, kind),
                         });
+                        continue;
+                    }
+
+                    if (kind == CallKind::StdThreadMove)
+                    {
+                        const AdoptionSite move{
+                            .instruction = &instruction,
+                            .handleGroupId = *handleGroupId,
+                        };
+                        const std::optional<std::string> source =
+                            call->arg_size() > kMoveSourceOperandIndex
+                                ? canonicalStorageGroupId(
+                                      *call->getArgOperand(kMoveSourceOperandIndex))
+                                : std::nullopt;
+                        if (source.has_value())
+                            movesFrom[*source].push_back(move);
+                        else
+                            sites.adoptions.push_back(move);
                         continue;
                     }
 
@@ -123,42 +225,143 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
 
+            // A thread built into a temporary and moved into its owner, as `worker =
+            // std::thread(...)` does, is joined through where it was moved to.
+            for (SpawnSite& spawn : sites.spawns)
+            {
+                const auto moves = movesFrom.find(spawn.handleGroupId);
+                if (moves != movesFrom.end() && moves->second.size() == 1)
+                {
+                    spawn.handleGroupId = moves->second.front().handleGroupId;
+                    movesFrom.erase(moves);
+                }
+            }
+
+            // Every other move hands its destination a thread started somewhere else.
+            for (const auto& [source, moves] : movesFrom)
+                sites.adoptions.insert(sites.adoptions.end(), moves.begin(), moves.end());
+
             return sites;
         }
 
-        /// Entries whose instance created at `spawn` is still running at `point`: the spawn must
-        /// dominate the point, and neither a join of the same handle nor the proven completion of
-        /// the spawn may dominate it. The completion also covers a helper that joins the handle
-        /// it is given.
-        bool spawnIsLiveAt(const SpawnSite& spawn, const llvm::Instruction& point,
-                           const FunctionLifecycleSites& sites,
-                           const ThreadCompletionMap& completions,
-                           const llvm::DominatorTree& dominatorTree)
+        /// A handle a join can be matched on: no index the path leaves unknown, and not so deep
+        /// that recursion built it.
+        bool isNameableHandle(std::string_view handle)
         {
-            if (spawn.instruction == &point)
-                return false;
+            return handle.find(kUnknownIndex) == std::string_view::npos &&
+                   static_cast<std::size_t>(std::count(handle.begin(), handle.end(), '[')) <=
+                       kMaxHandleSteps;
+        }
 
-            if (!dominatorTree.dominates(spawn.instruction, &point))
-                return false;
-
-            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(spawn.instruction))
+        /// Reads `arg:<function>:<index><path>`, the way `canonicalStorageGroupId` names storage
+        /// reached through a parameter of `function`.
+        std::optional<std::pair<unsigned, std::string_view>>
+        parameterPlaceOf(std::string_view handle, std::string_view function)
+        {
+            if (!handle.starts_with(kParameterStoragePrefix))
+                return std::nullopt;
+            handle.remove_prefix(kParameterStoragePrefix.size());
+            if (!handle.starts_with(function) || handle.size() <= function.size() ||
+                handle[function.size()] != ':')
             {
-                const auto completion = completions.find(call);
-                if (completion != completions.end() &&
-                    dominatorTree.dominates(completion->second, &point))
-                    return false;
+                return std::nullopt;
             }
+            handle.remove_prefix(function.size() + 1);
 
-            for (const JoinSite& join : sites.joins)
+            const std::size_t digits = handle.find_first_not_of("0123456789");
+            const std::string_view index = handle.substr(0, digits);
+            const std::string_view path =
+                digits == std::string_view::npos ? std::string_view{} : handle.substr(digits);
+            if (index.empty() || (!path.empty() && path.front() != '['))
+                return std::nullopt;
+            return std::pair{static_cast<unsigned>(std::stoul(std::string(index))), path};
+        }
+
+        /// A handle the callee names, as the caller names it at `call`: a global stays itself,
+        /// storage reached through a parameter becomes what the call passes there.
+        std::optional<std::string> handleAtCaller(const std::string& calleeHandle,
+                                                  std::string_view calleeFunctionId,
+                                                  const llvm::CallBase& call)
+        {
+            if (calleeHandle.starts_with(kGlobalStoragePrefix))
+                return calleeHandle;
+
+            const auto place = parameterPlaceOf(calleeHandle, calleeFunctionId);
+            if (!place.has_value() || place->first >= call.arg_size())
+                return std::nullopt;
+
+            const std::optional<std::string> argument =
+                canonicalStorageGroupId(*call.getArgOperand(place->first));
+            if (!argument.has_value())
+                return std::nullopt;
+
+            std::string handle = *argument + std::string(place->second);
+            if (!isNameableHandle(handle))
+                return std::nullopt;
+            return handle;
+        }
+
+        /// A handle the caller names, as the callee names it: through the parameter the call hands
+        /// the storage over on. Nothing when the call hands it over on none.
+        std::optional<std::string> handleAtCallee(const std::string& callerHandle,
+                                                  const llvm::CallBase& call,
+                                                  std::string_view calleeFunctionId)
+        {
+            if (callerHandle.starts_with(kGlobalStoragePrefix))
+                return callerHandle;
+
+            for (unsigned index = 0; index < call.arg_size(); ++index)
             {
-                if (join.handleGroupId != spawn.handleGroupId)
+                const std::optional<std::string> argument =
+                    canonicalStorageGroupId(*call.getArgOperand(index));
+                if (!argument.has_value() || !isNameableHandle(*argument) ||
+                    !std::string_view(callerHandle).starts_with(*argument))
+                {
+                    continue;
+                }
+
+                const std::string_view path =
+                    std::string_view(callerHandle).substr(argument->size());
+                if (!path.empty() && path.front() != '[')
                     continue;
 
-                if (dominatorTree.dominates(join.instruction, &point))
-                    return false;
+                return std::string(kParameterStoragePrefix) + std::string(calleeFunctionId) + ":" +
+                       std::to_string(index) + std::string(path);
+            }
+            return std::nullopt;
+        }
+
+        /// A running thread as one function sees it: the entry it runs and, when that function
+        /// can name it, the handle a join would take there.
+        struct ThreadInstance
+        {
+            std::string entryFunctionId;
+            std::optional<std::string> handle;
+
+            friend bool operator<(const ThreadInstance& lhs, const ThreadInstance& rhs)
+            {
+                return std::tie(lhs.entryFunctionId, lhs.handle) <
+                       std::tie(rhs.entryFunctionId, rhs.handle);
             }
 
-            return true;
+            friend bool operator==(const ThreadInstance& lhs, const ThreadInstance& rhs) = default;
+        };
+
+        using ThreadInstances = std::set<ThreadInstance>;
+
+        std::vector<const llvm::Instruction*> normalReturns(const llvm::Function& function,
+                                                            const llvm::DominatorTree& dominators)
+        {
+            std::vector<const llvm::Instruction*> returns;
+            for (const llvm::BasicBlock& block : function)
+            {
+                if (dominators.isReachableFromEntry(&block) &&
+                    llvm::isa<llvm::ReturnInst>(block.getTerminator()))
+                {
+                    returns.push_back(block.getTerminator());
+                }
+            }
+            return returns;
         }
 
         std::unordered_set<std::string>
@@ -199,6 +402,515 @@ namespace ctrace::concurrency::internal::analysis
 
             return rootTaskFunctions;
         }
+
+        /// The threads running in each function: started there, left running by a function it
+        /// calls, or already running where its callers call it. Each is carried with its handle,
+        /// named in the frame of the function holding it, so that a join anywhere that names the
+        /// same storage ends it. A thread whose handle cannot be named stays running, as it did
+        /// before handles were followed.
+        class RunningThreads
+        {
+          public:
+            RunningThreads(const llvm::Module& module,
+                           const std::vector<DirectCallSite>& directCallSites,
+                           const ThreadCompletionMap& completions,
+                           const ConcurrencySymbolClassifier& classifier,
+                           LlvmFunctionAnalysisProvider& analyses, bool includeExternalEntries)
+                : directCallSites_(directCallSites), completions_(completions), analyses_(analyses)
+            {
+                for (const llvm::Function& function : module)
+                {
+                    if (function.isDeclaration())
+                        continue;
+                    functionsById_.emplace(functionId(function), &function);
+                    FunctionThreads& threads = functions_[&function];
+                    threads.sites =
+                        collectLifecycleSites(function, classifier, includeExternalEntries);
+                    threads.returns = normalReturns(function, analyses_.getDominatorTree(function));
+                }
+
+                for (const DirectCallSite& site : directCallSites_)
+                {
+                    if (site.call == nullptr)
+                        continue;
+                    if (const auto it = functions_.find(site.call->getFunction());
+                        it != functions_.end() && functionOf(site.calleeFunctionId) != nullptr)
+                    {
+                        it->second.calls.push_back(&site);
+                    }
+                }
+
+                summarizeHandles();
+            }
+
+            [[nodiscard]] const FunctionLifecycleSites&
+            sitesOf(const llvm::Function& function) const
+            {
+                return functions_.at(&function).sites;
+            }
+
+            /// Whether the thread started at `spawn` is still running at `point`: the spawn must
+            /// dominate the point, and no join of its handle, in place or through a call, nor the
+            /// proven completion of the spawn may have finished it there.
+            [[nodiscard]] bool spawnIsLiveAt(const llvm::Function& function, const SpawnSite& spawn,
+                                             const llvm::Instruction& point) const
+            {
+                if (spawn.instruction == &point)
+                    return false;
+
+                const llvm::DominatorTree& dominators = analyses_.getDominatorTree(function);
+                if (!dominators.dominates(spawn.instruction, &point))
+                    return false;
+
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(spawn.instruction))
+                {
+                    const auto completion = completions_.find(call);
+                    if (completion != completions_.end() &&
+                        dominators.dominates(completion->second, &point))
+                        return false;
+                }
+
+                for (const JoinSite& join : sitesOf(function).joins)
+                {
+                    if (join.handleGroupId == spawn.handleGroupId && join.success.has_value() &&
+                        join.success->covers(point, dominators))
+                        return false;
+                }
+
+                const std::optional<std::string> handle = spawnHandle(function, spawn);
+                return !handle.has_value() ||
+                       !joinedThroughCallAt(function, *handle, point, spawn.instruction);
+            }
+
+            /// Settles what every function leaves running once it returns. Whether a handle is
+            /// ambiguous comes from the summaries alone, so what a function leaves running only
+            /// grows with what its callees leave running.
+            void settleLeaks()
+            {
+                bool changed = true;
+                while (changed)
+                {
+                    changed = false;
+                    for (const auto& [function, data] : functions_)
+                    {
+                        ThreadInstances leaked = leakedFrom(*function);
+                        ThreadInstances& known = leaked_[function];
+                        if (leaked != known)
+                        {
+                            known = std::move(leaked);
+                            changed = true;
+                        }
+                    }
+                }
+                cacheIntroductions();
+            }
+
+            /// Settles what every function receives running from the calls made to it.
+            void settleInheritance()
+            {
+                bool changed = true;
+                while (changed)
+                {
+                    changed = false;
+                    for (const DirectCallSite& site : directCallSites_)
+                    {
+                        if (site.call == nullptr)
+                            continue;
+                        const llvm::Function* callee = functionOf(site.calleeFunctionId);
+                        if (callee == nullptr || !functions_.contains(site.call->getFunction()))
+                            continue;
+
+                        for (const ThreadInstance& instance :
+                             liveAt(*site.call->getFunction(), *site.call))
+                        {
+                            ThreadInstance passed{instance.entryFunctionId, std::nullopt};
+                            if (instance.handle.has_value())
+                                passed.handle = handleAtCallee(*instance.handle, *site.call,
+                                                               site.calleeFunctionId);
+                            changed =
+                                inherited_[callee].insert(std::move(passed)).second || changed;
+                        }
+                    }
+                }
+            }
+
+            /// Every thread running at `point`, named in the frame of `function`.
+            [[nodiscard]] ThreadInstances liveAt(const llvm::Function& function,
+                                                 const llvm::Instruction& point) const
+            {
+                ThreadInstances live;
+                for (const SpawnSite& spawn : sitesOf(function).spawns)
+                {
+                    if (spawnIsLiveAt(function, spawn, point))
+                        live.insert(
+                            ThreadInstance{spawn.entryFunctionId, spawnHandle(function, spawn)});
+                }
+
+                const llvm::DominatorTree& dominators = analyses_.getDominatorTree(function);
+                if (const auto calls = introducedByCalls_.find(&function);
+                    calls != introducedByCalls_.end())
+                {
+                    for (const auto& [call, instance] : calls->second)
+                    {
+                        if (call == &point || !dominators.dominates(call, &point))
+                            continue;
+                        if (!instance.handle.has_value() ||
+                            !joinedAt(function, *instance.handle, point, call))
+                            live.insert(instance);
+                    }
+                }
+
+                if (const auto inherited = inherited_.find(&function);
+                    inherited != inherited_.end())
+                {
+                    // A handle that arrives named is not filled again here: every caller counts
+                    // this function's starts into it, and a handle filled twice is not named.
+                    for (const ThreadInstance& instance : inherited->second)
+                    {
+                        if (!instance.handle.has_value() ||
+                            !joinedAt(function, *instance.handle, point, nullptr))
+                            live.insert(instance);
+                    }
+                }
+                return live;
+            }
+
+            /// Whether anything may run beside some instruction of `function`.
+            [[nodiscard]] bool mayHoldThreads(const llvm::Function& function) const
+            {
+                return !sitesOf(function).spawns.empty() ||
+                       introducedByCalls_.contains(&function) || inherited_.contains(&function);
+            }
+
+            [[nodiscard]] const std::unordered_map<const llvm::Function*, ThreadInstances>&
+            leaked() const
+            {
+                return leaked_;
+            }
+
+          private:
+            /// What a function does to the handles it names, in place or through the calls it
+            /// makes.
+            struct HandleSummary
+            {
+                /// Handles it may start a thread into, whether or not that thread outlives it.
+                std::set<std::string> started;
+                /// Handles it joins on every path to a normal return.
+                std::set<std::string> joined;
+            };
+
+            struct FunctionThreads
+            {
+                FunctionLifecycleSites sites;
+                std::vector<const DirectCallSite*> calls;
+                std::vector<const llvm::Instruction*> returns;
+                HandleSummary summary;
+            };
+
+            [[nodiscard]] const HandleSummary& summaryOf(const DirectCallSite& site) const
+            {
+                return functions_.at(functionOf(site.calleeFunctionId)).summary;
+            }
+
+            [[nodiscard]] const llvm::Function* functionOf(const std::string& id) const
+            {
+                const auto it = functionsById_.find(id);
+                return it != functionsById_.end() ? it->second : nullptr;
+            }
+
+            /// Summarizes every function, iterated to a fixed point. Neither set depends on the
+            /// other, or on what functions leave running, so both only grow.
+            void summarizeHandles()
+            {
+                bool changed = true;
+                while (changed)
+                {
+                    changed = false;
+                    for (auto& [function, data] : functions_)
+                    {
+                        const llvm::DominatorTree& dominators =
+                            analyses_.getDominatorTree(*function);
+                        HandleSummary& summary = data.summary;
+                        for (const SpawnSite& spawn : data.sites.spawns)
+                            changed = summary.started.insert(spawn.handleGroupId).second || changed;
+                        for (const AdoptionSite& adoption : data.sites.adoptions)
+                            changed =
+                                summary.started.insert(adoption.handleGroupId).second || changed;
+
+                        for (const JoinSite& join : data.sites.joins)
+                        {
+                            if (!join.success.has_value() || !isNameableHandle(join.handleGroupId))
+                                continue;
+                            bool onEveryPath = true;
+                            for (const llvm::Instruction* exit : data.returns)
+                                onEveryPath =
+                                    onEveryPath && join.success->covers(*exit, dominators);
+                            if (onEveryPath)
+                                changed =
+                                    summary.joined.insert(join.handleGroupId).second || changed;
+                        }
+
+                        for (const DirectCallSite* site : data.calls)
+                        {
+                            // A copy: a recursive call reads the summary being extended.
+                            const HandleSummary callee = summaryOf(*site);
+                            for (const std::string& calleeHandle : callee.started)
+                            {
+                                if (std::optional<std::string> handle = handleAtCaller(
+                                        calleeHandle, site->calleeFunctionId, *site->call))
+                                {
+                                    changed = summary.started.insert(std::move(*handle)).second ||
+                                              changed;
+                                }
+                            }
+
+                            bool onEveryPath = true;
+                            for (const llvm::Instruction* exit : data.returns)
+                                onEveryPath = onEveryPath && dominators.dominates(site->call, exit);
+                            if (!onEveryPath)
+                                continue;
+                            for (const std::string& calleeHandle : callee.joined)
+                            {
+                                if (std::optional<std::string> handle = handleAtCaller(
+                                        calleeHandle, site->calleeFunctionId, *site->call))
+                                {
+                                    changed =
+                                        summary.joined.insert(std::move(*handle)).second || changed;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            /// Calls in `function` after which `handle` has been joined: calls to a function that
+            /// joins what they pass on every path out.
+            [[nodiscard]] const std::vector<const llvm::Instruction*>&
+            joiningCalls(const llvm::Function& function, const std::string& handle) const
+            {
+                const auto key = std::pair{&function, handle};
+                if (const auto cached = joiningCalls_.find(key); cached != joiningCalls_.end())
+                    return cached->second;
+
+                std::vector<const llvm::Instruction*> calls;
+                for (const DirectCallSite* site : functions_.at(&function).calls)
+                {
+                    for (const std::string& calleeHandle : summaryOf(*site).joined)
+                    {
+                        if (handleAtCaller(calleeHandle, site->calleeFunctionId, *site->call) ==
+                            handle)
+                        {
+                            calls.push_back(site->call);
+                            break;
+                        }
+                    }
+                }
+                return joiningCalls_.emplace(key, std::move(calls)).first->second;
+            }
+
+            /// Whether a call joining `handle` has certainly returned at `point`, after `start`: a
+            /// join before the thread is started ends an earlier one. A null `start` stands for a
+            /// thread already running when `function` was called.
+            [[nodiscard]] bool joinedThroughCallAt(const llvm::Function& function,
+                                                   const std::string& handle,
+                                                   const llvm::Instruction& point,
+                                                   const llvm::Instruction* start) const
+            {
+                const llvm::DominatorTree& dominators = analyses_.getDominatorTree(function);
+                for (const llvm::Instruction* call : joiningCalls(function, handle))
+                {
+                    if (call != &point && dominators.dominates(call, &point) &&
+                        (start == nullptr || dominators.dominates(start, call)))
+                        return true;
+                }
+                return false;
+            }
+
+            /// Whether a join of `handle` in `function`, in place or through a call, has certainly
+            /// completed at `point`, after `start` as `joinedThroughCallAt` has it.
+            [[nodiscard]] bool joinedAt(const llvm::Function& function, const std::string& handle,
+                                        const llvm::Instruction& point,
+                                        const llvm::Instruction* start) const
+            {
+                const llvm::DominatorTree& dominators = analyses_.getDominatorTree(function);
+                for (const JoinSite& join : sitesOf(function).joins)
+                {
+                    if (join.handleGroupId == handle && join.success.has_value() &&
+                        join.success->covers(point, dominators) &&
+                        (start == nullptr || dominators.dominates(start, join.instruction)))
+                        return true;
+                }
+                return joinedThroughCallAt(function, handle, point, start);
+            }
+
+            /// The handle a thread started in `function` can be matched on there: none when the
+            /// path to it is not nameable, or when the same storage receives more than one thread,
+            /// since a join then ends only the last.
+            [[nodiscard]] std::optional<std::string> spawnHandle(const llvm::Function& function,
+                                                                 const SpawnSite& spawn) const
+            {
+                if (!isNameableHandle(spawn.handleGroupId) ||
+                    ambiguousIn(function, spawn.handleGroupId))
+                {
+                    return std::nullopt;
+                }
+                return spawn.handleGroupId;
+            }
+
+            /// Threads started or moved into `handle` in `function`, in place or through calls, and
+            /// whether one of them is in a loop.
+            [[nodiscard]] std::pair<unsigned, bool> startsInto(const llvm::Function& function,
+                                                               const std::string& handle) const
+            {
+                const llvm::LoopInfo& loops = analyses_.getLoopInfo(function);
+                unsigned starts = 0;
+                bool inLoop = false;
+                auto count = [&](const llvm::Instruction& site)
+                {
+                    ++starts;
+                    inLoop = inLoop || loops.getLoopFor(site.getParent()) != nullptr;
+                };
+
+                for (const SpawnSite& spawn : sitesOf(function).spawns)
+                {
+                    if (spawn.handleGroupId == handle)
+                        count(*spawn.instruction);
+                }
+                for (const AdoptionSite& adoption : sitesOf(function).adoptions)
+                {
+                    if (adoption.handleGroupId == handle)
+                        count(*adoption.instruction);
+                }
+                for (const DirectCallSite* site : functions_.at(&function).calls)
+                {
+                    for (const std::string& calleeHandle : summaryOf(*site).started)
+                    {
+                        if (handleAtCaller(calleeHandle, site->calleeFunctionId, *site->call) ==
+                            handle)
+                        {
+                            count(*site->call);
+                            break;
+                        }
+                    }
+                }
+                return {starts, inLoop};
+            }
+
+            [[nodiscard]] bool ambiguousIn(const llvm::Function& function,
+                                           const std::string& handle) const
+            {
+                const auto [starts, inLoop] = startsInto(function, handle);
+                return starts > 1 || inLoop;
+            }
+
+            /// What `function` leaves running when it returns, named in its own frame. A thread it
+            /// starts leaves with it when some return still has it running. A thread a call leaves
+            /// running does when a return it reaches has not joined it; without a handle to follow,
+            /// it does unless the function joins anything at all, as before handles were followed.
+            [[nodiscard]] ThreadInstances leakedFrom(const llvm::Function& function) const
+            {
+                ThreadInstances leaked;
+                const FunctionThreads& data = functions_.at(&function);
+                for (const SpawnSite& spawn : data.sites.spawns)
+                {
+                    bool running = false;
+                    for (const llvm::Instruction* exit : data.returns)
+                        running = running || spawnIsLiveAt(function, spawn, *exit);
+                    if (running)
+                        leaked.insert(
+                            ThreadInstance{spawn.entryFunctionId, spawnHandle(function, spawn)});
+                }
+
+                for (const DirectCallSite* site : data.calls)
+                {
+                    const auto calleeLeaks = leaked_.find(functionOf(site->calleeFunctionId));
+                    if (calleeLeaks == leaked_.end())
+                        continue;
+
+                    for (const ThreadInstance& instance : calleeLeaks->second)
+                    {
+                        std::optional<std::string> handle;
+                        if (instance.handle.has_value())
+                            handle = handleAtCaller(*instance.handle, site->calleeFunctionId,
+                                                    *site->call);
+                        if (handle.has_value() && ambiguousIn(function, *handle))
+                            handle.reset();
+
+                        const bool running =
+                            handle.has_value()
+                                ? reachesUnjoinedReturn(function, *site->call, *handle)
+                                : data.sites.joins.empty();
+                        if (running)
+                            leaked.insert(ThreadInstance{instance.entryFunctionId, handle});
+                    }
+                }
+                return leaked;
+            }
+
+            [[nodiscard]] bool reachesUnjoinedReturn(const llvm::Function& function,
+                                                     const llvm::Instruction& start,
+                                                     const std::string& handle) const
+            {
+                llvm::SmallPtrSet<const llvm::BasicBlock*, 32> visited;
+                std::vector<const llvm::BasicBlock*> pending{start.getParent()};
+                while (!pending.empty())
+                {
+                    const llvm::BasicBlock* block = pending.back();
+                    pending.pop_back();
+                    if (!visited.insert(block).second)
+                        continue;
+                    const llvm::Instruction* terminator = block->getTerminator();
+                    if (llvm::isa<llvm::ReturnInst>(terminator) &&
+                        !joinedAt(function, handle, *terminator, &start))
+                        return true;
+                    for (const llvm::BasicBlock* successor : llvm::successors(block))
+                        pending.push_back(successor);
+                }
+                return false;
+            }
+
+            /// Once what functions leave running is settled, the threads each call starts in its
+            /// caller, named in the caller's frame.
+            void cacheIntroductions()
+            {
+                introducedByCalls_.clear();
+                for (const auto& [function, data] : functions_)
+                {
+                    for (const DirectCallSite* site : data.calls)
+                    {
+                        const auto calleeLeaks = leaked_.find(functionOf(site->calleeFunctionId));
+                        if (calleeLeaks == leaked_.end())
+                            continue;
+                        for (const ThreadInstance& instance : calleeLeaks->second)
+                        {
+                            ThreadInstance started{instance.entryFunctionId, std::nullopt};
+                            if (instance.handle.has_value())
+                                started.handle = handleAtCaller(
+                                    *instance.handle, site->calleeFunctionId, *site->call);
+                            if (started.handle.has_value() &&
+                                ambiguousIn(*function, *started.handle))
+                                started.handle.reset();
+                            introducedByCalls_[function].emplace_back(site->call,
+                                                                      std::move(started));
+                        }
+                    }
+                }
+            }
+
+            const std::vector<DirectCallSite>& directCallSites_;
+            const ThreadCompletionMap& completions_;
+            LlvmFunctionAnalysisProvider& analyses_;
+            std::unordered_map<std::string, const llvm::Function*> functionsById_;
+            std::unordered_map<const llvm::Function*, FunctionThreads> functions_;
+            std::unordered_map<const llvm::Function*, ThreadInstances> leaked_;
+            std::unordered_map<const llvm::Function*, ThreadInstances> inherited_;
+            std::unordered_map<const llvm::Function*,
+                               std::vector<std::pair<const llvm::Instruction*, ThreadInstance>>>
+                introducedByCalls_;
+            mutable std::map<std::pair<const llvm::Function*, std::string>,
+                             std::vector<const llvm::Instruction*>>
+                joiningCalls_;
+        };
     } // namespace
 
     TaskConcurrencyAnalyzer::TaskConcurrencyAnalyzer(const ConcurrencySymbolClassifier& classifier,
@@ -217,54 +929,32 @@ namespace ctrace::concurrency::internal::analysis
                                                                classifier_, analyses_);
         result.sequencedEntryPairs.insert(containedPairs.begin(), containedPairs.end());
 
-        std::unordered_map<std::string, FunctionLifecycleSites> sitesByFunction;
+        RunningThreads running(module, directCallSites, completions, classifier_, analyses_,
+                               includeExternalEntries);
 
         for (const llvm::Function& function : module)
         {
             if (function.isDeclaration())
                 continue;
 
-            const std::string currentFunctionId = functionId(function);
-            FunctionLifecycleSites sites =
-                collectLifecycleSites(function, classifier_, includeExternalEntries);
+            const FunctionLifecycleSites& sites = running.sitesOf(function);
             if (sites.spawns.empty())
-            {
-                sitesByFunction.emplace(currentFunctionId, std::move(sites));
                 continue;
-            }
 
             const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
-
-            for (const llvm::BasicBlock& block : function)
-            {
-                if (!dominatorTree.isReachableFromEntry(&block))
-                    continue;
-
-                for (const llvm::Instruction& instruction : block)
-                {
-                    ThreadEntrySet liveEntries;
-                    for (const SpawnSite& spawn : sites.spawns)
-                    {
-                        if (spawnIsLiveAt(spawn, instruction, sites, completions, dominatorTree))
-                            liveEntries.insert(spawn.entryFunctionId);
-                    }
-
-                    if (!liveEntries.empty())
-                        result.liveEntriesAtInstruction.emplace(&instruction,
-                                                                std::move(liveEntries));
-                }
-            }
 
             // Two instances of the same entry overlap when a spawn happens while a previous
             // instance is still live. Counting spawn sites instead would treat mutually exclusive
             // branches, or a spawn/join pair repeated sequentially, as concurrent.
             for (const SpawnSite& spawn : sites.spawns)
             {
-                const auto liveIt = result.liveEntriesAtInstruction.find(spawn.instruction);
-                if (liveIt != result.liveEntriesAtInstruction.end() &&
-                    liveIt->second.contains(spawn.entryFunctionId))
+                for (const SpawnSite& earlier : sites.spawns)
                 {
-                    result.overlappingSpawnEntries.insert(spawn.entryFunctionId);
+                    if (earlier.entryFunctionId == spawn.entryFunctionId &&
+                        running.spawnIsLiveAt(function, earlier, *spawn.instruction))
+                    {
+                        result.overlappingSpawnEntries.insert(spawn.entryFunctionId);
+                    }
                 }
             }
 
@@ -277,8 +967,7 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
 
                     const bool earlierIsJoinedFirst =
-                        !spawnIsLiveAt(earlier, *spawn.instruction, sites, completions,
-                                       dominatorTree) &&
+                        !running.spawnIsLiveAt(function, earlier, *spawn.instruction) &&
                         dominatorTree.dominates(earlier.instruction, spawn.instruction);
                     if (earlierIsJoinedFirst)
                     {
@@ -287,96 +976,25 @@ namespace ctrace::concurrency::internal::analysis
                     }
                 }
             }
-
-            sitesByFunction.emplace(currentFunctionId, std::move(sites));
         }
 
-        // A function that starts a thread and returns without waiting for it hands that thread
-        // to its caller, still running. One path out is enough: the caller cannot assume the
-        // join happened on the branch it did not take.
+        running.settleLeaks();
+        for (const auto& [function, leaked] : running.leaked())
+        {
+            if (leaked.empty())
+                continue;
+            ThreadEntrySet& entries = result.entriesLeftRunningByFunction[functionId(*function)];
+            for (const ThreadInstance& instance : leaked)
+                entries.insert(instance.entryFunctionId);
+        }
+
+        running.settleInheritance();
         for (const llvm::Function& function : module)
         {
-            if (function.isDeclaration())
-                continue;
-
-            const auto sitesIt = sitesByFunction.find(functionId(function));
-            if (sitesIt == sitesByFunction.end() || sitesIt->second.spawns.empty())
+            if (function.isDeclaration() || !running.mayHoldThreads(function))
                 continue;
 
             const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
-
-            for (const SpawnSite& spawn : sitesIt->second.spawns)
-            {
-                bool stillRunningOnSomeReturn = true;
-                for (const llvm::BasicBlock& block : function)
-                {
-                    const llvm::Instruction* terminator = block.getTerminator();
-                    if (!llvm::isa<llvm::ReturnInst>(terminator) ||
-                        !dominatorTree.isReachableFromEntry(&block))
-                    {
-                        continue;
-                    }
-
-                    stillRunningOnSomeReturn = false;
-                    if (spawnIsLiveAt(spawn, *terminator, sitesIt->second, completions,
-                                      dominatorTree))
-                    {
-                        stillRunningOnSomeReturn = true;
-                        break;
-                    }
-                }
-
-                // A function with no reachable return never gives the thread back, so the
-                // question does not arise; leaving the entry recorded is the safe answer.
-                if (stillRunningOnSomeReturn)
-                {
-                    result.entriesLeftRunningByFunction[functionId(function)].insert(
-                        spawn.entryFunctionId);
-                }
-            }
-        }
-
-        // The property travels up the call graph: a complete constructor that calls the base one
-        // hands the same running thread to whoever called it. A function that joins something is
-        // left out — it may well be the one waiting, and claiming otherwise would report a race
-        // against a thread that is already finished.
-        bool leakedChanged = true;
-        while (leakedChanged)
-        {
-            leakedChanged = false;
-
-            for (const DirectCallSite& site : directCallSites)
-            {
-                const auto calleeIt =
-                    result.entriesLeftRunningByFunction.find(site.calleeFunctionId);
-                if (calleeIt == result.entriesLeftRunningByFunction.end())
-                    continue;
-
-                const auto callerSitesIt = sitesByFunction.find(site.callerFunctionId);
-                if (callerSitesIt != sitesByFunction.end() && !callerSitesIt->second.joins.empty())
-                    continue;
-
-                ThreadEntrySet& callerEntries =
-                    result.entriesLeftRunningByFunction[site.callerFunctionId];
-                for (const std::string& entry : calleeIt->second)
-                    leakedChanged = callerEntries.insert(entry).second || leakedChanged;
-            }
-        }
-
-        // A call to such a function is a spawn as far as its caller is concerned: from there on,
-        // the thread runs beside everything the call dominates.
-        //
-        // Nothing turns it off again. A caller that joins later keeps the entry live to its own
-        // return, which costs precision after the join and never soundness — and for the shape
-        // this exists for, an object owning its thread, the join is the destructor and the
-        // object is gone by then anyway.
-        for (const llvm::Function& function : module)
-        {
-            if (function.isDeclaration())
-                continue;
-
-            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
-
             for (const llvm::BasicBlock& block : function)
             {
                 if (!dominatorTree.isReachableFromEntry(&block))
@@ -384,96 +1002,13 @@ namespace ctrace::concurrency::internal::analysis
 
                 for (const llvm::Instruction& instruction : block)
                 {
-                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                    if (call == nullptr)
+                    const ThreadInstances live = running.liveAt(function, instruction);
+                    if (live.empty())
                         continue;
 
-                    const llvm::Function* callee = classifier_.directCallee(*call);
-                    if (callee == nullptr)
-                        continue;
-
-                    const auto leakedIt =
-                        result.entriesLeftRunningByFunction.find(functionId(*callee));
-                    if (leakedIt == result.entriesLeftRunningByFunction.end())
-                        continue;
-
-                    // Walking the dominator subtree instead of testing every instruction:
-                    // the region a call dominates is exactly its own block after the call plus
-                    // the blocks below it in the tree, and visiting it costs its own size rather
-                    // than the size of the function squared.
-                    const auto markFrom = [&](const llvm::Instruction& first)
-                    {
-                        const llvm::BasicBlock* owner = first.getParent();
-                        for (auto it = std::next(first.getIterator()); it != owner->end(); ++it)
-                        {
-                            ThreadEntrySet& live = result.liveEntriesAtInstruction[&*it];
-                            live.insert(leakedIt->second.begin(), leakedIt->second.end());
-                        }
-                    };
-
-                    markFrom(instruction);
-
-                    std::deque<const llvm::DomTreeNode*> pending;
-                    if (const llvm::DomTreeNode* node = dominatorTree.getNode(&block))
-                        pending.assign(node->begin(), node->end());
-
-                    while (!pending.empty())
-                    {
-                        const llvm::DomTreeNode* node = pending.front();
-                        pending.pop_front();
-                        pending.insert(pending.end(), node->begin(), node->end());
-
-                        for (const llvm::Instruction& dominated : *node->getBlock())
-                        {
-                            ThreadEntrySet& live = result.liveEntriesAtInstruction[&dominated];
-                            live.insert(leakedIt->second.begin(), leakedIt->second.end());
-                        }
-                    }
-                }
-            }
-        }
-
-        // Propagate the live set across direct calls so that a helper invoked by the initial thread
-        // inherits the tasks running at its call sites.
-        std::unordered_map<std::string, ThreadEntrySet> liveEntriesAtFunctionEntry;
-        bool changed = true;
-        while (changed)
-        {
-            changed = false;
-
-            for (const DirectCallSite& site : directCallSites)
-            {
-                if (site.call == nullptr)
-                    continue;
-
-                ThreadEntrySet inherited = liveEntriesAtFunctionEntry[site.callerFunctionId];
-                if (const auto liveIt = result.liveEntriesAtInstruction.find(site.call);
-                    liveIt != result.liveEntriesAtInstruction.end())
-                {
-                    inherited.insert(liveIt->second.begin(), liveIt->second.end());
-                }
-
-                ThreadEntrySet& calleeEntries = liveEntriesAtFunctionEntry[site.calleeFunctionId];
-                for (const std::string& entry : inherited)
-                    changed = calleeEntries.insert(entry).second || changed;
-            }
-        }
-
-        for (const llvm::Function& function : module)
-        {
-            if (function.isDeclaration())
-                continue;
-
-            const auto inheritedIt = liveEntriesAtFunctionEntry.find(functionId(function));
-            if (inheritedIt == liveEntriesAtFunctionEntry.end() || inheritedIt->second.empty())
-                continue;
-
-            for (const llvm::BasicBlock& block : function)
-            {
-                for (const llvm::Instruction& instruction : block)
-                {
-                    ThreadEntrySet& liveEntries = result.liveEntriesAtInstruction[&instruction];
-                    liveEntries.insert(inheritedIt->second.begin(), inheritedIt->second.end());
+                    ThreadEntrySet& entries = result.liveEntriesAtInstruction[&instruction];
+                    for (const ThreadInstance& instance : live)
+                        entries.insert(instance.entryFunctionId);
                 }
             }
         }

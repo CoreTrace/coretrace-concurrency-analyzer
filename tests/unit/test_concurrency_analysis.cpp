@@ -863,6 +863,59 @@ namespace
             {.path = "tests/fixtures/concurrency-cxx20/cpp_owner_writes_global_object_race.cpp",
              .intent = "the owner of a global object running a member thread races with it (#103)",
              .dataRace = 1, .racingSymbol = "counter", .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_joined_in_method_then_read_no_fp.cpp",
+             .intent = "a method's join ends the thread the constructor started (#99)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_detached_in_method_then_read_race.cpp",
+             .intent = "detaching the thread in a method ends nothing (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_joined_on_one_branch_then_read_race.cpp",
+             .intent = "a join on one branch leaves the thread running on the other (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_joins_other_member_then_read_race.cpp",
+             .intent = "joining one thread member leaves the other running (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_joined_through_helper_then_read_no_fp.cpp",
+             .intent = "a join two calls down still names the constructor's thread (#99)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_object_join_throws_then_read_race.cpp",
+             .intent = "a join that throws has not waited for the thread (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_join_caught_in_method_then_read_race.cpp",
+             .intent = "a method swallowing its join's exception has not waited for the thread "
+                       "(#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_detached_then_given_another_thread_race.cpp",
+             .intent = "a thread moved into the member is the one its join ends, not the "
+                       "detached one (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_join_caught_in_helper_then_read_race.cpp",
+             .intent = "a helper swallowing the joining method's exception has not waited for "
+                       "the thread (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_two_objects_one_joined_then_read_race.cpp",
+             .intent = "joining one object's thread leaves another object's running (#99)",
+             .dataRace = 1, .racingSymbol = "_ZL4hits", .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_two_objects_both_joined_then_read_no_fp.cpp",
+             .intent = "each object's join ends its own thread (#99)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_service_started_and_stopped_then_read_no_fp.cpp",
+             .intent = "a thread moved into a member is joined through that member (#99)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_service_read_before_stop_race.cpp",
+             .intent = "a read before the joining method still races with the thread (#99)",
+             .dataRace = 1, .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/cpp_thread_safe_global_object_no_fp.cpp",
              .intent = "a method guarding its member with the object's mutex is guarded at every "
                        "call (#103)",
@@ -1016,6 +1069,57 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/data_race_helper_hands_on_stored_pointer.c",
              .intent = "a helper handing on a pointer the global holds reaches the global (#99)",
              .dataRace = 1, .racingSymbol = "list"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_joined_in_other_function_no_fp.c",
+             .intent = "a join in another function ends the thread through the same field (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_detached_in_other_function_race.c",
+             .intent = "a detach in another function ends nothing (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_read_after_failed_join_race.c",
+             .intent = "on the branch a join failed the thread may still run (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_read_after_successful_join_no_fp.c",
+             .intent = "on the branch a join succeeded the thread has finished (#99)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_joined_on_one_branch_in_other_function_race.c",
+             .intent = "a function joining on one branch only leaves the thread running (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_join_failure_ignored_in_other_function_race.c",
+             .intent = "a function returning past a failed join leaves the thread running (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_restarted_in_other_function_race.c",
+             .intent = "a join before a restart ends the earlier thread, not the restarted one "
+                       "(#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_stopped_then_restarted_race.c",
+             .intent = "a stop before the only start in a function does not end that start's "
+                       "thread (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_joined_then_restarted_race.c",
+             .intent = "a join before the only start in a function does not end that start's "
+                       "thread (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_started_twice_joined_once_race.c",
+             .intent = "a join ends the thread its field holds, not the one it replaced (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_started_again_in_other_function_race.c",
+             .intent = "a function starting the task it received again joins only its own "
+                       "thread (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_detached_then_run_again_in_other_function_race.c",
+             .intent = "a function joining the thread it started leaves the detached one running "
+                       "(#99)",
+             .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_owner_writes_local_object.c",
              .intent = "the owner of a local object handed to a thread still races with it (#103)",
              .dataRace = 1},
