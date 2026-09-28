@@ -89,19 +89,21 @@ namespace ctrace::concurrency::internal::analysis
             return byteOffset < rhsEnd && other.byteOffset < lhsEnd;
         }
 
-        /// Composes a callee-relative region with the region its argument already points at.
+        /// Composes a callee-relative region with where its argument points in the caller.
         ///
         /// A callee region of unknown extent starting at its parameter covers the whole object
-        /// the parameter designates. In the caller, that object is what the argument designates,
-        /// so it takes the argument's extent: a member handed to a helper bounds what the helper
-        /// may reach, as it already does for an effect inferred at the caller's own call.
-        [[nodiscard]] MemoryRegion rebasedOn(const MemoryRegion& base) const noexcept
+        /// the parameter designates. In the caller, that object is the one the argument
+        /// designates — a field handed to a helper, or the whole array an element pointer
+        /// belongs to — as it already is for an effect inferred at the caller's own call.
+        [[nodiscard]] MemoryRegion rebasedOn(const MemoryRegion& argument,
+                                             const MemoryRegion& designated) const noexcept
         {
-            MemoryRegion composed = *this;
-            composed.hasKnownOffset = hasKnownOffset && base.hasKnownOffset;
-            composed.byteOffset = byteOffset + base.byteOffset;
             if (hasKnownOffset && byteOffset == 0 && byteSize == 0)
-                composed.byteSize = base.byteSize;
+                return designated;
+
+            MemoryRegion composed = *this;
+            composed.hasKnownOffset = hasKnownOffset && argument.hasKnownOffset;
+            composed.byteOffset = byteOffset + argument.byteOffset;
             return composed;
         }
 
@@ -119,7 +121,12 @@ namespace ctrace::concurrency::internal::analysis
         RootBindingKind kind = RootBindingKind::Global;
         std::string symbol;
         unsigned argumentIndex = 0;
+        /// Where the pointer points, with the extent of the access made through it.
         MemoryRegion region;
+        /// The object the pointer designates, which an access of unknown extent may reach in
+        /// full. For a pointer to an array element it is the whole array, starting before
+        /// `region`.
+        MemoryRegion designated;
 
         [[nodiscard]] static RootBinding global(std::string globalSymbol, MemoryRegion region = {})
         {

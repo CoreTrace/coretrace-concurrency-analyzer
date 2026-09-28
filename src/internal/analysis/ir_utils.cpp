@@ -9,6 +9,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/DerivedTypes.h>
+#include <llvm/IR/GetElementPtrTypeIterator.h>
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/GlobalVariable.h>
@@ -146,10 +147,16 @@ namespace ctrace::concurrency::internal::analysis
             bool touchesRecursiveLock = false;
             bool hasKnownOffset = true;
             std::int64_t byteOffset = 0;
-            /// Size of the object the pointer designates, taken from the innermost indexing step.
-            /// It bounds a coarse effect inferred for a call, which would otherwise cover the
-            /// whole root and collide with every sibling field.
-            std::uint64_t designatedSize = 0;
+            /// Size of the object the pointer designates, settled by the innermost indexing step
+            /// that names one: a field, or the array an element belongs to. It bounds a coarse
+            /// effect inferred for a call, which would otherwise cover the whole root and collide
+            /// with every sibling field. Unset while only pointer arithmetic has been seen; zero
+            /// once settled means unknown.
+            std::optional<std::uint64_t> designatedSize;
+            /// How far into the designated object the pointer sits. Non-zero for a pointer to an
+            /// array element, which whoever receives it may move to any other element, on either
+            /// side.
+            std::int64_t designatedDisplacement = 0;
 
             [[nodiscard]] MemoryRegion region(std::uint64_t byteSize = 0) const
             {
@@ -157,6 +164,15 @@ namespace ctrace::concurrency::internal::analysis
                     .hasKnownOffset = hasKnownOffset,
                     .byteOffset = byteOffset,
                     .byteSize = byteSize,
+                };
+            }
+
+            [[nodiscard]] MemoryRegion designatedRegion() const
+            {
+                return MemoryRegion{
+                    .hasKnownOffset = hasKnownOffset,
+                    .byteOffset = byteOffset - designatedDisplacement,
+                    .byteSize = designatedSize.value_or(0),
                 };
             }
         };
@@ -270,15 +286,82 @@ namespace ctrace::concurrency::internal::analysis
             return walk.layout->getTypeStoreSize(type).getFixedValue();
         }
 
+        /// Settles the designated object at `size` bytes. A pointer moved outside it by pointer
+        /// arithmetic no longer points into it, so what it designates becomes unknown.
+        void settleDesignatedSize(AccessPathWalk& walk, std::uint64_t size)
+        {
+            const std::int64_t displacement = walk.designatedDisplacement;
+            const bool staysInside =
+                displacement >= 0 && static_cast<std::uint64_t>(displacement) < size;
+            walk.designatedSize = displacement == 0 || staysInside ? size : 0;
+        }
+
+        /// Settles what the pointer designates, from one indexing step of the walk.
+        ///
+        /// A step ending on a field index designates that field. A step ending on a run of array
+        /// indices designates the array the run starts in, and the pointer sits that far into
+        /// it. A run starting at the first index is pointer arithmetic: it moves a pointer that
+        /// already designated an object, which a step further out, or the root, names.
+        template <typename GEPType>
+        void noteDesignatedObject(AccessPathWalk& walk, const GEPType& gep)
+        {
+            bool endsInArrayRun = false;
+            bool runIsPointerArithmetic = false;
+            llvm::Type* runArray = nullptr;
+            llvm::Type* selectedSoFar = nullptr;
+            std::int64_t runDisplacement = 0;
+            bool isFirstIndex = true;
+            for (auto step = llvm::gep_type_begin(gep); step != llvm::gep_type_end(gep); ++step)
+            {
+                if (step.isStruct())
+                {
+                    endsInArrayRun = false;
+                }
+                else
+                {
+                    if (!endsInArrayRun)
+                    {
+                        endsInArrayRun = true;
+                        runIsPointerArithmetic = isFirstIndex;
+                        runArray = selectedSoFar;
+                        runDisplacement = 0;
+                    }
+
+                    // A variable index already makes the offset, and so the region, unknown.
+                    const auto* index = llvm::dyn_cast<llvm::ConstantInt>(step.getOperand());
+                    if (index != nullptr && walk.layout != nullptr)
+                    {
+                        runDisplacement +=
+                            index->getSExtValue() *
+                            static_cast<std::int64_t>(
+                                step.getSequentialElementStride(*walk.layout).getFixedValue());
+                    }
+                }
+
+                selectedSoFar = step.getIndexedType();
+                isFirstIndex = false;
+            }
+
+            if (!endsInArrayRun)
+            {
+                settleDesignatedSize(walk, storeSizeOf(walk, gep.getResultElementType()));
+                return;
+            }
+
+            walk.designatedDisplacement += runDisplacement;
+            if (!runIsPointerArithmetic)
+                settleDesignatedSize(walk, storeSizeOf(walk, runArray));
+        }
+
         template <typename GEPType> void noteGepTypes(AccessPathWalk& walk, const GEPType& gep)
         {
             noteTraversedType(walk, gep.getSourceElementType());
             noteTraversedType(walk, gep.getResultElementType());
 
-            // The walk runs from the access towards the root, so the first step seen is the
-            // innermost and the most precise.
-            if (walk.designatedSize == 0)
-                walk.designatedSize = storeSizeOf(walk, gep.getResultElementType());
+            // The walk runs from the access towards the root, so the first step that names an
+            // object is the innermost and the most precise.
+            if (!walk.designatedSize.has_value())
+                noteDesignatedObject(walk, gep);
         }
 
         /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
@@ -374,8 +457,8 @@ namespace ctrace::concurrency::internal::analysis
                     if (walk != nullptr)
                     {
                         noteTraversedType(*walk, global->getValueType());
-                        if (walk->designatedSize == 0)
-                            walk->designatedSize = storeSizeOf(*walk, global->getValueType());
+                        if (!walk->designatedSize.has_value())
+                            settleDesignatedSize(*walk, storeSizeOf(*walk, global->getValueType()));
                     }
                     return current;
                 }
@@ -638,8 +721,9 @@ namespace ctrace::concurrency::internal::analysis
         if (!slotId.has_value() || !sharedObjectIds.contains(*slotId))
             return std::nullopt;
 
-        return RootBinding::global(*slotId,
-                                   walk.region(byteSize != 0 ? byteSize : walk.designatedSize));
+        RootBinding binding = RootBinding::global(*slotId, walk.region(byteSize));
+        binding.designated = walk.designatedRegion();
+        return binding;
     }
 
     std::optional<std::string> objectFieldLockId(const llvm::Value& value,
@@ -777,25 +861,23 @@ namespace ctrace::concurrency::internal::analysis
         if (walk.touchesSyncPrimitive)
             return std::nullopt;
 
-        const MemoryRegion region = walk.region(byteSize != 0 ? byteSize : walk.designatedSize);
+        std::optional<RootBinding> binding;
         if (const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(root))
         {
             if (!shouldTrackSharedGlobal(*global, programDefined))
                 return std::nullopt;
 
-            return RootBinding::global(normalizeValueName(global->getName()), region);
+            binding =
+                RootBinding::global(normalizeValueName(global->getName()), walk.region(byteSize));
+        }
+        else if (const auto* argument = llvm::dyn_cast<llvm::Argument>(root))
+        {
+            binding = RootBinding::argument(argument->getArgNo(), walk.region(byteSize));
         }
 
-        if (const auto* argument = llvm::dyn_cast<llvm::Argument>(root))
-            return RootBinding::argument(argument->getArgNo(), region);
-
-        return std::nullopt;
-    }
-
-    std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
-                                                  const ProgramDefinedGlobals* programDefined)
-    {
-        return resolveTrackedRoot(value, nullptr, 0, programDefined);
+        if (binding.has_value())
+            binding->designated = walk.designatedRegion();
+        return binding;
     }
 
     namespace

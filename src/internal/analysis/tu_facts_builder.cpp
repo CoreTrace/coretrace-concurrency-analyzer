@@ -1092,7 +1092,8 @@ namespace ctrace::concurrency::internal::analysis
                         concrete.sharedObject = sharedObjectIds.contains(concrete.symbol);
                         // The callee's region is relative to the argument, which the call site
                         // itself may already have indexed into.
-                        concrete.region = access.fact.region.rebasedOn(bindingIt->second.region);
+                        concrete.region = access.fact.region.rebasedOn(
+                            bindingIt->second.region, bindingIt->second.designated);
                         concrete.heldLocks =
                             mergeHeldLocks(concrete.heldLocks, callBinding.callsiteHeldLocks);
                         concrete.inRootTask = callBinding.callerInRootTask;
@@ -1113,8 +1114,8 @@ namespace ctrace::concurrency::internal::analysis
                         .root = bindingIt->second,
                         .fact = access.fact,
                     };
-                    propagatedAccess.root.region =
-                        access.fact.region.rebasedOn(bindingIt->second.region);
+                    propagatedAccess.root.region = access.fact.region.rebasedOn(
+                        bindingIt->second.region, bindingIt->second.designated);
                     propagatedAccess.fact.functionId = callBinding.callerFunctionId;
                     propagatedAccess.fact.region = propagatedAccess.root.region;
                     propagatedAccess.fact.heldLocks = mergeHeldLocks(

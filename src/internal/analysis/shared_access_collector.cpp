@@ -191,6 +191,9 @@ namespace ctrace::concurrency::internal::analysis
             access.function = &function;
             access.instruction = &instruction;
             access.root = *root;
+            // An access of unknown extent may reach the whole object the pointer designates.
+            if (byteSize == 0)
+                access.root.region = root->designated;
             access.fact.functionId = functionId(function);
             access.fact.kind = kind;
             access.fact.aliasProvenance = aliasProvenance;
