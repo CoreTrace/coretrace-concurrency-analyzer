@@ -950,6 +950,16 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_disjoint_struct_fields_no_fp.c",
              .intent = "workers write distinct fields of a global struct"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_field_through_local_pointer.c",
+             .intent = "a field written through a local pointer keeps its offset (#102)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_field_through_local_pointer_sibling_no_fp.c",
+             .intent = "a field written through a local pointer is not read as its neighbour (#102)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_field_through_two_local_pointers.c",
+             .intent = "offsets taken before each of two local copies add up (#102)",
+             .dataRace = 1, .racingSymbol = "shared"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_helper_writes_sibling_field_no_fp.c",
              .intent = "a helper's write to the field it is handed stays at that field's offset (#99)"},
