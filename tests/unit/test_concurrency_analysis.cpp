@@ -160,6 +160,33 @@ namespace
             [ruleId](const Diagnostic& diagnostic) { return diagnostic.ruleId == ruleId; }));
     }
 
+    /// Every diagnostic of `ruleId` for `fixture` must read exactly `expectedMessage`. Used to
+    /// pin the wording `describeConflictSubject` chooses (#111): an object handed to a thread
+    /// must never be described as if it were a global, and a real global must keep its own name.
+    bool checkEveryDiagnosticMessage(std::string_view fixture, RuleId ruleId,
+                                     std::string_view expectedMessage,
+                                     std::vector<std::string> extraCompileArgs = {})
+    {
+        const std::optional<DiagnosticReport> report = analyzeFixture(
+            fixture, AnalysisOptions{.enabledRules = {ruleId}}, std::move(extraCompileArgs));
+        if (!assertTrue(report.has_value() && !report->diagnostics.empty(),
+                        std::string(fixture) + " should report a diagnostic"))
+        {
+            return false;
+        }
+
+        bool ok = true;
+        for (const Diagnostic& diagnostic : report->diagnostics)
+        {
+            ok = assertTrue(diagnostic.message == expectedMessage,
+                            std::string(fixture) + ": expected message \"" +
+                                std::string(expectedMessage) + "\", got \"" + diagnostic.message +
+                                "\"") &&
+                 ok;
+        }
+        return ok;
+    }
+
     std::string describeLocation(const ctrace::concurrency::SourceLocation& location)
     {
         return location.file + ':' + std::to_string(location.line) + ':' +
@@ -1858,6 +1885,52 @@ namespace
         return ok;
     }
 
+    /// #111: the owner's own access to a local object it handed to a thread reads the way the
+    /// thread's side of the pair does, as an object shared with a thread. It is never described
+    /// as a global named after the object's internal storage label.
+    bool testOwnerAccessToLocalObjectNamesSharedObjectNotGlobal()
+    {
+        constexpr std::string_view kSharedObjectMessage =
+            "unsynchronized concurrent access to an object shared with a thread";
+        constexpr std::string_view kFixtures[] = {
+            "tests/fixtures/concurrency/data-race/data_race_owner_writes_local_object.c",
+            "tests/fixtures/concurrency/data-race/"
+            "data_race_owner_writes_local_object_through_pointer.c",
+            "tests/fixtures/concurrency/data-race/data_race_owner_locks_other_mutex.c",
+            "tests/fixtures/concurrency/data-race/data_race_owner_unlocked_while_thread_locks.c",
+            // Reached through the pointer the thread was handed: named after the slot holding it.
+            "tests/fixtures/concurrency/data-race/data_race_creator_and_thread_share_object.c",
+        };
+
+        bool ok = true;
+        for (const std::string_view fixture : kFixtures)
+        {
+            ok = checkEveryDiagnosticMessage(fixture, RuleId::DataRaceGlobal,
+                                             kSharedObjectMessage) &&
+                 ok;
+        }
+
+        return checkEveryDiagnosticMessage(
+                   "tests/fixtures/concurrency-cxx20/cpp_owner_writes_local_object_race.cpp",
+                   RuleId::DataRaceGlobal, kSharedObjectMessage, {std::string(kCxx20Standard)}) &&
+               ok;
+    }
+
+    /// The global-object neighbours of #111 must keep naming the global: the fix keys off
+    /// whether the symbol names an object handed to a thread, not off dropping every global's
+    /// name from the message.
+    bool testOwnerAccessToGlobalObjectStillNamesGlobal()
+    {
+        const bool cOk = checkEveryDiagnosticMessage(
+            "tests/fixtures/concurrency/data-race/data_race_owner_writes_global_object.c",
+            RuleId::DataRaceGlobal, "unsynchronized concurrent access to global 'shared'");
+        const bool cppOk = checkEveryDiagnosticMessage(
+            "tests/fixtures/concurrency-cxx20/cpp_owner_writes_global_object_race.cpp",
+            RuleId::DataRaceGlobal, "unsynchronized concurrent access to global 'counter'",
+            {std::string(kCxx20Standard)});
+        return cOk && cppOk;
+    }
+
     /// An access count that was never taken is absent, and a count of zero means the accesses
     /// were examined and there were none. Reporting zero for both would answer a question
     /// nobody asked, and a reader cannot tell the two apart afterwards.
@@ -2095,6 +2168,8 @@ int main()
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
+    ok = testOwnerAccessToLocalObjectNamesSharedObjectNotGlobal() && ok;
+    ok = testOwnerAccessToGlobalObjectStillNamesGlobal() && ok;
     ok = testDefaultOptionsEnableEveryAvailableRule() && ok;
     ok = testAccessCountsDistinguishNotComputedFromZero() && ok;
     ok = testOptimizationRequestDoesNotChangeFindings() && ok;
