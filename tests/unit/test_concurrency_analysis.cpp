@@ -1019,6 +1019,10 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/data_race_owner_writes_local_object.c",
              .intent = "the owner of a local object handed to a thread still races with it (#103)",
              .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_owner_writes_local_object_through_pointer.c",
+             .intent = "the owner's write through a local pointer to the object still races (#103)",
+             .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_owner_writes_global_object.c",
              .intent = "the owner of a global object handed to a thread still races with it (#103)",
              .dataRace = 1, .racingSymbol = "shared"},
