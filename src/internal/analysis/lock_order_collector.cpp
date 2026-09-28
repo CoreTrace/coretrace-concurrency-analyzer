@@ -70,6 +70,8 @@ namespace ctrace::concurrency::internal::analysis
         : classifier_(classifier), analyses_(analyses), summaries_(summaries),
           sharedObjects_(sharedObjects)
     {
+        if (sharedObjects_ != nullptr)
+            localObjects_ = sharedObjectNames(*sharedObjects_, SharedObjectKind::Local);
     }
 
     std::vector<LockOrderFact>
@@ -92,7 +94,7 @@ namespace ctrace::concurrency::internal::analysis
 
         const SynchronizationEffectResolver effectResolver(
             classifier_, function.getParent()->getDataLayout(), summaries_,
-            /*nameParameterLocks=*/false, sharedObject);
+            /*nameParameterLocks=*/false, sharedObject, &localObjects_);
         const FunctionLockEffects lockEffects =
             collectFunctionLockEffects(function, effectResolver);
 

@@ -399,15 +399,59 @@ namespace ctrace::concurrency::internal::analysis
             if (sharedObjectIds.empty())
                 return std::nullopt;
 
-            const llvm::Value* slot = operand.stripPointerCastsAndAliases();
-            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(slot))
-                slot = load->getPointerOperand();
+            // Only a pointer read out of the slot is the object; the slot's own address is the
+            // variable holding it.
+            const auto* load =
+                llvm::dyn_cast<llvm::LoadInst>(operand.stripPointerCastsAndAliases());
+            if (load == nullptr)
+                return std::nullopt;
 
-            const std::optional<std::string> slotId = canonicalStorageGroupId(*slot);
+            const std::optional<std::string> slotId =
+                canonicalStorageGroupId(*load->getPointerOperand());
             if (!slotId.has_value() || !sharedObjectIds.contains(*slotId))
                 return std::nullopt;
 
             return RootBinding::global(*slotId);
+        }
+
+        /// The locks of a callee's access as its caller holds them. A lock the callee named after
+        /// one of its parameters is the lock at that place in what the call passes there; with
+        /// nothing nameable passed, it protects nothing the caller can see.
+        std::set<std::string> locksAtCallSite(const std::set<std::string>& calleeLocks,
+                                              const DirectCallBinding& callBinding)
+        {
+            std::set<std::string> locks;
+            for (const std::string& lockId : calleeLocks)
+            {
+                const std::optional<ParameterLockPlace> place = parameterLockPlace(lockId);
+                if (!place.has_value())
+                {
+                    locks.insert(lockId);
+                    continue;
+                }
+
+                const auto argumentIt = callBinding.argumentBindings.find(place->argumentIndex);
+                if (argumentIt != callBinding.argumentBindings.end())
+                    locks.insert(lockIdAt(argumentIt->second, place->place));
+            }
+            return locks;
+        }
+
+        /// The locks of a thread entry's access to the object it was handed, named after that
+        /// object.
+        std::set<std::string> locksOnSharedObject(const std::set<std::string>& entryLocks,
+                                                  const SharedObjectBinding& binding)
+        {
+            std::set<std::string> locks;
+            for (const std::string& lockId : entryLocks)
+            {
+                const std::optional<ParameterLockPlace> place = parameterLockPlace(lockId);
+                if (!place.has_value())
+                    locks.insert(lockId);
+                else if (place->argumentIndex == binding.argumentIndex)
+                    locks.insert(lockIdAt(binding.object, place->place));
+            }
+            return locks;
         }
 
         std::vector<DirectCallBinding> buildDirectCallBindings(
@@ -415,7 +459,8 @@ namespace ctrace::concurrency::internal::analysis
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
             const TaskConcurrencyResult& taskConcurrency,
             const ProgramDefinedGlobals* programDefined,
-            const std::unordered_set<std::string>& sharedObjectIds, const llvm::DataLayout& layout)
+            const std::unordered_set<std::string>& sharedObjectIds,
+            const std::unordered_set<std::string>& localObjectIds, const llvm::DataLayout& layout)
         {
             std::vector<DirectCallBinding> bindings;
 
@@ -451,6 +496,8 @@ namespace ctrace::concurrency::internal::analysis
                     // would stand for the whole object the helper's accesses are projected onto.
                     std::optional<RootBinding> root =
                         resolveTrackedRoot(operand, &layout, 0, programDefined);
+                    if (!root.has_value())
+                        root = resolveLocalObjectRoot(operand, &layout, 0, localObjectIds);
                     if (!root.has_value())
                         root = sharedObjectArgument(operand, sharedObjectIds);
 
@@ -576,20 +623,23 @@ namespace ctrace::concurrency::internal::analysis
         // reaching it through the same slot, so its own accesses need the identity too.
         SharedObjectBindings sharedObjectBindings;
         std::unordered_set<std::string> sharedObjectIds;
+        std::unordered_set<std::string> localObjectIds;
         if (selection.lockState())
         {
-            sharedObjectBindings =
-                SharedObjectBindingCollector(classifier, analyses).collect(module, directCallSites);
-            for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
-                sharedObjectIds.insert(binding.objectId);
+            sharedObjectBindings = SharedObjectBindingCollector(classifier, analyses)
+                                       .collect(module, directCallSites, programDefined);
+            sharedObjectIds =
+                sharedObjectNames(sharedObjectBindings, SharedObjectKind::BehindPointer);
+            localObjectIds = sharedObjectNames(sharedObjectBindings, SharedObjectKind::Local);
         }
 
         std::vector<PendingAccess> pendingAccesses;
         std::unordered_map<const llvm::Instruction*, std::set<std::string>> heldLocksByAccess;
         if (selection.accesses)
         {
-            pendingAccesses = SharedAccessCollector(classifier, analyses)
-                                  .collect(module, programDefined, &sharedObjectIds);
+            pendingAccesses =
+                SharedAccessCollector(classifier, analyses)
+                    .collect(module, programDefined, &sharedObjectIds, &localObjectIds);
 
             std::unordered_map<std::string, std::unordered_set<const llvm::Instruction*>>
                 trackedAccessesByFunction;
@@ -1061,7 +1111,7 @@ namespace ctrace::concurrency::internal::analysis
 
         const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
             directCallSites, lockPropagation.effectiveHeldLocksByCall, taskConcurrency,
-            programDefined, sharedObjectIds, module.getDataLayout());
+            programDefined, sharedObjectIds, localObjectIds, module.getDataLayout());
 
         bool changed = true;
         while (changed)
@@ -1092,13 +1142,15 @@ namespace ctrace::concurrency::internal::analysis
                         concrete.symbol = bindingIt->second.symbol;
                         // The binding may name an object a thread holds rather than a global,
                         // and the two are not described the same way to the reader.
-                        concrete.sharedObject = sharedObjectIds.contains(concrete.symbol);
+                        concrete.sharedObject = sharedObjectIds.contains(concrete.symbol) ||
+                                                localObjectIds.contains(concrete.symbol);
                         // The callee's region is relative to the argument, which the call site
                         // itself may already have indexed into.
                         concrete.region = access.fact.region.rebasedOn(
                             bindingIt->second.region, bindingIt->second.designated);
                         concrete.heldLocks =
-                            mergeHeldLocks(concrete.heldLocks, callBinding.callsiteHeldLocks);
+                            mergeHeldLocks(locksAtCallSite(concrete.heldLocks, callBinding),
+                                           callBinding.callsiteHeldLocks);
                         concrete.inRootTask = callBinding.callerInRootTask;
                         concrete.liveEntries =
                             mergeLiveEntries(concrete.liveEntries, callBinding.callsiteLiveEntries);
@@ -1122,7 +1174,8 @@ namespace ctrace::concurrency::internal::analysis
                     propagatedAccess.fact.functionId = callBinding.callerFunctionId;
                     propagatedAccess.fact.region = propagatedAccess.root.region;
                     propagatedAccess.fact.heldLocks = mergeHeldLocks(
-                        propagatedAccess.fact.heldLocks, callBinding.callsiteHeldLocks);
+                        locksAtCallSite(propagatedAccess.fact.heldLocks, callBinding),
+                        callBinding.callsiteHeldLocks);
                     propagatedAccess.fact.inRootTask = callBinding.callerInRootTask;
                     propagatedAccess.fact.liveEntries = mergeLiveEntries(
                         propagatedAccess.fact.liveEntries, callBinding.callsiteLiveEntries);
@@ -1162,10 +1215,16 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
                     }
 
+                    const SharedObjectBinding& binding = bindingIt->second;
                     AccessFact fact = access.fact;
-                    fact.symbol = bindingIt->second.objectId;
-                    fact.region = access.root.region;
-                    fact.sharedObject = true;
+                    fact.symbol = binding.object.symbol;
+                    // The thread's accesses are relative to what it was handed, which the spawn
+                    // may have pointed into the object, exactly as for a call argument.
+                    fact.region = access.root.region.rebasedOn(binding.object.region,
+                                                               binding.object.designated);
+                    fact.heldLocks = locksOnSharedObject(fact.heldLocks, binding);
+                    // A global keeps its own name in the report; other objects have none to show.
+                    fact.sharedObject = binding.kind != SharedObjectKind::Global;
                     addConcreteAccess(concreteAccesses, concreteAccessKeys, std::move(fact));
                 }
             }
@@ -1191,7 +1250,8 @@ namespace ctrace::concurrency::internal::analysis
                     AccessFact remapped = access;
                     remapped.functionId = callBinding.callerFunctionId;
                     remapped.heldLocks =
-                        mergeHeldLocks(remapped.heldLocks, callBinding.callsiteHeldLocks);
+                        mergeHeldLocks(locksAtCallSite(remapped.heldLocks, callBinding),
+                                       callBinding.callsiteHeldLocks);
                     remapped.inRootTask = callBinding.callerInRootTask;
                     remapped.liveEntries =
                         mergeLiveEntries(remapped.liveEntries, callBinding.callsiteLiveEntries);
@@ -1206,6 +1266,14 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         facts.accesses = filterProjectedConcreteAccesses(std::move(concreteAccesses));
+        // A lock still named after a parameter was never substituted by a call site: it is the
+        // lock of whatever some caller passes, and two such names in different functions are not
+        // the same lock.
+        for (AccessFact& access : facts.accesses)
+        {
+            std::erase_if(access.heldLocks, [](const std::string& lockId)
+                          { return parameterLockPlace(lockId).has_value(); });
+        }
         orderStaticInitialization(module, facts.accesses, crossTU);
         return facts;
     }

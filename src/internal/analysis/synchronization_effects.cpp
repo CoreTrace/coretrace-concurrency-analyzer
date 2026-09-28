@@ -54,9 +54,11 @@ namespace ctrace::concurrency::internal::analysis
     SynchronizationEffectResolver::SynchronizationEffectResolver(
         const ConcurrencySymbolClassifier& classifier, const llvm::DataLayout& layout,
         const LockWrapperSummaries* summaries, bool nameParameterLocks,
-        const SharedObjectBinding* sharedObject)
+        const SharedObjectBinding* sharedObject,
+        const std::unordered_set<std::string>* localObjects, bool nameParameterFieldLocks)
         : classifier_(classifier), layout_(layout), summaries_(summaries),
-          nameParameterLocks_(nameParameterLocks), sharedObject_(sharedObject)
+          nameParameterLocks_(nameParameterLocks), sharedObject_(sharedObject),
+          localObjects_(localObjects), nameParameterFieldLocks_(nameParameterFieldLocks)
     {
     }
 
@@ -69,15 +71,28 @@ namespace ctrace::concurrency::internal::analysis
             return lockId;
         }
 
+        if (localObjects_ != nullptr)
+        {
+            if (std::optional<std::string> lockId =
+                    localObjectLockId(value, &layout_, *localObjects_);
+                lockId.has_value())
+            {
+                return lockId;
+            }
+        }
+
         if (sharedObject_ != nullptr)
         {
             if (std::optional<std::string> fieldId = objectFieldLockId(
-                    value, &layout_, sharedObject_->argumentIndex, sharedObject_->objectId);
+                    value, &layout_, sharedObject_->argumentIndex, sharedObject_->object);
                 fieldId.has_value())
             {
                 return fieldId;
             }
         }
+
+        if (nameParameterFieldLocks_)
+            return parameterFieldLockId(value, &layout_);
 
         return nameParameterLocks_ ? parameterLockId(value) : std::nullopt;
     }

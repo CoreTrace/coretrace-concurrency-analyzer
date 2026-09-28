@@ -32,13 +32,44 @@ namespace ctrace::concurrency::internal::analysis
         constexpr unsigned kStdThreadCallableOperandIndex = 1;
         constexpr unsigned kStdThreadObjectOperandIndex = 2;
 
+        /// What a spawn, or a call handing the object on, passes. `key` compares two of them;
+        /// an object only a construction site further up can name has a parameter key and no
+        /// binding yet.
+        struct ObjectIdentity
+        {
+            std::string key;
+            std::optional<SharedObjectBinding> binding;
+        };
+
         struct SpawnedObject
         {
             std::string entryFunctionId;
-            std::string objectId;
+            ObjectIdentity object;
             unsigned argumentIndex = 0;
             bool insideLoop = false;
         };
+
+        ObjectIdentity namedIdentity(RootBinding object, SharedObjectKind kind)
+        {
+            std::string key;
+            switch (kind)
+            {
+            case SharedObjectKind::Global:
+                key = "global-object:";
+                break;
+            case SharedObjectKind::Local:
+                key = "local-object:";
+                break;
+            case SharedObjectKind::BehindPointer:
+                key = "pointed-object:";
+                break;
+            }
+            key += object.symbol + object.region.suffix();
+            return ObjectIdentity{
+                .key = std::move(key),
+                .binding = SharedObjectBinding{.object = std::move(object), .kind = kind},
+            };
+        }
 
         /// The object behind the temporary `std::thread` materialises for it.
         ///
@@ -94,29 +125,57 @@ namespace ctrace::concurrency::internal::analysis
             return spilled;
         }
 
-        /// Identity of the object a value designates: the slot its pointer was read from, or
-        /// the parameter that slot merely holds. Used at the spawn and at every construction
-        /// site above it, so both sides speak of the object in the same terms.
-        std::optional<std::string> objectIdentityOf(const llvm::Value& value)
+        /// Identity of the object a value designates. An object read out of a variable is named
+        /// by that variable, or by the parameter the variable merely holds. An object whose own
+        /// address is passed is named the way its owner's accesses name it: a global by its name,
+        /// a local by its storage. Used at the spawn and at every construction site above it, so
+        /// both sides speak of the object in the same terms.
+        std::optional<ObjectIdentity> objectIdentityOf(const llvm::Value& value,
+                                                       const llvm::DataLayout& layout,
+                                                       const ProgramDefinedGlobals* programDefined)
         {
             const llvm::Value* object = value.stripPointerCastsAndAliases();
-            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(object))
+            const auto* load = llvm::dyn_cast<llvm::LoadInst>(object);
+            if (load != nullptr)
                 object = load->getPointerOperand();
 
             if (const auto* storage = llvm::dyn_cast<llvm::AllocaInst>(object))
             {
                 if (const llvm::Argument* spilled = spilledParameterOf(*storage))
                 {
-                    return "arg:" + functionId(*spilled->getParent()) + ":" +
-                           std::to_string(spilled->getArgNo());
+                    return ObjectIdentity{.key = "arg:" + functionId(*spilled->getParent()) + ":" +
+                                                 std::to_string(spilled->getArgNo())};
                 }
             }
 
-            return canonicalStorageGroupId(*object);
+            if (load == nullptr)
+            {
+                if (std::optional<RootBinding> global =
+                        resolveTrackedRoot(value, &layout, 0, programDefined);
+                    global.has_value() && global->kind == RootBindingKind::Global)
+                {
+                    return namedIdentity(std::move(*global), SharedObjectKind::Global);
+                }
+
+                if (std::optional<RootBinding> local = resolveLocalStorageRoot(value, &layout, 0))
+                    return namedIdentity(std::move(*local), SharedObjectKind::Local);
+            }
+
+            std::optional<std::string> storageId = canonicalStorageGroupId(*object);
+            if (!storageId.has_value())
+                return std::nullopt;
+
+            if (std::string_view(*storageId).starts_with(kParameterPrefix))
+                return ObjectIdentity{.key = std::move(*storageId)};
+
+            return namedIdentity(RootBinding::global(std::move(*storageId)),
+                                 SharedObjectKind::BehindPointer);
         }
 
         std::optional<SpawnedObject> spawnedObjectAt(const llvm::CallBase& call, CallKind kind,
-                                                     bool insideLoop)
+                                                     bool insideLoop,
+                                                     const llvm::DataLayout& layout,
+                                                     const ProgramDefinedGlobals* programDefined)
         {
             unsigned entryIndex = 0;
             unsigned objectIndex = 0;
@@ -152,13 +211,14 @@ namespace ctrace::concurrency::internal::analysis
             if (kind != CallKind::PThreadCreate)
                 object = throughForwardingSlot(*object);
 
-            std::optional<std::string> objectId = objectIdentityOf(*object);
-            if (!objectId.has_value())
+            std::optional<ObjectIdentity> identity =
+                objectIdentityOf(*object, layout, programDefined);
+            if (!identity.has_value())
                 return std::nullopt;
 
             return SpawnedObject{
                 .entryFunctionId = functionId(*entry),
-                .objectId = std::move(*objectId),
+                .object = std::move(*identity),
                 // Both spawn forms deliver the object on the entry's first parameter: the `void*`
                 // of a pthread routine, and the `this` of a member function.
                 .argumentIndex = 0,
@@ -173,10 +233,27 @@ namespace ctrace::concurrency::internal::analysis
     {
     }
 
+    std::unordered_set<std::string> sharedObjectNames(const SharedObjectBindings& bindings,
+                                                      SharedObjectKind kind)
+    {
+        std::unordered_set<std::string> names;
+        for (const auto& [entryFunctionId, binding] : bindings)
+        {
+            if (binding.kind == kind)
+                names.insert(binding.object.symbol);
+        }
+        return names;
+    }
+
     SharedObjectBindings
     SharedObjectBindingCollector::collect(const llvm::Module& module,
-                                          const std::vector<DirectCallSite>& directCallSites) const
+                                          const std::vector<DirectCallSite>& directCallSites,
+                                          const ProgramDefinedGlobals* programDefined) const
     {
+        const llvm::DataLayout& layout = module.getDataLayout();
+        // Every identity seen, by key: the key is what spawns are compared on, the binding is
+        // what the entry is eventually given.
+        std::map<std::string, SharedObjectBinding> bindingsByKey;
         // Keyed by the pair so that the same object handed to two different entries counts as
         // shared just as much as the same entry started twice on it.
         std::map<std::pair<std::string, std::string>, std::set<const llvm::Instruction*>> sites;
@@ -202,12 +279,14 @@ namespace ctrace::concurrency::internal::analysis
                     if (call == nullptr)
                         continue;
 
-                    const std::optional<SpawnedObject> spawned =
-                        spawnedObjectAt(*call, classifier_.classify(*call), insideLoop);
+                    const std::optional<SpawnedObject> spawned = spawnedObjectAt(
+                        *call, classifier_.classify(*call), insideLoop, layout, programDefined);
                     if (!spawned.has_value())
                         continue;
 
-                    const auto key = std::pair{spawned->entryFunctionId, spawned->objectId};
+                    if (spawned->object.binding.has_value())
+                        bindingsByKey.emplace(spawned->object.key, *spawned->object.binding);
+                    const auto key = std::pair{spawned->entryFunctionId, spawned->object.key};
                     sites[key].insert(&instruction);
                     loopedSite[key] = loopedSite[key] || spawned->insideLoop;
                 }
@@ -226,7 +305,7 @@ namespace ctrace::concurrency::internal::analysis
         // owns. The step repeats because the chain has more than one link — a complete
         // constructor calls the base one, handing its own `this` along.
         constexpr unsigned kMaxCallerRounds = 4;
-        const auto callersOf = [&directCallSites](const std::string& parameterId)
+        const auto callersOf = [&](const std::string& parameterId)
         {
             std::set<std::string> resolved;
             // `arg:<function>:<index>` names the parameter the object arrived on.
@@ -247,10 +326,12 @@ namespace ctrace::concurrency::internal::analysis
                     continue;
                 }
 
-                if (std::optional<std::string> caller =
-                        objectIdentityOf(*site.call->getArgOperand(argumentIndex)))
+                if (std::optional<ObjectIdentity> caller = objectIdentityOf(
+                        *site.call->getArgOperand(argumentIndex), layout, programDefined))
                 {
-                    resolved.insert(std::move(*caller));
+                    if (caller->binding.has_value())
+                        bindingsByKey.emplace(caller->key, *caller->binding);
+                    resolved.insert(std::move(caller->key));
                 }
             }
 
@@ -298,8 +379,13 @@ namespace ctrace::concurrency::internal::analysis
             if (candidates.size() != 1)
                 continue;
 
-            bindings.emplace(entryFunctionId, SharedObjectBinding{.objectId = *candidates.begin(),
-                                                                  .argumentIndex = 0});
+            const auto bindingIt = bindingsByKey.find(*candidates.begin());
+            if (bindingIt == bindingsByKey.end())
+                continue;
+
+            SharedObjectBinding binding = bindingIt->second;
+            binding.argumentIndex = 0;
+            bindings.emplace(entryFunctionId, std::move(binding));
         }
 
         return bindings;

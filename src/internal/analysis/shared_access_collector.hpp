@@ -28,9 +28,12 @@ namespace ctrace::concurrency::internal::analysis
         /// `sharedObjectIds` names the storage slots the spawn sites proved hold an object more
         /// than one thread reaches. An access through such a slot is shared state as surely as a
         /// global is, and is followed on the same terms.
+        /// `localObjectIds` names the local variables the spawn sites handed to a thread whole:
+        /// the owner reaches them by name rather than through a slot.
         [[nodiscard]] std::vector<PendingAccess>
         collect(const llvm::Module& module, const ProgramDefinedGlobals* programDefined = nullptr,
-                const std::unordered_set<std::string>* sharedObjectIds = nullptr) const;
+                const std::unordered_set<std::string>* sharedObjectIds = nullptr,
+                const std::unordered_set<std::string>* localObjectIds = nullptr) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;

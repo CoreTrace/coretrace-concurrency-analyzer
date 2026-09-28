@@ -28,6 +28,17 @@ namespace ctrace::concurrency::internal::analysis
 {
     namespace
     {
+        /// Prefix of a lock named after a parameter of the enclosing function.
+        constexpr std::string_view kParameterLockPrefix = "%arg";
+
+        /// A local object is named after its storage, marked apart from the same storage read
+        /// as a pointer variable: the variable and what it points at are different objects.
+        std::string localObjectName(const llvm::AllocaInst& storage)
+        {
+            const std::optional<std::string> storageId = canonicalStorageGroupId(storage);
+            return storageId.has_value() ? "object:" + *storageId : std::string();
+        }
+
         std::string normalizeValueName(llvm::StringRef name)
         {
             if (name.starts_with("\x01"))
@@ -157,6 +168,9 @@ namespace ctrace::concurrency::internal::analysis
             /// array element, which whoever receives it may move to any other element, on either
             /// side.
             std::int64_t designatedDisplacement = 0;
+            /// Whether the walk may end at a local variable. Only the analyses naming a local
+            /// object handed to a thread ask for that; everyone else stops short of locals.
+            bool acceptsLocalStorage = false;
 
             [[nodiscard]] MemoryRegion region(std::uint64_t byteSize = 0) const
             {
@@ -466,6 +480,20 @@ namespace ctrace::concurrency::internal::analysis
                 if (llvm::isa<llvm::Argument>(current) || llvm::isa<llvm::Function>(current))
                     return current;
 
+                if (const auto* storage = llvm::dyn_cast<llvm::AllocaInst>(current))
+                {
+                    if (walk == nullptr || !walk->acceptsLocalStorage)
+                        return nullptr;
+
+                    noteTraversedType(*walk, storage->getAllocatedType());
+                    if (!walk->designatedSize.has_value())
+                    {
+                        settleDesignatedSize(*walk,
+                                             storeSizeOf(*walk, storage->getAllocatedType()));
+                    }
+                    return current;
+                }
+
                 if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(current))
                 {
                     if (walk != nullptr)
@@ -726,10 +754,70 @@ namespace ctrace::concurrency::internal::analysis
         return binding;
     }
 
+    std::optional<RootBinding> resolveLocalStorageRoot(const llvm::Value& value,
+                                                       const llvm::DataLayout* layout,
+                                                       std::uint64_t byteSize)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        walk.layout = layout;
+        walk.acceptsLocalStorage = true;
+        const auto* storage =
+            llvm::dyn_cast_or_null<llvm::AllocaInst>(resolveCopiedValue(value, seen, &walk));
+        if (storage == nullptr || walk.touchesSyncPrimitive)
+            return std::nullopt;
+
+        std::string name = localObjectName(*storage);
+        if (name.empty())
+            return std::nullopt;
+
+        RootBinding binding = RootBinding::global(std::move(name), walk.region(byteSize));
+        binding.designated = walk.designatedRegion();
+        return binding;
+    }
+
+    std::optional<RootBinding>
+    resolveLocalObjectRoot(const llvm::Value& value, const llvm::DataLayout* layout,
+                           std::uint64_t byteSize,
+                           const std::unordered_set<std::string>& localObjectIds)
+    {
+        if (localObjectIds.empty())
+            return std::nullopt;
+
+        std::optional<RootBinding> binding = resolveLocalStorageRoot(value, layout, byteSize);
+        if (!binding.has_value() || !localObjectIds.contains(binding->symbol))
+            return std::nullopt;
+        return binding;
+    }
+
+    std::optional<std::string>
+    localObjectLockId(const llvm::Value& value, const llvm::DataLayout* layout,
+                      const std::unordered_set<std::string>& localObjectIds)
+    {
+        if (localObjectIds.empty())
+            return std::nullopt;
+
+        // The lock itself is a synchronization object, which is exactly what is being named
+        // here, so the walk is not stopped by it the way a data access is.
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        walk.layout = layout;
+        walk.acceptsLocalStorage = true;
+        const auto* storage =
+            llvm::dyn_cast_or_null<llvm::AllocaInst>(resolveCopiedValue(value, seen, &walk));
+        if (storage == nullptr)
+            return std::nullopt;
+
+        const std::string name = localObjectName(*storage);
+        if (name.empty() || !localObjectIds.contains(name))
+            return std::nullopt;
+
+        return name + walk.region().suffix();
+    }
+
     std::optional<std::string> objectFieldLockId(const llvm::Value& value,
                                                  const llvm::DataLayout* layout,
-                                                 unsigned argumentIndex,
-                                                 const std::string& objectId)
+                                                 unsigned argumentIndex, const RootBinding& object)
     {
         llvm::SmallPtrSet<const llvm::Value*, 8> seen;
         AccessPathWalk walk;
@@ -739,7 +827,59 @@ namespace ctrace::concurrency::internal::analysis
         if (argument == nullptr || argument->getArgNo() != argumentIndex)
             return std::nullopt;
 
-        return objectId + walk.region().suffix();
+        return lockIdAt(object, walk.region());
+    }
+
+    std::optional<std::string> parameterFieldLockId(const llvm::Value& value,
+                                                    const llvm::DataLayout* layout)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        walk.layout = layout;
+        const auto* argument =
+            llvm::dyn_cast_or_null<llvm::Argument>(resolveCopiedValue(value, seen, &walk));
+        if (argument == nullptr)
+            return std::nullopt;
+
+        return lockIdAt(RootBinding::argument(argument->getArgNo()), walk.region());
+    }
+
+    std::optional<ParameterLockPlace> parameterLockPlace(std::string_view lockId)
+    {
+        if (!lockId.starts_with(kParameterLockPrefix))
+            return std::nullopt;
+
+        std::string_view rest = lockId.substr(kParameterLockPrefix.size());
+        const std::size_t digits = rest.find_first_not_of("0123456789");
+        const std::string_view index = rest.substr(0, digits);
+        if (index.empty())
+            return std::nullopt;
+
+        ParameterLockPlace result;
+        result.argumentIndex = static_cast<unsigned>(std::stoul(std::string(index)));
+        const std::string_view suffix =
+            digits == std::string_view::npos ? std::string_view{} : rest.substr(digits);
+        if (suffix == "[*]")
+            result.place.hasKnownOffset = false;
+        else if (suffix.starts_with("+"))
+            result.place.byteOffset = std::stoll(std::string(suffix.substr(1)));
+        else if (!suffix.empty())
+            return std::nullopt;
+        return result;
+    }
+
+    std::string lockIdAt(const RootBinding& object, const MemoryRegion& place)
+    {
+        const MemoryRegion position{
+            .hasKnownOffset = object.region.hasKnownOffset && place.hasKnownOffset,
+            .byteOffset = object.region.byteOffset + place.byteOffset,
+        };
+        if (object.kind == RootBindingKind::Argument)
+        {
+            return std::string(kParameterLockPrefix) + std::to_string(object.argumentIndex) +
+                   position.suffix();
+        }
+        return object.symbol + position.suffix();
     }
 
     std::optional<std::string> parameterLockId(const llvm::Value& value)
@@ -750,7 +890,7 @@ namespace ctrace::concurrency::internal::analysis
         if (argument == nullptr)
             return std::nullopt;
 
-        return "%arg" + std::to_string(argument->getArgNo());
+        return std::string(kParameterLockPrefix) + std::to_string(argument->getArgNo());
     }
 
     std::optional<std::string> canonicalLockId(const llvm::Value& value,

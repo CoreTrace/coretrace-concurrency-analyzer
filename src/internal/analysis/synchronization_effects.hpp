@@ -54,13 +54,20 @@ namespace ctrace::concurrency::internal::analysis
         /// has on the argument it was given. Null while the summaries are still being computed.
         ///
         /// `nameParameterLocks` reports a lock the enclosing function received as a parameter
-        /// under a placeholder identity instead of dropping it. Only the summary pass wants
-        /// that: every other consumer must see real locks.
+        /// under a placeholder identity instead of dropping it. The summary pass wants that for
+        /// the lock itself; the pass tracking the locks held around accesses wants it for a lock
+        /// that is a field of a parameter's object too, and substitutes the placeholder at every
+        /// call site. Any other consumer must see real locks.
+        ///
+        /// `localObjects` names the local objects handed to threads, whose locks are named after
+        /// their storage like the thread's own view of them.
         SynchronizationEffectResolver(const ConcurrencySymbolClassifier& classifier,
                                       const llvm::DataLayout& layout,
                                       const LockWrapperSummaries* summaries = nullptr,
                                       bool nameParameterLocks = false,
-                                      const SharedObjectBinding* sharedObject = nullptr);
+                                      const SharedObjectBinding* sharedObject = nullptr,
+                                      const std::unordered_set<std::string>* localObjects = nullptr,
+                                      bool nameParameterFieldLocks = false);
 
         [[nodiscard]] std::vector<LockEffect> resolve(const llvm::CallBase& call) const;
 
@@ -75,5 +82,7 @@ namespace ctrace::concurrency::internal::analysis
         /// Set while analysing a thread entry whose object the spawn sites identified, so a lock
         /// held inside that object can be named as well as the data it guards.
         const SharedObjectBinding* sharedObject_ = nullptr;
+        const std::unordered_set<std::string>* localObjects_ = nullptr;
+        bool nameParameterFieldLocks_ = false;
     };
 } // namespace ctrace::concurrency::internal::analysis
