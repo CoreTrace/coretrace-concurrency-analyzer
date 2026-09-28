@@ -462,7 +462,7 @@ namespace ctrace::concurrency::internal::analysis
                                               llvm::SmallPtrSetImpl<const llvm::Value*>& seen,
                                               AccessPathWalk* walk = nullptr)
         {
-            const llvm::Value* current = value.stripPointerCastsAndAliases();
+            const llvm::Value* current = stripCastsKeepingIndexing(&value);
             while (current != nullptr)
             {
                 if (!seen.insert(current).second)
@@ -503,7 +503,7 @@ namespace ctrace::concurrency::internal::analysis
                         noteGepTypes(*walk, *gep);
                         accumulateGepOffset(*walk, *gep);
                     }
-                    current = gep->getPointerOperand()->stripPointerCastsAndAliases();
+                    current = stripCastsKeepingIndexing(gep->getPointerOperand());
                     continue;
                 }
 
@@ -540,7 +540,7 @@ namespace ctrace::concurrency::internal::analysis
                         return nullptr;
 
                     const llvm::Value* candidate =
-                        store->getValueOperand()->stripPointerCastsAndAliases();
+                        stripCastsKeepingIndexing(store->getValueOperand());
                     if (storedValue == nullptr)
                         storedValue = candidate;
                     else if (storedValue != candidate)
@@ -584,7 +584,7 @@ namespace ctrace::concurrency::internal::analysis
                         return nullptr;
 
                     const llvm::Value* candidate =
-                        store->getValueOperand()->stripPointerCastsAndAliases();
+                        stripCastsKeepingIndexing(store->getValueOperand());
                     if (storedValue == nullptr)
                         storedValue = candidate;
                     else if (storedValue != candidate)

@@ -842,6 +842,11 @@ namespace
                        "(#99)",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_object_starts_thread_before_initializing_value_race.cpp",
+             .intent = "a destructor joining the thread member declared first reaches that member "
+                       "only; the initializer after it races (#110)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_object_assigns_its_thread_in_constructor_no_fp.cpp",
              .intent = "a thread assigned in the constructor body races with nothing the owner "
                        "touches (#99)",
@@ -1109,6 +1114,21 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_started_twice_joined_once_race.c",
              .intent = "a join ends the thread its field holds, not the one it replaced (#99)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_handle_first_started_twice_joined_once_race.c",
+             .intent = "starting a task writes its handle, not the whole task, when the handle is "
+                       "its first field (#110)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_handle_array_first_started_twice_joined_once_race.c",
+             .intent = "a handle in an array that is the task's first field reaches that array, "
+                       "not the whole task (#110)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_handle_first_started_through_local_pointer_race.c",
+             .intent = "a local pointer to the handle, the task's first field, still designates "
+                       "and names that field (#110)",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_started_again_in_other_function_race.c",
