@@ -94,6 +94,26 @@ namespace ctrace::concurrency::internal::analysis
     /// callee: every consumer sees it substituted by the caller's own lock.
     [[nodiscard]] std::optional<std::string> parameterLockId(const llvm::Value& value);
 
+    /// Identity of a lock that is, or is a field of, the object a parameter points at, as seen
+    /// from inside the function: the parameter's placeholder and the field's offset. Like
+    /// `parameterLockId`, it only means something once a call site substitutes what it passes.
+    [[nodiscard]] std::optional<std::string> parameterFieldLockId(const llvm::Value& value,
+                                                                  const llvm::DataLayout* layout);
+
+    /// Where a parameter lock id points: the parameter, and the place in the object it passes.
+    struct ParameterLockPlace
+    {
+        unsigned argumentIndex = 0;
+        MemoryRegion place;
+    };
+
+    /// Reads back a parameter lock id; nothing for any other lock id.
+    [[nodiscard]] std::optional<ParameterLockPlace> parameterLockPlace(std::string_view lockId);
+
+    /// The id of the lock at `place` within `object`: the object's name and the combined offset
+    /// for a named object, the caller's own parameter placeholder for one it received itself.
+    [[nodiscard]] std::string lockIdAt(const RootBinding& object, const MemoryRegion& place);
+
     /// Identity of an access made through a pointer the program holds in a named slot, when
     /// that slot is one the spawn sites identified as shared.
     ///
@@ -106,6 +126,25 @@ namespace ctrace::concurrency::internal::analysis
                             std::uint64_t byteSize,
                             const std::unordered_set<std::string>& sharedObjectIds);
 
+    /// The local variable a pointer leads into, named after its storage, with where the pointer
+    /// points in it and what it designates. Whether that local is anything more than a local is
+    /// for the caller to decide.
+    [[nodiscard]] std::optional<RootBinding> resolveLocalStorageRoot(const llvm::Value& value,
+                                                                     const llvm::DataLayout* layout,
+                                                                     std::uint64_t byteSize);
+
+    /// Identity of an access to a local object the spawn sites handed to a thread, under the
+    /// same name the thread's own accesses to it receive. Any other local is left out.
+    [[nodiscard]] std::optional<RootBinding>
+    resolveLocalObjectRoot(const llvm::Value& value, const llvm::DataLayout* layout,
+                           std::uint64_t byteSize,
+                           const std::unordered_set<std::string>& localObjectIds);
+
+    /// Identity of a lock that is a field of a local object handed to a thread.
+    [[nodiscard]] std::optional<std::string>
+    localObjectLockId(const llvm::Value& value, const llvm::DataLayout* layout,
+                      const std::unordered_set<std::string>& localObjectIds);
+
     /// Identity of a lock that is a field of the object a parameter points at.
     ///
     /// A thread-safe class keeps its mutex beside the data it guards, so once the object has an
@@ -115,7 +154,7 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] std::optional<std::string> objectFieldLockId(const llvm::Value& value,
                                                                const llvm::DataLayout* layout,
                                                                unsigned argumentIndex,
-                                                               const std::string& objectId);
+                                                               const RootBinding& object);
     /// Resolves the tracked root of a pointer: where in it the pointer points, with `byteSize` as
     /// the extent (zero when unknown), and the object the pointer designates.
     [[nodiscard]] std::optional<RootBinding>

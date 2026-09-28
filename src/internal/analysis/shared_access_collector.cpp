@@ -45,7 +45,23 @@ namespace ctrace::concurrency::internal::analysis
         {
             const llvm::DataLayout& layout;
             const ProgramDefinedGlobals* programDefined = nullptr;
+            /// Local objects handed to threads: their owner's accesses name them by storage.
+            const std::unordered_set<std::string>& localObjects;
         };
+
+        /// The object a pointer leads into, when it is one the analysis follows: a global, or a
+        /// local object its owner handed to a thread.
+        std::optional<RootBinding> resolveObjectRoot(const llvm::Value& pointer,
+                                                     std::uint64_t byteSize,
+                                                     const MemoryScope& scope)
+        {
+            if (std::optional<RootBinding> root =
+                    resolveTrackedRoot(pointer, &scope.layout, byteSize, scope.programDefined))
+            {
+                return root;
+            }
+            return resolveLocalObjectRoot(pointer, &scope.layout, byteSize, scope.localObjects);
+        }
 
         std::uint64_t accessByteSize(const llvm::DataLayout& layout, const llvm::Type* accessedType)
         {
@@ -100,8 +116,7 @@ namespace ctrace::concurrency::internal::analysis
                           AccessKind kind, AliasProvenance aliasProvenance,
                           const MemoryScope& scope, std::uint64_t byteSize = 0)
         {
-            std::optional<RootBinding> root =
-                resolveTrackedRoot(pointerOperand, &scope.layout, byteSize, scope.programDefined);
+            std::optional<RootBinding> root = resolveObjectRoot(pointerOperand, byteSize, scope);
             if (!root.has_value())
                 return;
 
@@ -193,8 +208,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (value == nullptr || !value->getType()->isPointerTy())
                     continue;
 
-                const std::optional<RootBinding> root =
-                    resolveTrackedRoot(*value, &scope.layout, 0, scope.programDefined);
+                const std::optional<RootBinding> root = resolveObjectRoot(*value, 0, scope);
                 if (!root.has_value())
                     continue;
 
@@ -259,7 +273,8 @@ namespace ctrace::concurrency::internal::analysis
     std::vector<PendingAccess>
     SharedAccessCollector::collect(const llvm::Module& module,
                                    const ProgramDefinedGlobals* programDefined,
-                                   const std::unordered_set<std::string>* sharedObjectIds) const
+                                   const std::unordered_set<std::string>* sharedObjectIds,
+                                   const std::unordered_set<std::string>* localObjectIds) const
     {
         std::vector<PendingAccess> accesses;
         std::vector<const llvm::GlobalVariable*> trackedGlobals;
@@ -275,7 +290,11 @@ namespace ctrace::concurrency::internal::analysis
         static const std::unordered_set<std::string> kNoSharedObjects;
         const std::unordered_set<std::string>& sharedObjects =
             sharedObjectIds != nullptr ? *sharedObjectIds : kNoSharedObjects;
-        const MemoryScope scope{.layout = layout, .programDefined = programDefined};
+        const MemoryScope scope{
+            .layout = layout,
+            .programDefined = programDefined,
+            .localObjects = localObjectIds != nullptr ? *localObjectIds : kNoSharedObjects,
+        };
 
         for (const llvm::Function& function : module)
         {
@@ -347,7 +366,7 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
 
                     std::optional<RootBinding> root =
-                        resolveTrackedRoot(*pointerOperand, &layout, byteSize, programDefined);
+                        resolveObjectRoot(*pointerOperand, byteSize, scope);
                     if (!root.has_value())
                     {
                         root = resolveSharedObjectRoot(*pointerOperand, &layout, byteSize,

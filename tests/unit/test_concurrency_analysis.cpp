@@ -857,6 +857,16 @@ namespace
                      "cpp_thread_member_joined_while_detached_race.cpp",
              .intent = "joining and detaching one thread member through methods race (#99)",
              .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_owner_writes_local_object_race.cpp",
+             .intent = "the owner of a local object running a member thread races with it (#103)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_owner_writes_global_object_race.cpp",
+             .intent = "the owner of a global object running a member thread races with it (#103)",
+             .dataRace = 1, .racingSymbol = "counter", .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_thread_safe_global_object_no_fp.cpp",
+             .intent = "a method guarding its member with the object's mutex is guarded at every "
+                       "call (#103)",
+             .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_helper_joins_before_returning_no_fp.cpp",
              .intent = "a helper that waits for its thread hands nothing back",
@@ -996,6 +1006,53 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/data_race_helper_hands_on_stored_pointer.c",
              .intent = "a helper handing on a pointer the global holds reaches the global (#99)",
              .dataRace = 1, .racingSymbol = "list"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_owner_writes_local_object.c",
+             .intent = "the owner of a local object handed to a thread still races with it (#103)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_owner_writes_global_object.c",
+             .intent = "the owner of a global object handed to a thread still races with it (#103)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_owner_writes_other_field_of_local_object_no_fp.c",
+             .intent = "the owner's field of a local object is not the thread's field (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_owner_writes_other_field_of_global_object_no_fp.c",
+             .intent = "the owner's field of a global object is not the thread's field (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_owner_writes_local_object_before_spawn_no_fp.c",
+             .intent = "the owner's write before the spawn is ordered before the thread (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_owner_writes_local_object_after_join_no_fp.c",
+             .intent = "the owner's write after the join is ordered after the thread (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_owner_reassigns_object_pointer_no_fp.c",
+             .intent = "repointing the variable the object was read from is not writing it (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_owner_locks_local_object_no_fp.c",
+             .intent = "a local object's mutex has one name on both sides (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_owner_locks_global_object_no_fp.c",
+             .intent = "a global object's mutex has one name on both sides (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_locks_local_object_no_fp.c",
+             .intent = "a helper's lock on its parameter's mutex is the local object's (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_locks_global_object_no_fp.c",
+             .intent = "a helper's lock on its parameter's mutex is the global object's (#103)"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_owner_locks_other_mutex.c",
+             .intent = "a mutex of the owner's own does not guard the object's field (#103)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_owner_unlocked_while_thread_locks.c",
+             .intent = "one side under the object's mutex does not guard the other (#103)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helpers_lock_different_objects.c",
+             .intent = "helpers locking the mutexes of different objects share no lock (#103)",
+             .dataRace = 1, .racingSymbol = "total"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_workers_lock_their_own_objects.c",
+             .intent = "threads locking the mutex of their own objects share no lock (#103)",
+             .dataRace = 1, .racingSymbol = "total"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_sequential_threads_no_fp.c",
              .intent = "a join separates the two spawns"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_read_after_helper_join_no_fp.c",

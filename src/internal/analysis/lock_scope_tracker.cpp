@@ -69,6 +69,8 @@ namespace ctrace::concurrency::internal::analysis
         : classifier_(classifier), analyses_(analyses), summaries_(summaries),
           sharedObjects_(sharedObjects)
     {
+        if (sharedObjects_ != nullptr)
+            localObjects_ = sharedObjectNames(*sharedObjects_, SharedObjectKind::Local);
     }
 
     std::unordered_map<const llvm::Instruction*, std::set<std::string>>
@@ -90,9 +92,12 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        // A lock taken on a field of a parameter's object is named after the parameter; each
+        // call site then names it after the object it passes.
         const SynchronizationEffectResolver effectResolver(
             classifier_, function.getParent()->getDataLayout(), summaries_,
-            /*nameParameterLocks=*/false, sharedObject);
+            /*nameParameterLocks=*/false, sharedObject, &localObjects_,
+            /*nameParameterFieldLocks=*/true);
         const FunctionLockEffects lockEffects =
             collectFunctionLockEffects(function, effectResolver);
 

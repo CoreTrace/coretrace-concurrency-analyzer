@@ -40,5 +40,6 @@ namespace ctrace::concurrency::internal::analysis
         LlvmFunctionAnalysisProvider& analyses_;
         const LockWrapperSummaries* summaries_ = nullptr;
         const SharedObjectBindings* sharedObjects_ = nullptr;
+        std::unordered_set<std::string> localObjects_;
     };
 } // namespace ctrace::concurrency::internal::analysis

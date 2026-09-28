@@ -24,6 +24,16 @@ namespace ctrace::concurrency::internal::analysis
             return merged;
         }
 
+        /// The locks a caller holds at a call, as the callee may assume them. A lock named after
+        /// one of the caller's parameters means nothing inside the callee, which has parameters
+        /// of its own; the callee's accesses regain it when they are projected back onto the call.
+        std::set<std::string> locksForCallee(std::set<std::string> callerLocks)
+        {
+            std::erase_if(callerLocks, [](const std::string& lockId)
+                          { return parameterLockPlace(lockId).has_value(); });
+            return callerLocks;
+        }
+
         std::set<std::string> intersectHeldLocks(const std::set<std::string>& lhs,
                                                  const std::set<std::string>& rhs)
         {
@@ -123,6 +133,7 @@ namespace ctrace::concurrency::internal::analysis
                             mergeHeldLocks(effectiveCallLocks, callerEntryLocksIt->second);
                     }
 
+                    effectiveCallLocks = locksForCallee(std::move(effectiveCallLocks));
                     if (!hasIncomingState)
                     {
                         mergedEntryLocks = std::move(effectiveCallLocks);
