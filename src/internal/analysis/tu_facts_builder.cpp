@@ -1009,6 +1009,9 @@ namespace ctrace::concurrency::internal::analysis
 
         for (PendingAccess& pendingAccess : pendingAccesses)
         {
+            if (pendingAccess.restatesCalleeAccesses)
+                continue;
+
             if (const auto publicationIt = publications.ordering.find(pendingAccess.instruction);
                 publicationIt != publications.ordering.end())
             {

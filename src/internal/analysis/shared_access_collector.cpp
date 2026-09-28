@@ -150,13 +150,15 @@ namespace ctrace::concurrency::internal::analysis
             return std::nullopt;
         }
 
-        /// The effect a call may have on what each pointer argument designates, for the part
-        /// the callee's own accesses do not show at the call: what it reaches through pointers
-        /// it loads, or through functions whose bodies are not in the unit.
+        /// The effect a call may have on what each pointer argument designates.
         ///
         /// A callee defined here is read for what it does to that argument: the bytes it reads
-        /// and writes, apart, and atomically or not. A callee without a body may do anything
-        /// the declaration allows to the whole object the argument designates.
+        /// and writes, apart, and atomically or not. Most of that is its own accesses, which
+        /// reach the call anyway, with the locks held around them; that part is marked as
+        /// restating them. The rest is what no access shows: whatever it reaches through pointers
+        /// it loads or once the argument escapes, and the thread handles it starts, joins or
+        /// detaches. A callee without a body may do anything the declaration allows to the whole
+        /// object the argument designates.
         void appendCallMemoryEffectAccesses(std::vector<PendingAccess>& accesses,
                                             const llvm::Function& function,
                                             const llvm::CallBase& call, llvm::AAResults& aaResults,
@@ -172,7 +174,7 @@ namespace ctrace::concurrency::internal::analysis
 
             std::unordered_set<std::string> seenEffects;
             auto appendEffect = [&](const RootBinding& root, const MemoryRegion& region,
-                                    AccessKind kind, bool isAtomic)
+                                    AccessKind kind, bool isAtomic, bool restates)
             {
                 RootBinding effectRoot = root;
                 effectRoot.region = region;
@@ -182,6 +184,7 @@ namespace ctrace::concurrency::internal::analysis
 
                 appendAccessTo(accesses, function, call, std::move(effectRoot), kind,
                                AliasProvenance::Direct, isAtomic, true);
+                accesses.back().restatesCalleeAccesses = restates;
             };
 
             for (const llvm::Use& argument : call.args())
@@ -204,37 +207,45 @@ namespace ctrace::concurrency::internal::analysis
                 const unsigned argumentNumber = call.getArgOperandNo(&argument);
                 if (!calleeIsDefined || argumentNumber >= callee->arg_size())
                 {
-                    appendEffect(*root, root->designated, *allowed, false);
+                    appendEffect(*root, root->designated, *allowed, false, false);
                     continue;
                 }
 
                 const ParameterFootprint footprint = footprints.of(*callee, argumentNumber);
-                auto appendKind = [&](const std::vector<ParameterFootprint::Range>& ranges,
-                                      bool wholeObject, AccessKind kind)
+                auto appendExtent = [&](const ParameterFootprint::Extent& extent, bool restates)
                 {
-                    // Alias analysis may still prove the callee leaves the object unwritten.
-                    if (kind == AccessKind::Write && *allowed == AccessKind::Read)
-                        return;
-
-                    if (wholeObject)
+                    for (const AccessKind kind : {AccessKind::Read, AccessKind::Write})
                     {
-                        appendEffect(*root, root->designated, kind, false);
-                        return;
-                    }
+                        // Alias analysis may still prove the callee leaves the object unwritten.
+                        if (kind == AccessKind::Write && *allowed == AccessKind::Read)
+                            continue;
 
-                    for (const ParameterFootprint::Range& range : ranges)
-                    {
-                        const MemoryRegion calleeRegion{
-                            .hasKnownOffset = true,
-                            .byteOffset = range.begin,
-                            .byteSize = static_cast<std::uint64_t>(range.end - range.begin),
-                        };
-                        appendEffect(*root, calleeRegion.rebasedOn(root->region, root->designated),
-                                     kind, range.isAtomic);
+                        const bool wholeObject = kind == AccessKind::Write
+                                                     ? extent.writesWholeObject
+                                                     : extent.readsWholeObject;
+                        if (wholeObject)
+                        {
+                            appendEffect(*root, root->designated, kind, false, restates);
+                            continue;
+                        }
+
+                        for (const ParameterFootprint::Range& range :
+                             kind == AccessKind::Write ? extent.writes : extent.reads)
+                        {
+                            const MemoryRegion calleeRegion{
+                                .hasKnownOffset = true,
+                                .byteOffset = range.begin,
+                                .byteSize = static_cast<std::uint64_t>(range.end - range.begin),
+                            };
+                            appendEffect(*root,
+                                         calleeRegion.rebasedOn(root->region, root->designated),
+                                         kind, range.isAtomic, restates);
+                        }
                     }
                 };
-                appendKind(footprint.reads, footprint.readsWholeObject, AccessKind::Read);
-                appendKind(footprint.writes, footprint.writesWholeObject, AccessKind::Write);
+                // What no access shows first, so a restatement never hides it.
+                appendExtent(footprint.unshown, false);
+                appendExtent(footprint.all, true);
             }
         }
     } // namespace

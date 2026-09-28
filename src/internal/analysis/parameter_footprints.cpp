@@ -34,11 +34,25 @@ namespace ctrace::concurrency::internal::analysis
             FromObject,
         };
 
+        void touchWhole(ParameterFootprint::Extent& extent, AccessKind kind)
+        {
+            (kind == AccessKind::Write ? extent.writesWholeObject : extent.readsWholeObject) = true;
+        }
+
+        void addRange(ParameterFootprint::Extent& extent, AccessKind kind,
+                      ParameterFootprint::Range range)
+        {
+            (kind == AccessKind::Write ? extent.writes : extent.reads).push_back(range);
+        }
+
         ParameterFootprint wholeObject()
         {
             ParameterFootprint footprint;
-            footprint.readsWholeObject = true;
-            footprint.writesWholeObject = true;
+            for (ParameterFootprint::Extent* extent : {&footprint.all, &footprint.unshown})
+            {
+                touchWhole(*extent, AccessKind::Read);
+                touchWhole(*extent, AccessKind::Write);
+            }
             return footprint;
         }
 
@@ -143,81 +157,129 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
 
-            void touchWholeObject(AccessKind kind)
-            {
-                (kind == AccessKind::Write ? footprint_.writesWholeObject
-                                           : footprint_.readsWholeObject) = true;
-            }
-
+            /// Anything, anywhere in the object, and nothing the function's own accesses show.
             void escape()
             {
-                footprint_.readsWholeObject = true;
-                footprint_.writesWholeObject = true;
+                for (ParameterFootprint::Extent* extent : {&footprint_.all, &footprint_.unshown})
+                {
+                    touchWhole(*extent, AccessKind::Read);
+                    touchWhole(*extent, AccessKind::Write);
+                }
             }
 
-            /// Records an access through `pointer`, of `byteSize` bytes or, when zero, of the
-            /// whole object `pointer` designates.
-            void touch(const llvm::Value& pointer, Reach reach, AccessKind kind,
-                       std::uint64_t byteSize, bool isAtomic)
+            /// Records an access the function makes itself through `pointer`, of `byteSize`
+            /// bytes or, when zero, of the whole object `pointer` designates. One the access path
+            /// places is an access of the function's own, shown at every call; one it cannot is
+            /// not, and may be anywhere.
+            void touchOwnAccess(const llvm::Value& pointer, Reach reach, AccessKind kind,
+                                std::uint64_t byteSize, bool isAtomic)
             {
-                if (reach == Reach::FromObject)
+                const std::optional<MemoryRegion> place =
+                    reach == Reach::IntoObject ? placeInObject(pointer, byteSize) : std::nullopt;
+                if (!place.has_value())
                 {
-                    touchWholeObject(kind);
+                    touchWhole(footprint_.all, kind);
+                    touchWhole(footprint_.unshown, kind);
                     return;
                 }
 
-                const std::optional<MemoryRegion> region = placeInObject(pointer, byteSize);
-                if (!region.has_value())
-                {
-                    touchWholeObject(kind);
-                    return;
-                }
-
-                addRange(kind, region->byteOffset,
-                         region->byteOffset + static_cast<std::int64_t>(region->byteSize),
-                         isAtomic);
+                addRange(footprint_.all, kind, rangeOf(*place, isAtomic));
             }
 
-            /// Adds what a callee does through the pointer it is handed here.
+            /// Records a thread handle the function writes through `pointer`, which no access
+            /// of the function's own shows.
+            void touchThreadHandle(const llvm::Value& pointer, Reach reach)
+            {
+                const std::optional<RootBinding> root =
+                    reach == Reach::IntoObject ? rootInObject(pointer) : std::nullopt;
+                if (!root.has_value() || !root->designated.hasKnownOffset ||
+                    root->designated.byteSize == 0)
+                {
+                    touchWhole(footprint_.all, AccessKind::Write);
+                    touchWhole(footprint_.unshown, AccessKind::Write);
+                    return;
+                }
+
+                const ParameterFootprint::Range handle = rangeOf(root->designated, false);
+                addRange(footprint_.all, AccessKind::Write, handle);
+                addRange(footprint_.unshown, AccessKind::Write, handle);
+            }
+
+            /// Adds what a callee defined in the unit does through the pointer it is handed.
+            /// Through a pointer the access path places, the callee's own accesses reach this
+            /// function, and so does the effect inferred here for the rest: nothing of it is
+            /// unshown. Through any other pointer none of it is carried, and the callee may
+            /// reach anywhere the object leads.
             void touchThroughCallee(const llvm::Value& pointer, Reach reach,
                                     const ParameterFootprint& callee)
             {
-                if (callee.empty())
-                    return;
-
                 const std::optional<RootBinding> root =
                     reach == Reach::IntoObject ? rootInObject(pointer) : std::nullopt;
                 if (!root.has_value() || !root->region.hasKnownOffset)
                 {
-                    if (!callee.reads.empty() || callee.readsWholeObject)
-                        touchWholeObject(AccessKind::Read);
-                    if (!callee.writes.empty() || callee.writesWholeObject)
-                        touchWholeObject(AccessKind::Write);
+                    for (const AccessKind kind : {AccessKind::Read, AccessKind::Write})
+                    {
+                        const bool touches = kind == AccessKind::Read ? callee.all.readsAnything()
+                                                                      : callee.all.writesAnything();
+                        if (!touches)
+                            continue;
+                        touchWhole(footprint_.all, kind);
+                        if (!root.has_value())
+                            touchWhole(footprint_.unshown, kind);
+                    }
                     return;
                 }
 
                 const std::int64_t shift = root->region.byteOffset;
-                for (const ParameterFootprint::Range& range : callee.reads)
-                    addRange(AccessKind::Read, range.begin + shift, range.end + shift,
-                             range.isAtomic);
-                for (const ParameterFootprint::Range& range : callee.writes)
-                    addRange(AccessKind::Write, range.begin + shift, range.end + shift,
-                             range.isAtomic);
-
-                if (callee.readsWholeObject)
+                for (const ParameterFootprint::Range& range : callee.all.reads)
+                {
+                    addRange(footprint_.all, AccessKind::Read,
+                             {range.begin + shift, range.end + shift, range.isAtomic});
+                }
+                for (const ParameterFootprint::Range& range : callee.all.writes)
+                {
+                    addRange(footprint_.all, AccessKind::Write,
+                             {range.begin + shift, range.end + shift, range.isAtomic});
+                }
+                if (callee.all.readsWholeObject)
                     touchDesignated(*root, AccessKind::Read);
-                if (callee.writesWholeObject)
+                if (callee.all.writesWholeObject)
                     touchDesignated(*root, AccessKind::Write);
+            }
+
+            /// Adds a call to a function without a body: what its declaration allows, over the
+            /// whole object the pointer designates. The effect inferred at that call is an access
+            /// of the function's own when the pointer is placed.
+            void touchThroughDeclaration(const llvm::Value& pointer, Reach reach, AccessKind kind)
+            {
+                const std::optional<RootBinding> root =
+                    reach == Reach::IntoObject ? rootInObject(pointer) : std::nullopt;
+                if (!root.has_value())
+                {
+                    touchWhole(footprint_.all, kind);
+                    touchWhole(footprint_.unshown, kind);
+                    return;
+                }
+                touchDesignated(*root, kind);
             }
 
             [[nodiscard]] ParameterFootprint finish()
             {
-                mergeRanges(footprint_.reads);
-                mergeRanges(footprint_.writes);
+                for (ParameterFootprint::Extent* extent : {&footprint_.all, &footprint_.unshown})
+                {
+                    mergeRanges(extent->reads);
+                    mergeRanges(extent->writes);
+                }
                 return std::move(footprint_);
             }
 
           private:
+            static ParameterFootprint::Range rangeOf(const MemoryRegion& region, bool isAtomic)
+            {
+                return {region.byteOffset,
+                        region.byteOffset + static_cast<std::int64_t>(region.byteSize), isAtomic};
+            }
+
             std::optional<RootBinding> rootInObject(const llvm::Value& pointer) const
             {
                 std::optional<RootBinding> root = resolveTrackedRoot(pointer, &layout_, 0);
@@ -246,24 +308,16 @@ namespace ctrace::concurrency::internal::analysis
                 return region;
             }
 
+            /// The object `root` designates, in `all`; its own access, so not in `unshown`.
             void touchDesignated(const RootBinding& root, AccessKind kind)
             {
                 const MemoryRegion& designated = root.designated;
                 if (!designated.hasKnownOffset || designated.byteSize == 0)
                 {
-                    touchWholeObject(kind);
+                    touchWhole(footprint_.all, kind);
                     return;
                 }
-
-                addRange(kind, designated.byteOffset,
-                         designated.byteOffset + static_cast<std::int64_t>(designated.byteSize),
-                         false);
-            }
-
-            void addRange(AccessKind kind, std::int64_t begin, std::int64_t end, bool isAtomic)
-            {
-                (kind == AccessKind::Write ? footprint_.writes : footprint_.reads)
-                    .push_back({begin, end, isAtomic});
+                addRange(footprint_.all, kind, rangeOf(designated, false));
             }
 
             const llvm::Argument& parameter_;
@@ -342,9 +396,14 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
-    bool ParameterFootprint::empty() const noexcept
+    bool ParameterFootprint::Extent::readsAnything() const noexcept
     {
-        return reads.empty() && writes.empty() && !readsWholeObject && !writesWholeObject;
+        return readsWholeObject || !reads.empty();
+    }
+
+    bool ParameterFootprint::Extent::writesAnything() const noexcept
+    {
+        return writesWholeObject || !writes.empty();
     }
 
     ParameterFootprints::ParameterFootprints(const ConcurrencySymbolClassifier& classifier,
@@ -413,8 +472,8 @@ namespace ctrace::concurrency::internal::analysis
 
             if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
             {
-                builder.touch(value, reach, AccessKind::Read, storeSizeOf(layout_, load->getType()),
-                              load->isAtomic());
+                builder.touchOwnAccess(value, reach, AccessKind::Read,
+                                       storeSizeOf(layout_, load->getType()), load->isAtomic());
                 // What is read out of the object may lead further into memory the object owns.
                 if (mayCarryAddress(load->getType()))
                     builder.note(*load, Reach::FromObject);
@@ -425,9 +484,10 @@ namespace ctrace::concurrency::internal::analysis
             {
                 if (store->getPointerOperand() == &value)
                 {
-                    builder.touch(value, reach, AccessKind::Write,
-                                  storeSizeOf(layout_, store->getValueOperand()->getType()),
-                                  store->isAtomic());
+                    builder.touchOwnAccess(
+                        value, reach, AccessKind::Write,
+                        storeSizeOf(layout_, store->getValueOperand()->getType()),
+                        store->isAtomic());
                     continue;
                 }
 
@@ -445,8 +505,8 @@ namespace ctrace::concurrency::internal::analysis
                     builder.escape();
                     continue;
                 }
-                builder.touch(value, reach, AccessKind::Write,
-                              storeSizeOf(layout_, atomicRmw->getType()), true);
+                builder.touchOwnAccess(value, reach, AccessKind::Write,
+                                       storeSizeOf(layout_, atomicRmw->getType()), true);
                 continue;
             }
 
@@ -457,8 +517,9 @@ namespace ctrace::concurrency::internal::analysis
                     builder.escape();
                     continue;
                 }
-                builder.touch(value, reach, AccessKind::Write,
-                              storeSizeOf(layout_, exchange->getCompareOperand()->getType()), true);
+                builder.touchOwnAccess(
+                    value, reach, AccessKind::Write,
+                    storeSizeOf(layout_, exchange->getCompareOperand()->getType()), true);
                 continue;
             }
 
@@ -478,19 +539,20 @@ namespace ctrace::concurrency::internal::analysis
                 if (const auto* intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(call))
                 {
                     const bool isDestination = argumentNumber == 0;
-                    builder.touch(value, reach,
-                                  isDestination ? AccessKind::Write : AccessKind::Read,
-                                  constantLength(*intrinsic), false);
+                    builder.touchOwnAccess(value, reach,
+                                           isDestination ? AccessKind::Write : AccessKind::Read,
+                                           constantLength(*intrinsic), false);
                     continue;
                 }
 
                 // Synchronization is understood where it happens, not as data. Starting, joining
                 // or detaching a thread still writes the handle it is given, which is part of the
-                // object when the object holds its thread.
+                // object when the object holds its thread; no access of the function's own shows
+                // that write.
                 if (const CallKind kind = classifier_.classify(*call); kind != CallKind::Unknown)
                 {
                     if (writesThreadHandle(kind) && argumentNumber == 0)
-                        builder.touch(value, reach, AccessKind::Write, 0, false);
+                        builder.touchThreadHandle(value, reach);
                     continue;
                 }
 
@@ -502,10 +564,10 @@ namespace ctrace::concurrency::internal::analysis
                 }
                 else if (!call->doesNotAccessMemory(argumentNumber))
                 {
-                    builder.touch(value, reach,
-                                  call->onlyReadsMemory(argumentNumber) ? AccessKind::Read
-                                                                        : AccessKind::Write,
-                                  0, false);
+                    builder.touchThroughDeclaration(value, reach,
+                                                    call->onlyReadsMemory(argumentNumber)
+                                                        ? AccessKind::Read
+                                                        : AccessKind::Write);
                 }
 
                 // A pointer returned by a call handed the object may lead anywhere it does.

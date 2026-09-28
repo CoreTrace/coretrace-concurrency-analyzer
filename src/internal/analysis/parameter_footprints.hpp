@@ -28,15 +28,26 @@ namespace ctrace::concurrency::internal::analysis
             bool isAtomic = false;
         };
 
-        std::vector<Range> reads;
-        std::vector<Range> writes;
-        /// Set when the function may read, or write, anywhere in the object: through a pointer
-        /// it loads from the object, through an access it cannot place, or once the parameter
-        /// has escaped.
-        bool readsWholeObject = false;
-        bool writesWholeObject = false;
+        /// Bytes read and written, apart. A flag is set when that may be anywhere in the
+        /// object: through a pointer loaded from it, through an access the access path cannot
+        /// place, or once the parameter has escaped.
+        struct Extent
+        {
+            std::vector<Range> reads;
+            std::vector<Range> writes;
+            bool readsWholeObject = false;
+            bool writesWholeObject = false;
 
-        [[nodiscard]] bool empty() const noexcept;
+            [[nodiscard]] bool readsAnything() const noexcept;
+            [[nodiscard]] bool writesAnything() const noexcept;
+        };
+
+        /// Everything the function does through the parameter.
+        Extent all;
+        /// The part of `all` none of the function's own accesses shows at a call: what it
+        /// reaches without the access path placing it, and the thread handles it starts, joins
+        /// or detaches. Its own accesses reach every call, with the locks held around them.
+        Extent unshown;
     };
 
     /// Footprints of the functions a module defines, computed on demand and kept for the module.
