@@ -61,15 +61,7 @@ namespace ctrace::concurrency::internal::analysis
             SourceLocation callsiteLocation;
             std::set<std::string> callsiteHeldLocks;
             bool callerInRootTask = false;
-            ThreadEntrySet callsiteLiveEntries;
         };
-
-        ThreadEntrySet mergeLiveEntries(const ThreadEntrySet& lhs, const ThreadEntrySet& rhs)
-        {
-            ThreadEntrySet merged = lhs;
-            merged.insert(rhs.begin(), rhs.end());
-            return merged;
-        }
 
         struct LifecycleArgumentBinding
         {
@@ -476,11 +468,6 @@ namespace ctrace::concurrency::internal::analysis
                 binding.callsiteLocation = site.userLocation;
                 binding.callerInRootTask =
                     taskConcurrency.rootTaskFunctions.contains(site.callerFunctionId);
-                if (const auto liveIt = taskConcurrency.liveEntriesAtInstruction.find(site.call);
-                    liveIt != taskConcurrency.liveEntriesAtInstruction.end())
-                {
-                    binding.callsiteLiveEntries = liveIt->second;
-                }
                 if (const auto heldLocksIt = heldLocksByCall.find(site.call);
                     heldLocksIt != heldLocksByCall.end())
                 {
@@ -1152,8 +1139,9 @@ namespace ctrace::concurrency::internal::analysis
                             mergeHeldLocks(locksAtCallSite(concrete.heldLocks, callBinding),
                                            callBinding.callsiteHeldLocks);
                         concrete.inRootTask = callBinding.callerInRootTask;
-                        concrete.liveEntries =
-                            mergeLiveEntries(concrete.liveEntries, callBinding.callsiteLiveEntries);
+                        // The threads running where the callee's access executes already include
+                        // those running at every call to it, less the ones it joined before the
+                        // access: the call site's own set would bring those back.
                         concrete.allowCallsiteProjection = true;
                         if (shouldRemapAccessToCallsite(concrete, callBinding.callsiteLocation))
                         {
@@ -1177,8 +1165,6 @@ namespace ctrace::concurrency::internal::analysis
                         locksAtCallSite(propagatedAccess.fact.heldLocks, callBinding),
                         callBinding.callsiteHeldLocks);
                     propagatedAccess.fact.inRootTask = callBinding.callerInRootTask;
-                    propagatedAccess.fact.liveEntries = mergeLiveEntries(
-                        propagatedAccess.fact.liveEntries, callBinding.callsiteLiveEntries);
                     if (shouldRemapAccessToCallsite(propagatedAccess.fact,
                                                     callBinding.callsiteLocation))
                     {
@@ -1253,8 +1239,6 @@ namespace ctrace::concurrency::internal::analysis
                         mergeHeldLocks(locksAtCallSite(remapped.heldLocks, callBinding),
                                        callBinding.callsiteHeldLocks);
                     remapped.inRootTask = callBinding.callerInRootTask;
-                    remapped.liveEntries =
-                        mergeLiveEntries(remapped.liveEntries, callBinding.callsiteLiveEntries);
                     remapped.userLocation = callBinding.callsiteLocation;
                     if (remapped.userLocation.file != remapped.loweredLocation.file)
                         remapped.allowCallsiteProjection = false;
