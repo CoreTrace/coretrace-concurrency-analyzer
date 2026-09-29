@@ -28,6 +28,10 @@ namespace ctrace::concurrency::internal::analysis
         /// An instruction placed before any spawn, or after the matching join, maps to an empty set
         /// and therefore races with nothing.
         std::unordered_map<const llvm::Instruction*, ThreadEntrySet> liveEntriesAtInstruction;
+        /// The part of `liveEntriesAtInstruction` the instruction's function started, itself or
+        /// through the calls it made, rather than received running from its callers: a call to the
+        /// function brings none of these, so they run beside the instruction at every call.
+        std::unordered_map<const llvm::Instruction*, ThreadEntrySet> startedEntriesAtInstruction;
         /// Entries whose lifetimes are provably disjoint because one is joined before the other is
         /// spawned.
         std::unordered_set<EntryPair, EntryPairHash> sequencedEntryPairs;

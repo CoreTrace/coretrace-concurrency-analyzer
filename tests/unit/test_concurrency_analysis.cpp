@@ -1517,6 +1517,57 @@ namespace
                      "cpp_recursive_mutex_reentered_by_method_no_diagnostic.cpp",
              .intent = "a recursive mutex locked again through `this` is no reacquisition (#114)",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_starts_worker_then_locks.c",
+             .intent = "a worker the helper starts runs beside the orders it then takes (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_joins_worker_then_locks_no_diagnostic.c",
+             .intent = "a worker the helper joins has ended before the orders it then takes "
+                       "(#124)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_helper_starts_worker_then_locks_named_accounts.c",
+             .intent = "a helper starts the worker, then locks two accounts by name (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_called_while_worker_runs.c",
+             .intent = "the worker main started runs beside the helper's orders (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_helper_joins_worker_then_locks_named_accounts_no_diagnostic.c",
+             .intent = "a helper joins the worker, then locks two accounts by name (#124)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_called_after_worker_joined_no_diagnostic.c",
+             .intent = "the worker main joined is over before the helper's orders (#124)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_called_by_helper_starting_worker.c",
+             .intent = "a worker started one call above the locking helper runs beside its "
+                       "orders (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_called_by_helper_joining_worker_no_diagnostic.c",
+             .intent = "a worker joined one call above the locking helper has ended before its "
+                       "orders (#124)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_starts_worker_also_passed_in.c",
+             .intent = "a worker the helper starts runs beside its orders even at a call no "
+                       "worker runs at, though another call passes one in (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_locks_before_and_after_starting_worker.c",
+             .intent = "two acquisitions of the helper that give one order at the call keep the "
+                       "threads beside either (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_after_call_starting_worker.c",
+             .intent = "a worker a call of the helper leaves running runs beside the helper's "
+                       "orders (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_relayed_helper_locks_before_and_after_starting_worker.c",
+             .intent = "an order a caller keeps open widens once a later round finds another "
+                       "acquisition behind it, and its callers see it (#124)",
+             .deadlock = 1},
 
             // --- imported deadlock fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/deadlock/cpp_deadlock_self_lock.cpp",
