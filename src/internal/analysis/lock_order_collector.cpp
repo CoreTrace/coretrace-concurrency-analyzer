@@ -179,9 +179,12 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        // A lock reached through a parameter is named after it, as for the locks held around
+        // accesses; each call site then names it after what it passes.
         const SynchronizationEffectResolver effectResolver(
             classifier_, function.getParent()->getDataLayout(), summaries_,
-            /*nameParameterLocks=*/false, sharedObject, &localObjects_);
+            /*nameParameterLocks=*/false, sharedObject, &localObjects_,
+            /*nameParameterFieldLocks=*/true);
         const FunctionLockEffects lockEffects =
             collectFunctionLockEffects(function, effectResolver);
 
@@ -203,7 +206,9 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         const llvm::BasicBlock* entryBlock = &function.getEntryBlock();
-        inStates[entryBlock] = initialHeldLocks;
+        LockSet entryLocks = initialHeldLocks;
+        entryLocks.emplace(kLocksHeldByCaller);
+        inStates[entryBlock] = std::move(entryLocks);
 
         bool changed = true;
         while (changed)
@@ -242,6 +247,10 @@ namespace ctrace::concurrency::internal::analysis
 
                         for (const std::string& acquiredLock : change.orderedAcquired)
                         {
+                            const bool recursive =
+                                std::find(change.recursivelyAcquirable.begin(),
+                                          change.recursivelyAcquirable.end(),
+                                          acquiredLock) != change.recursivelyAcquirable.end();
                             for (const std::string& heldLock : currentLocks)
                             {
                                 const std::string key = functionId(function) + "|" + heldLock +
@@ -269,6 +278,7 @@ namespace ctrace::concurrency::internal::analysis
                                     .location = location,
                                     .heldLocks = currentLocks,
                                     .liveEntries = liveEntries,
+                                    .secondIsRecursive = recursive,
                                 });
                                 factSites.push_back({&instruction});
                             }

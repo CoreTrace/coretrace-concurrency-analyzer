@@ -114,6 +114,10 @@ namespace ctrace::concurrency::internal::analysis
     /// for a named object, the caller's own parameter placeholder for one it received itself.
     [[nodiscard]] std::string lockIdAt(const RootBinding& object, const MemoryRegion& place);
 
+    /// Reads back the object a lock id names and the place in it. Every lock id is its object's
+    /// name followed by the suffix of that place, so `lockIdAt(lockIdRoot(id), {})` is `id`.
+    [[nodiscard]] RootBinding lockIdRoot(std::string_view lockId);
+
     /// Identity of an access made through a pointer the program holds in a named slot, when
     /// that slot is one the spawn sites identified as shared.
     ///

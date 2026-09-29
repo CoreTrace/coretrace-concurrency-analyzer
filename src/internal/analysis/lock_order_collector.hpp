@@ -5,6 +5,7 @@
 #include "lock_wrapper_summaries.hpp"
 #include "shared_object_binding_collector.hpp"
 
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -18,6 +19,10 @@ namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
     class LlvmFunctionAnalysisProvider;
+
+    /// Stands, inside a function, for every lock its caller holds at the call. An order from it
+    /// is an acquisition each call site orders after the locks it holds there.
+    inline constexpr std::string_view kLocksHeldByCaller = "%caller";
 
     class LockOrderCollector
     {
@@ -33,6 +38,9 @@ namespace ctrace::concurrency::internal::analysis
                                     const LockWrapperSummaries* summaries = nullptr,
                                     const SharedObjectBindings* sharedObjects = nullptr);
 
+        /// The orders `function` takes. An order naming the lock of one of its parameters, or
+        /// `kLocksHeldByCaller`, is open: only a call to `function` can say which locks it
+        /// orders.
         [[nodiscard]] std::vector<LockOrderFact>
         collect(const llvm::Function& function, const std::set<std::string>& initialHeldLocks = {},
                 const LiveEntriesByInstruction& liveEntriesByInstruction = {}) const;

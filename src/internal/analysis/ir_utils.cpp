@@ -20,8 +20,10 @@
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <charconv>
 #include <filesystem>
 #include <string_view>
+#include <system_error>
 #include <vector>
 
 namespace ctrace::concurrency::internal::analysis
@@ -886,6 +888,36 @@ namespace ctrace::concurrency::internal::analysis
                    position.suffix();
         }
         return object.symbol + position.suffix();
+    }
+
+    RootBinding lockIdRoot(std::string_view lockId)
+    {
+        if (const std::optional<ParameterLockPlace> place = parameterLockPlace(lockId);
+            place.has_value())
+        {
+            return RootBinding::argument(place->argumentIndex, place->place);
+        }
+
+        MemoryRegion place;
+        if (lockId.ends_with("[*]"))
+        {
+            place.hasKnownOffset = false;
+            lockId.remove_suffix(std::string_view("[*]").size());
+        }
+        else if (const std::size_t plus = lockId.rfind('+'); plus != std::string_view::npos)
+        {
+            // Only a whole number after the sign is an offset; anything else is part of the name.
+            const std::string_view offset = lockId.substr(plus + 1);
+            std::int64_t byteOffset = 0;
+            const auto [end, error] =
+                std::from_chars(offset.data(), offset.data() + offset.size(), byteOffset);
+            if (error == std::errc() && end == offset.data() + offset.size())
+            {
+                place.byteOffset = byteOffset;
+                lockId = lockId.substr(0, plus);
+            }
+        }
+        return RootBinding::global(std::string(lockId), place);
     }
 
     std::optional<std::string> parameterLockId(const llvm::Value& value)

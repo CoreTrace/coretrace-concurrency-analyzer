@@ -198,6 +198,9 @@ namespace ctrace::concurrency::internal::analysis
         /// address: a branch comparing the two objects' addresses leads here, and to the opposite
         /// order when the first one is the higher.
         bool lowerAddressFirst = false;
+        /// The second lock's type lets its owner take it again. A lock named after a parameter
+        /// has no identity of its own to look this up by, so the order carries it.
+        bool secondIsRecursive = false;
     };
 
     enum class ThreadHandleKind

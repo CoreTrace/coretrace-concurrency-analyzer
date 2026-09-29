@@ -257,6 +257,12 @@ namespace ctrace::concurrency::internal::analysis
         return llvm::StringRef(canonicalName(*callee)).contains("adopt_lock");
     }
 
+    bool ConcurrencySymbolClassifier::callsStandardLibrary(const llvm::CallBase& call) const
+    {
+        const llvm::Function* callee = directCallee(call);
+        return callee != nullptr && isStdNamespaceSymbol(canonicalName(*callee));
+    }
+
     namespace
     {
         /// The function a value denotes, once casts are stripped. Kept local so the classifier
