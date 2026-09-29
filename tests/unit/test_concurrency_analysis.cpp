@@ -1102,6 +1102,24 @@ namespace
              .intent = "a helper handing on a pointer the global holds reaches the global (#99)",
              .dataRace = 1, .racingSymbol = "list"},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_advancing_pointer_under_locks_no_fp.c",
+             .intent = "hand-over-hand locking by a recursion advancing its pointer terminates and "
+                       "reports nothing (#117)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_advancing_pointer_race.c",
+             .intent = "a recursion advancing its pointer terminates; its writes race at the first "
+                       "element and at any element it reaches (#117)",
+             .dataRace = 2, .racingSymbol = "counters"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_mutual_recursion_advancing_pointer_race.c",
+             .intent = "a cycle of two functions advancing the pointer terminates and still races "
+                       "(#117)",
+             .dataRace = 2, .racingSymbol = "counters"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_same_pointer_other_field_no_fp.c",
+             .intent = "a recursion handing on its pointer unchanged keeps each field apart "
+                       "(#117)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_joined_in_other_function_no_fp.c",
              .intent = "a join in another function ends the thread through the same field (#99)"},
             {.path = "tests/fixtures/concurrency/data-race/"
