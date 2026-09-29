@@ -3,6 +3,7 @@
 
 #include "facts.hpp"
 
+#include <unordered_set>
 #include <vector>
 
 namespace llvm
@@ -30,4 +31,9 @@ namespace ctrace::concurrency::internal::analysis
     collectDirectCallSites(const llvm::Module& module,
                            const ConcurrencySymbolClassifier& classifier,
                            LlvmFunctionAnalysisProvider& analyses);
+
+    /// The calls among `sites` whose callee reaches their caller again through direct calls:
+    /// the calls that close a cycle, whether a function calls itself or several call each other.
+    [[nodiscard]] std::unordered_set<const llvm::CallBase*>
+    callsClosingCycles(const std::vector<DirectCallSite>& sites);
 } // namespace ctrace::concurrency::internal::analysis

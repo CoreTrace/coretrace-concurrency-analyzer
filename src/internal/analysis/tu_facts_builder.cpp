@@ -455,6 +455,7 @@ namespace ctrace::concurrency::internal::analysis
             const std::unordered_set<std::string>& localObjectIds, const llvm::DataLayout& layout)
         {
             std::vector<DirectCallBinding> bindings;
+            const std::unordered_set<const llvm::CallBase*> cycleCalls = callsClosingCycles(sites);
 
             for (const DirectCallSite& site : sites)
             {
@@ -487,6 +488,17 @@ namespace ctrace::concurrency::internal::analysis
                         root = resolveLocalObjectRoot(operand, &layout, 0, localObjectIds);
                     if (!root.has_value())
                         root = sharedObjectArgument(operand, sharedObjectIds);
+
+                    // A call that closes a cycle and moves the pointer it hands on would move it
+                    // again each time a callee's access is carried around the cycle, naming a new
+                    // place every round, and the summaries would never settle. Around a cycle,
+                    // where it points is left unknown, which overlaps every place it may reach.
+                    if (root.has_value() && root->kind == RootBindingKind::Argument &&
+                        cycleCalls.contains(site.call) &&
+                        (!root->region.hasKnownOffset || root->region.byteOffset != 0))
+                    {
+                        root->region.hasKnownOffset = false;
+                    }
 
                     if (root.has_value())
                         binding.argumentBindings.emplace(argumentIndex, *root);
