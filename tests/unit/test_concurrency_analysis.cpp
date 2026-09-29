@@ -1142,6 +1142,35 @@ namespace
              .intent = "a function returning past a failed join leaves the thread running (#99)",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_checked_no_fp.c",
+             .intent = "a join result kept in a local and tested proves success past the test "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_failed_race.c",
+             .intent = "on the branch where a kept join result reports a failure the thread may "
+                       "still run (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_unread_no_fp.c",
+             .intent = "a join result kept in a local never read is ignored, like an unused one "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_printed_race.c",
+             .intent = "a kept join result read but never tested proves nothing (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_reported_no_fp.c",
+             .intent = "printing a tested join result does not undo what the test proves (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_overwritten_race.c",
+             .intent = "a local written again no longer holds the join result it tests (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_previous_join_status_race.c",
+             .intent = "a kept join status tested before the next join is that earlier join's "
+                       "(#121)",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_restarted_in_other_function_race.c",
              .intent = "a join before a restart ends the earlier thread, not the restarted one "
                        "(#99)",
