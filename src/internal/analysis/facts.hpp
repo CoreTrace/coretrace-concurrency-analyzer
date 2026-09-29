@@ -194,6 +194,10 @@ namespace ctrace::concurrency::internal::analysis
         std::set<std::string> heldLocks;
         bool inRootTask = false;
         ThreadEntrySet liveEntries;
+        /// The function takes this order only when the first lock's object sits at the lower
+        /// address: a branch comparing the two objects' addresses leads here, and to the opposite
+        /// order when the first one is the higher.
+        bool lowerAddressFirst = false;
     };
 
     enum class ThreadHandleKind

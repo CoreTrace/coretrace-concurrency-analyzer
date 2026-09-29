@@ -33,7 +33,8 @@ namespace ctrace::concurrency::internal::analysis
         /// follows.
         std::vector<std::string> acquired;
         /// Acquisitions that may participate in a deadlock cycle. A failed `try_lock` returns
-        /// instead of blocking, so it can never close a wait-for cycle.
+        /// instead of blocking, so it can never close a wait-for cycle, and neither can a guard
+        /// adopting a lock its thread already holds.
         std::vector<std::string> orderedAcquired;
         std::vector<std::string> released;
         /// Locks acquired here whose type permits recursive acquisition.

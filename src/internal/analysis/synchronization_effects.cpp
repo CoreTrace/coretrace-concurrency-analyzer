@@ -188,6 +188,7 @@ namespace ctrace::concurrency::internal::analysis
         LockEffect effect;
         effect.kind = LockEffectKind::GuardAcquire;
         effect.guardId = *guardId;
+        effect.adoptsHeldLocks = classifier_.adoptsHeldLocks(call);
         for (unsigned index = kFirstGuardedLockIndex; index < call.arg_size(); ++index)
         {
             const llvm::Value& operand = *call.getArgOperand(index);
