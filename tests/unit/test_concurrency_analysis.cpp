@@ -767,6 +767,27 @@ namespace
                           "recursive_deadlock should report reacquiring the same lock");
     }
 
+    bool testHelperOrderReportedWhereTaken()
+    {
+        const std::optional<DiagnosticReport> report = analyzeFixture(
+            "tests/fixtures/concurrency/deadlock/deadlock_helper_order_kept_where_taken.c",
+            AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic =
+            findFirstDiagnosticForRule(*report, RuleId::DeadlockLockOrder);
+        bool pointsToHelper = diagnostic != nullptr && diagnostic->location.function == "forward";
+        if (diagnostic != nullptr)
+        {
+            for (const ctrace::concurrency::RelatedLocation& related : diagnostic->relatedLocations)
+                pointsToHelper = pointsToHelper || related.location.function == "forward";
+        }
+        return assertTrue(pointsToHelper,
+                          "an order its calls add no lock to should point to forward, where it is "
+                          "taken (#136)");
+    }
+
     bool testConsistentLockOrderHasNoDeadlock()
     {
         const std::optional<DiagnosticReport> report = analyzeFixture(
@@ -1567,6 +1588,47 @@ namespace
                      "deadlock_relayed_helper_locks_before_and_after_starting_worker.c",
              .intent = "an order a caller keeps open widens once a later round finds another "
                        "acquisition behind it, and its callers see it (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_taken_through_parameter_no_diagnostic.c",
+             .intent = "the account lock both threads pass their helper is a gate around its "
+                       "orders (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_taken_by_name_in_helpers_no_diagnostic.c",
+             .intent = "the helpers take the gate by name (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_and_inversion_through_parameters_no_diagnostic.c",
+             .intent = "the gate and the inverted locks are all passed to the helpers (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_held_at_concurrent_calls_only_no_diagnostic.c",
+             .intent = "a gate held at the calls that can run together, not at one made before "
+                       "the worker exists (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_held_at_every_call_no_diagnostic.c",
+             .intent = "a gate held at every call to the helpers (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_helper_order_kept_where_taken.c",
+             .intent = "calls that add no lock leave the helper's order where it is taken (#136)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_ledger_reacquired_under_different_locks.c",
+             .intent = "a reacquisition in a helper called under different locks is one, where it "
+                       "is taken (#136)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_settle_run_directly_and_as_threads.c",
+             .intent = "a function also started as a thread keeps its own orders for the threads "
+                       "(#136)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_deadlock_default_delete_locks_resource.cpp",
+             .intent = "a function of namespace std keeps its own orders, which no call takes "
+                       "over (#136)",
+             .deadlock = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gated_helper_starts_worker_then_locks.c",
+             .intent = "an order judged at the call keeps the worker the helper starts before it "
+                       "(#136)",
              .deadlock = 1},
 
             // --- imported deadlock fixtures (Nihil, 91e7431; #4) ---
@@ -2419,6 +2481,7 @@ int main()
     ok = testDetachedStdThreadFixtureHasNoMissingJoin() && ok;
     ok = testDeadlockBasicReportsLockOrderCycle() && ok;
     ok = testRecursiveDeadlockReportsReacquiredLock() && ok;
+    ok = testHelperOrderReportedWhereTaken() && ok;
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
