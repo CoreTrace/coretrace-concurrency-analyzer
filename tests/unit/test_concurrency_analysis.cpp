@@ -1171,6 +1171,45 @@ namespace
                        "(#121)",
              .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_success_no_fp.c",
+             .intent = "a helper returning its join's status is tested like the join (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_failure_race.c",
+             .intent = "on the branch where a helper's join status reports a failure the thread "
+                       "may still run (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_local_helper_join_status_success_no_fp.c",
+             .intent = "a helper returning the status of joining the handle it is given ends that "
+                       "thread where the status reads as success (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_nested_helper_join_status_success_no_fp.c",
+             .intent = "a function returning a helper's join status is tested like the join "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_negated_race.c",
+             .intent = "a helper transforming its join's status is not tested like the join "
+                       "(#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_logged_race.c",
+             .intent = "a helper that also logs its join's status is not followed through the call "
+                       "(#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_recorded_race.c",
+             .intent = "a helper that also records its join's status is not followed through the "
+                       "call (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_aborting_on_join_status_no_fp.c",
+             .intent = "a function testing a helper's join status before every return joins like "
+                       "the join (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_ignoring_join_status_race.c",
+             .intent = "a function going on past a helper's failed join has not joined (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_restarted_in_other_function_race.c",
              .intent = "a join before a restart ends the earlier thread, not the restarted one "
                        "(#99)",

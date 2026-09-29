@@ -429,6 +429,14 @@ namespace ctrace::concurrency::internal::analysis
             return returns;
         }
 
+        /// Whether the function returns what `call` returns, and does nothing else with it. An
+        /// unoptimized function has a single `ret`: a second return statement goes through a
+        /// return slot, so a result returned directly is the function's only one.
+        bool returnsResultOf(const llvm::Instruction& call)
+        {
+            return call.hasOneUse() && llvm::isa<llvm::ReturnInst>(*call.user_begin());
+        }
+
         std::unordered_set<std::string>
         collectRootTaskFunctions(const llvm::Module& module,
                                  const std::vector<DirectCallSite>& directCallSites)
@@ -662,6 +670,9 @@ namespace ctrace::concurrency::internal::analysis
                 std::set<std::string> started;
                 /// Handles it joins on every path to a normal return.
                 std::set<std::string> joined;
+                /// Handles it joins, returning that join's status as its own: a call to it is then
+                /// a join whose status is the call's result.
+                std::set<std::string> reported;
             };
 
             struct FunctionThreads
@@ -683,8 +694,8 @@ namespace ctrace::concurrency::internal::analysis
                 return it != functionsById_.end() ? it->second : nullptr;
             }
 
-            /// Summarizes every function, iterated to a fixed point. Neither set depends on the
-            /// other, or on what functions leave running, so both only grow.
+            /// Summarizes every function, iterated to a fixed point. No set depends on what
+            /// functions leave running, and each only grows.
             void summarizeHandles()
             {
                 bool changed = true;
@@ -695,6 +706,15 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         const llvm::DominatorTree& dominators =
                             analyses_.getDominatorTree(*function);
+                        auto onEveryPath = [&](const JoinSuccess& success)
+                        {
+                            for (const llvm::Instruction* exit : data.returns)
+                            {
+                                if (!success.covers(*exit, dominators))
+                                    return false;
+                            }
+                            return true;
+                        };
                         HandleSummary& summary = data.summary;
                         for (const SpawnSite& spawn : data.sites.spawns)
                             changed = summary.started.insert(spawn.handleGroupId).second || changed;
@@ -704,13 +724,12 @@ namespace ctrace::concurrency::internal::analysis
 
                         for (const JoinSite& join : data.sites.joins)
                         {
-                            if (!join.success.has_value() || !isNameableHandle(join.handleGroupId))
+                            if (!isNameableHandle(join.handleGroupId))
                                 continue;
-                            bool onEveryPath = true;
-                            for (const llvm::Instruction* exit : data.returns)
-                                onEveryPath =
-                                    onEveryPath && join.success->covers(*exit, dominators);
-                            if (onEveryPath)
+                            if (returnsResultOf(*join.instruction))
+                                changed =
+                                    summary.reported.insert(join.handleGroupId).second || changed;
+                            if (join.success.has_value() && onEveryPath(*join.success))
                                 changed =
                                     summary.joined.insert(join.handleGroupId).second || changed;
                         }
@@ -729,10 +748,24 @@ namespace ctrace::concurrency::internal::analysis
                                 }
                             }
 
-                            bool onEveryPath = true;
-                            for (const llvm::Instruction* exit : data.returns)
-                                onEveryPath = onEveryPath && dominators.dominates(site->call, exit);
-                            if (!onEveryPath)
+                            // The call is the join it reports, so its result is that join's status.
+                            const std::optional<JoinSuccess> reportedSuccess =
+                                callee.reported.empty()
+                                    ? std::nullopt
+                                    : joinSuccessOf(*site->call, CallKind::PThreadJoin);
+                            for (const std::string& calleeHandle : callee.reported)
+                            {
+                                const std::optional<std::string> handle = handleAtCaller(
+                                    calleeHandle, site->calleeFunctionId, *site->call);
+                                if (!handle.has_value())
+                                    continue;
+                                if (returnsResultOf(*site->call))
+                                    changed = summary.reported.insert(*handle).second || changed;
+                                if (reportedSuccess.has_value() && onEveryPath(*reportedSuccess))
+                                    changed = summary.joined.insert(*handle).second || changed;
+                            }
+
+                            if (!onEveryPath(JoinSuccess{.after = site->call}))
                                 continue;
                             for (const std::string& calleeHandle : callee.joined)
                             {
@@ -748,26 +781,36 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
 
-            /// Calls in `function` after which `handle` has been joined: calls to a function that
-            /// joins what they pass on every path out.
-            [[nodiscard]] const std::vector<const llvm::Instruction*>&
+            /// Calls in `function` that join `handle`, with where they have: after a call to a
+            /// function that joins what it is passed on every path out, and where the caller finds
+            /// the status a call reports successful.
+            [[nodiscard]] const std::vector<std::pair<const llvm::Instruction*, JoinSuccess>>&
             joiningCalls(const llvm::Function& function, const std::string& handle) const
             {
                 const auto key = std::pair{&function, handle};
                 if (const auto cached = joiningCalls_.find(key); cached != joiningCalls_.end())
                     return cached->second;
 
-                std::vector<const llvm::Instruction*> calls;
+                std::vector<std::pair<const llvm::Instruction*, JoinSuccess>> calls;
                 for (const DirectCallSite* site : functions_.at(&function).calls)
                 {
-                    for (const std::string& calleeHandle : summaryOf(*site).joined)
+                    auto passes = [&](const std::set<std::string>& calleeHandles)
                     {
-                        if (handleAtCaller(calleeHandle, site->calleeFunctionId, *site->call) ==
-                            handle)
+                        for (const std::string& calleeHandle : calleeHandles)
                         {
-                            calls.push_back(site->call);
-                            break;
+                            if (handleAtCaller(calleeHandle, site->calleeFunctionId, *site->call) ==
+                                handle)
+                                return true;
                         }
+                        return false;
+                    };
+                    if (passes(summaryOf(*site).joined))
+                        calls.emplace_back(site->call, JoinSuccess{.after = site->call});
+                    else if (passes(summaryOf(*site).reported))
+                    {
+                        if (std::optional<JoinSuccess> success =
+                                joinSuccessOf(*site->call, CallKind::PThreadJoin))
+                            calls.emplace_back(site->call, *success);
                     }
                 }
                 return joiningCalls_.emplace(key, std::move(calls)).first->second;
@@ -782,9 +825,9 @@ namespace ctrace::concurrency::internal::analysis
                                                    const llvm::Instruction* start) const
             {
                 const llvm::DominatorTree& dominators = analyses_.getDominatorTree(function);
-                for (const llvm::Instruction* call : joiningCalls(function, handle))
+                for (const auto& [call, success] : joiningCalls(function, handle))
                 {
-                    if (call != &point && dominators.dominates(call, &point) &&
+                    if (success.covers(point, dominators) &&
                         (start == nullptr || dominators.dominates(start, call)))
                         return true;
                 }
@@ -973,7 +1016,7 @@ namespace ctrace::concurrency::internal::analysis
                                std::vector<std::pair<const llvm::Instruction*, ThreadInstance>>>
                 introducedByCalls_;
             mutable std::map<std::pair<const llvm::Function*, std::string>,
-                             std::vector<const llvm::Instruction*>>
+                             std::vector<std::pair<const llvm::Instruction*, JoinSuccess>>>
                 joiningCalls_;
         };
     } // namespace
