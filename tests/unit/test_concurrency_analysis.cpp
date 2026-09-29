@@ -1295,6 +1295,43 @@ namespace
              .intent = "locks taken in opposite orders deadlock, and adopting guards reacquire "
                        "nothing (#114)",
              .deadlock = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_locks_ordered_by_address_no_diagnostic.c",
+             .intent = "an if/else taking the lower address first orders every thread alike "
+                       "(#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_order_chosen_by_flag.c",
+             .intent = "a flag choosing between opposite orders is no address order (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_order_chosen_by_other_addresses.c",
+             .intent = "comparing the addresses of anything but the locks orders nothing (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_local_lock_order_chosen_by_other_addresses.c",
+             .intent = "comparing the global lock with pointers other than the local lock's "
+                       "object orders nothing (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_order_chosen_by_inequality.c",
+             .intent = "testing two addresses for inequality says neither is lower (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_address_order_on_one_path.c",
+             .intent = "an address order on one path still meets the fixed order of another "
+                       "(#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_order_and_fixed_order_in_one_macro.c",
+             .intent = "an order a macro takes twice, by address and in a fixed order, is not "
+                       "address-ordered (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_opposite_address_orders.c",
+             .intent = "taking the lower address first and taking the higher one first conflict "
+                       "(#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_opposite_orders_inside_one_object.c",
+             .intent = "comparing two locks of one object cannot tell which object is lower "
+                       "(#114)",
+             .deadlock = 1},
 
             // --- imported deadlock fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/deadlock/cpp_deadlock_self_lock.cpp",

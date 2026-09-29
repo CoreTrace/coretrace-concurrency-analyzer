@@ -74,8 +74,10 @@ namespace ctrace::concurrency::internal::analysis
 
         [[nodiscard]] std::vector<LockEffect> resolve(const llvm::CallBase& call) const;
 
-      private:
+        /// Identity of the lock `value` points at, as the effects this resolver returns name it.
         [[nodiscard]] std::optional<std::string> lockIdOf(const llvm::Value& value) const;
+
+      private:
         [[nodiscard]] std::vector<LockEffect> summarizedEffects(const llvm::CallBase& call) const;
 
         const ConcurrencySymbolClassifier& classifier_;
