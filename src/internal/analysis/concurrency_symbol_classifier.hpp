@@ -82,6 +82,10 @@ namespace ctrace::concurrency::internal::analysis
         /// callee symbol because a standard library may lower the lock to an unnamed struct,
         /// leaving the type name visible only in the mangled member function.
         [[nodiscard]] bool targetsRecursiveLock(const llvm::CallBase& call) const;
+        /// For a guard constructor, true when it is given `std::adopt_lock`: the calling thread
+        /// already holds the mutexes it hands over, and the guard only takes charge of releasing
+        /// them.
+        [[nodiscard]] bool adoptsHeldLocks(const llvm::CallBase& call) const;
         /// True for a call a signal handler may not make. POSIX allows only async-signal-safe
         /// functions there: a handler interrupts its own thread mid-operation, so allocating,
         /// printing or locking can re-enter a structure the interrupted code left inconsistent.

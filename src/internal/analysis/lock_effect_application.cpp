@@ -64,8 +64,11 @@ namespace ctrace::concurrency::internal::analysis
             case LockEffectKind::GuardAcquire:
                 change.acquired.insert(change.acquired.end(), effect.lockIds.begin(),
                                        effect.lockIds.end());
-                change.orderedAcquired.insert(change.orderedAcquired.end(), effect.lockIds.begin(),
-                                              effect.lockIds.end());
+                if (!effect.adoptsHeldLocks)
+                {
+                    change.orderedAcquired.insert(change.orderedAcquired.end(),
+                                                  effect.lockIds.begin(), effect.lockIds.end());
+                }
                 if (effect.recursiveLock)
                 {
                     change.recursivelyAcquirable.insert(change.recursivelyAcquirable.end(),

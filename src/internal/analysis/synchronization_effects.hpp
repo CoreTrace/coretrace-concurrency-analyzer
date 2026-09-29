@@ -42,6 +42,9 @@ namespace ctrace::concurrency::internal::analysis
         std::string guardId;
         /// True when the acquisition targets a lock type allowing recursive acquisition.
         bool recursiveLock = false;
+        /// True for a guard taking over locks its thread already holds (`std::adopt_lock`): it
+        /// holds them from here on, but waits for none of them.
+        bool adoptsHeldLocks = false;
     };
 
     /// Maps a call to the synchronization effects it has on its arguments. Effects are expressed

@@ -246,6 +246,17 @@ namespace ctrace::concurrency::internal::analysis
                llvm::StringRef(canonical).contains("recursive_timed_mutex");
     }
 
+    bool ConcurrencySymbolClassifier::adoptsHeldLocks(const llvm::CallBase& call) const
+    {
+        const llvm::Function* callee = directCallee(call);
+        if (callee == nullptr)
+            return false;
+
+        // `adopt_lock_t` is an empty tag the lowering drops from the arguments; only the
+        // constructor's mangled signature still names it.
+        return llvm::StringRef(canonicalName(*callee)).contains("adopt_lock");
+    }
+
     namespace
     {
         /// The function a value denotes, once casts are stripped. Kept local so the classifier

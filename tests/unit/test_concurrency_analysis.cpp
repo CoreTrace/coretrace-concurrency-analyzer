@@ -1287,6 +1287,14 @@ namespace
              .intent = "the two lock orders belong to threads with disjoint lifetimes"},
             {.path = "tests/fixtures/concurrency/deadlock/cpp_recursive_mutex_no_diagnostic.cpp",
              .intent = "std::recursive_mutex is designed to be relocked"},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_std_lock_adopted_by_guards_no_diagnostic.cpp",
+             .intent = "guards adopting the mutexes std::lock took wait for nothing (#114)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_deadlock_locks_adopted_by_guards.cpp",
+             .intent = "locks taken in opposite orders deadlock, and adopting guards reacquire "
+                       "nothing (#114)",
+             .deadlock = 1, .requiresCxx20 = true},
 
             // --- imported deadlock fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/deadlock/cpp_deadlock_self_lock.cpp",
