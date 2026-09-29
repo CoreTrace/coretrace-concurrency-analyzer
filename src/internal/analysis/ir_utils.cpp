@@ -697,6 +697,13 @@ namespace ctrace::concurrency::internal::analysis
         return llvm::dyn_cast_or_null<llvm::GlobalVariable>(resolveCopiedValue(value, seen));
     }
 
+    const llvm::Value* resolveBaseObject(const llvm::Value& value)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        const llvm::Value* base = resolveCopiedValue(value, seen);
+        return llvm::isa_and_nonnull<llvm::GlobalVariable, llvm::Argument>(base) ? base : nullptr;
+    }
+
     std::optional<std::string> canonicalGlobalId(const llvm::Value& value)
     {
         const llvm::GlobalVariable* global = resolveBaseGlobal(value);

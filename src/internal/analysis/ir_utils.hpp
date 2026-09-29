@@ -76,6 +76,9 @@ namespace ctrace::concurrency::internal::analysis
                                             const std::optional<std::filesystem::path>& sourceRoot);
 
     [[nodiscard]] const llvm::GlobalVariable* resolveBaseGlobal(const llvm::Value& value);
+    /// The global, or the parameter, a pointer is based on, following copies through local
+    /// variables; null for anything else. A parameter stands for whatever object its caller passes.
+    [[nodiscard]] const llvm::Value* resolveBaseObject(const llvm::Value& value);
     [[nodiscard]] std::optional<std::string> canonicalGlobalId(const llvm::Value& value);
     /// Canonical identity of a lock object, field-sensitive so that two mutexes stored in the same
     /// global aggregate are not conflated. Without a data layout the offset cannot be folded and

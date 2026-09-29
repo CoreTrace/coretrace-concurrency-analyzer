@@ -463,11 +463,15 @@ namespace ctrace::concurrency::internal::analysis
             return namesCallerFrame(order.firstLockId) || namesCallerFrame(order.secondLockId);
         }
 
+        /// Identifies an order in its function. Instantiated at a call, every order a callee takes
+        /// on two locks gets the call's location: the address mark keeps an order taken either way
+        /// apart from one taken lower address first, which would otherwise hide it.
         std::string lockOrderKey(const LockOrderFact& order)
         {
             return order.functionId + "|" + order.firstLockId + "|" + order.secondLockId + "|" +
                    order.location.file + "|" + std::to_string(order.location.line) + "|" +
-                   std::to_string(order.location.column);
+                   std::to_string(order.location.column) +
+                   (order.lowerAddressFirst ? "|lower-address-first" : "");
         }
 
         void addLockOrder(std::vector<LockOrderFact>& orders,
@@ -603,6 +607,9 @@ namespace ctrace::concurrency::internal::analysis
                     .heldLocks = held,
                     .inRootTask = call.callerInRootTask,
                     .liveEntries = call.liveAtCall,
+                    // The callee compares the addresses of whatever objects it is handed: at every
+                    // call, it takes this order only when its first lock's object is the lower.
+                    .lowerAddressFirst = order.lowerAddressFirst,
                     .secondIsRecursive = order.secondIsRecursive,
                 });
             }

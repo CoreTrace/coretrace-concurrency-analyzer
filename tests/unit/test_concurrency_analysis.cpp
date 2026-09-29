@@ -1407,6 +1407,14 @@ namespace
                      "deadlock_transfer_helper_before_spawn_no_diagnostic.c",
              .intent = "the inverted call is over before the other thread exists (#114)"},
             {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_address_order_no_diagnostic.c",
+             .intent = "a helper taking the lower address first orders every call alike (#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_address_order_then_fixed_order.c",
+             .intent = "a helper's fixed order stays apart from its address order on the same "
+                       "locks at each call (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_hand_over_hand_recursion_no_diagnostic.c",
              .intent = "hand-over-hand locking by a recursion moving its pointer, one direction "
                        "(#114)"},
