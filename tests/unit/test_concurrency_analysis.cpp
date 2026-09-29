@@ -1415,6 +1415,15 @@ namespace
                        "locks at each call (#114)",
              .deadlock = 1},
             {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_address_order_under_caller_lock_no_diagnostic.c",
+             .intent = "a lock one caller holds before an address-ordered pair closes no cycle "
+                       "(#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_on_longer_cycle.c",
+             .intent = "an address-ordered pair another order leaves may lie on a longer cycle "
+                       "(#114)",
+             .deadlock = 2},
+            {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_hand_over_hand_recursion_no_diagnostic.c",
              .intent = "hand-over-hand locking by a recursion moving its pointer, one direction "
                        "(#114)"},
