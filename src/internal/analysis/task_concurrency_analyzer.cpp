@@ -50,123 +50,6 @@ namespace ctrace::concurrency::internal::analysis
         // ponytail: fixed depth; follow recursive structures if deep object graphs need it.
         constexpr std::size_t kMaxHandleSteps = 16;
 
-        /// Where a join has certainly waited for its thread: after a `std::thread::join`, which
-        /// throws otherwise, and after a `pthread_join` whose result is unused; on the branch
-        /// taken when its result, compared with zero, reads as success. The result may first be
-        /// kept in a local. A result used any other way gives no such place, and the join then
-        /// ends nothing.
-        struct JoinSuccess
-        {
-            const llvm::Instruction* after = nullptr;
-            const llvm::BasicBlock* branch = nullptr;
-            const llvm::BasicBlock* successor = nullptr;
-
-            /// Dominance, not reachability: the failure branch may rejoin the success one, and an
-            /// invoked join has returned only past its normal edge.
-            [[nodiscard]] bool covers(const llvm::Instruction& point,
-                                      const llvm::DominatorTree& dominators) const
-            {
-                if (after != nullptr)
-                    return after != &point && dominators.dominates(after, &point);
-                return dominators.dominates(llvm::BasicBlockEdge(branch, successor),
-                                            point.getParent());
-            }
-        };
-
-        bool isZero(const llvm::Value* value)
-        {
-            const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
-            return constant != nullptr && constant->isZero();
-        }
-
-        /// Where `user` finds that the join succeeded, when it compares `result` with zero for a
-        /// branch and nothing else.
-        std::optional<JoinSuccess> successTestedBy(const llvm::User& user,
-                                                   const llvm::Value& result)
-        {
-            const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(&user);
-            if (compare == nullptr || !compare->isEquality() || !compare->hasOneUse())
-                return std::nullopt;
-
-            const llvm::Value* other =
-                compare->getOperand(0) == &result ? compare->getOperand(1) : compare->getOperand(0);
-            const auto* branch = llvm::dyn_cast<llvm::BranchInst>(*compare->user_begin());
-            if (!isZero(other) || branch == nullptr || !branch->isConditional())
-                return std::nullopt;
-
-            const bool successWhenTrue = compare->getPredicate() == llvm::CmpInst::ICMP_EQ;
-            return JoinSuccess{
-                .branch = branch->getParent(),
-                .successor = branch->getSuccessor(successWhenTrue ? 0 : 1),
-            };
-        }
-
-        /// The local `store` writes to, when that store is its only write and nothing takes its
-        /// address.
-        const llvm::AllocaInst* localWrittenOnlyBy(const llvm::StoreInst& store)
-        {
-            const auto* local = llvm::dyn_cast<llvm::AllocaInst>(store.getPointerOperand());
-            if (local == nullptr)
-                return nullptr;
-            for (const llvm::User* user : local->users())
-            {
-                if (user != &store && !llvm::isa<llvm::LoadInst>(user))
-                    return nullptr;
-            }
-            return local;
-        }
-
-        std::optional<JoinSuccess> joinSuccessOf(const llvm::CallBase& join, CallKind kind)
-        {
-            if (kind == CallKind::StdThreadJoin)
-                return JoinSuccess{.after = &join};
-
-            // A read proves success only by testing the result for a branch, which gives that
-            // branch's edge; any other read proves nothing, and a result never read counts as
-            // success, as an unused one does. A local keeping the result is followed to its loads
-            // after the store in the same block: a load elsewhere may read an earlier call's.
-            std::optional<JoinSuccess> success;
-            bool readOtherwise = false;
-            auto read = [&](const llvm::User& user, const llvm::Value& result)
-            {
-                if (std::optional<JoinSuccess> tested = successTestedBy(user, result))
-                    success = tested;
-                else
-                    readOtherwise = true;
-            };
-
-            for (const llvm::User* user : join.users())
-            {
-                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
-                const llvm::AllocaInst* local =
-                    store != nullptr && store->getValueOperand() == &join
-                        ? localWrittenOnlyBy(*store)
-                        : nullptr;
-                if (local == nullptr)
-                {
-                    read(*user, join);
-                    continue;
-                }
-                for (const llvm::User* reader : local->users())
-                {
-                    const auto* load = llvm::dyn_cast<llvm::LoadInst>(reader);
-                    if (load == nullptr)
-                        continue;
-                    if (load->getParent() != store->getParent() || !store->comesBefore(load))
-                        readOtherwise = true;
-                    else
-                        for (const llvm::User* use : load->users())
-                            read(*use, *load);
-                }
-            }
-
-            if (success.has_value())
-                return success;
-            if (!readOtherwise)
-                return JoinSuccess{.after = &join};
-            return std::nullopt;
-        }
-
         struct SpawnSite
         {
             const llvm::Instruction* instruction = nullptr;
@@ -429,14 +312,6 @@ namespace ctrace::concurrency::internal::analysis
             return returns;
         }
 
-        /// Whether the function returns what `call` returns, and does nothing else with it. An
-        /// unoptimized function has a single `ret`: a second return statement goes through a
-        /// return slot, so a result returned directly is the function's only one.
-        bool returnsResultOf(const llvm::Instruction& call)
-        {
-            return call.hasOneUse() && llvm::isa<llvm::ReturnInst>(*call.user_begin());
-        }
-
         std::unordered_set<std::string>
         collectRootTaskFunctions(const llvm::Module& module,
                                  const std::vector<DirectCallSite>& directCallSites)
@@ -538,8 +413,8 @@ namespace ctrace::concurrency::internal::analysis
                 if (const auto* call = llvm::dyn_cast<llvm::CallBase>(spawn.instruction))
                 {
                     const auto completion = completions_.find(call);
-                    if (completion != completions_.end() &&
-                        dominators.dominates(completion->second, &point))
+                    if (completion != completions_.end() && completion->second.ended.has_value() &&
+                        completion->second.ended->covers(point, dominators))
                         return false;
                 }
 

@@ -437,6 +437,8 @@ namespace ctrace::concurrency::internal::analysis
                         fact.insideLoop = !createdDetached && isCreatedInLoopWithoutInnerResolution(
                                                                   instruction, *handleGroupId,
                                                                   resolutionSites, loopInfo);
+                        // Every thread the creation starts is joined: a join that fails was still
+                        // made, and whether the threads have ended is not this rule's question.
                         if (completions.contains(call))
                         {
                             fact.resolvedOnAllPaths = true;
