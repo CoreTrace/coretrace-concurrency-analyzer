@@ -99,4 +99,11 @@ namespace ctrace::concurrency::internal::analysis
     /// branch.
     [[nodiscard]] bool completionCoversReturns(const llvm::Instruction& start,
                                                const JoinSuccess& completion);
+
+    /// Whether every path from `start` to `point` passes one of `completions`: the thread has
+    /// ended there when they are where its joins certainly waited. Without a point, every path
+    /// from `start` to a normal return must.
+    [[nodiscard]] bool completedOnEveryPath(const llvm::Instruction& start,
+                                            const std::vector<JoinSuccess>& completions,
+                                            const llvm::Instruction* point = nullptr);
 } // namespace ctrace::concurrency::internal::analysis
