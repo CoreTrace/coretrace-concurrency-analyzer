@@ -100,6 +100,24 @@ namespace ctrace::concurrency::internal::analysis
             return local;
         }
 
+        /// Whether `value` reads `result` back from a local only the store of `result` writes. A
+        /// defined program reads such a local only once that store has run.
+        bool readsBack(const llvm::Value* value, const llvm::Value& result)
+        {
+            const auto* load = llvm::dyn_cast_or_null<llvm::LoadInst>(value);
+            if (load == nullptr)
+                return false;
+            for (const llvm::User* user : result.users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store != nullptr && store->getValueOperand() == &result &&
+                    store->getPointerOperand() == load->getPointerOperand() &&
+                    localWrittenOnlyBy(*store) != nullptr)
+                    return true;
+            }
+            return false;
+        }
+
         /// Only immutable local copies are forwarded. Reaching through a mutable bound
         /// would incorrectly equate a complete join loop with a shortened one.
         const llvm::Value* invariantValue(const llvm::Value* value)
@@ -715,7 +733,14 @@ namespace ctrace::concurrency::internal::analysis
 
     bool returnsResultOf(const llvm::Instruction& call)
     {
-        return call.hasOneUse() && llvm::isa<llvm::ReturnInst>(*call.user_begin());
+        for (const llvm::BasicBlock& block : *call.getFunction())
+        {
+            const auto* exit = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator());
+            if (exit != nullptr && exit->getReturnValue() != &call &&
+                !readsBack(exit->getReturnValue(), call))
+                return false;
+        }
+        return true;
     }
 
     bool completionCoversReturns(const llvm::Instruction& start,

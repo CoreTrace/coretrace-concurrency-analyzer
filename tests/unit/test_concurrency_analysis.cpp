@@ -1192,14 +1192,24 @@ namespace
                        "(#121)",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
-                     "data_race_read_after_helper_join_status_logged_race.c",
-             .intent = "a helper that also logs its join's status is not followed through the call "
-                       "(#121)",
+                     "data_race_read_after_helper_join_status_logged_no_fp.c",
+             .intent = "a helper that also logs its join's status still returns that status "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_recorded_no_fp.c",
+             .intent = "a helper that also records its join's status still returns that status "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_logged_on_failure_no_fp.c",
+             .intent = "a status read back past a branch is still the one the helper kept (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_compared_race.c",
+             .intent = "a helper returning a comparison of its join's status does not return the "
+                       "status (#121)",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
-                     "data_race_read_after_helper_join_status_recorded_race.c",
-             .intent = "a helper that also records its join's status is not followed through the "
-                       "call (#121)",
+                     "data_race_read_after_helper_join_failure_swallowed_race.c",
+             .intent = "a helper overwriting its kept status no longer returns it (#121)",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_read_after_helper_aborting_on_join_status_no_fp.c",

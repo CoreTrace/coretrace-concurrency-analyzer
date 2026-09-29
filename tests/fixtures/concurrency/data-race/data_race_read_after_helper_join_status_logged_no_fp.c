@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // stop() logs the status of its join before returning it, and main reads `shared` only on the
-// branch where that status reports success. The program is correct, but only a status returned
-// exactly as the join gave it is followed through the call, so the read is still reported.
-// Expected: one data race on `shared`, main's read against the worker's write.
+// branch where that status reports success: the worker has finished there. Logging the status
+// does not change what stop() returns.
+// Expected: no diagnostic.
 #include <pthread.h>
 #include <stdio.h>
 static int shared;

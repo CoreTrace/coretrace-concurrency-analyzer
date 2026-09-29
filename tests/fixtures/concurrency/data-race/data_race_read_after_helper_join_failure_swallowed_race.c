@@ -1,11 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-// stop() records the status of its join in a global before returning it, and main reads `shared`
-// only on the branch where that status reports success. The program is correct, but only a status
-// the helper does nothing else with is followed through the call, so the read is still reported.
+// stop() logs a failed join and returns 0 anyway, so main, which reads `shared` when stop()
+// returns 0, also reads it when the join failed and the worker may still be running.
 // Expected: one data race on `shared`, main's read against the worker's write.
 #include <pthread.h>
+#include <stdio.h>
 static int shared;
-static int last_status;
 static pthread_t thread;
 static void* worker(void* argument)
 {
@@ -15,12 +14,18 @@ static void* worker(void* argument)
 }
 static int stop(void)
 {
-    return last_status = pthread_join(thread, NULL);
+    int status = pthread_join(thread, NULL);
+    if (status != 0)
+    {
+        fprintf(stderr, "pthread_join: %d\n", status);
+        status = 0;
+    }
+    return status;
 }
 int main(void)
 {
     pthread_create(&thread, NULL, worker, NULL);
     if (stop() == 0)
         return shared;
-    return last_status;
+    return 0;
 }

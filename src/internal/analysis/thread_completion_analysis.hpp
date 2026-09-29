@@ -43,9 +43,9 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] std::optional<JoinSuccess> joinSuccessOf(const llvm::CallBase& join,
                                                            CallKind kind);
 
-    /// Whether the function holding `call` returns what `call` returns, and does nothing else with
-    /// it. An unoptimized function has a single `ret`: a second return statement goes through a
-    /// return slot, so a result returned directly is the function's only one.
+    /// Whether every return of the function holding `call` hands back what `call` returns: directly,
+    /// or read back from a local only it is stored into. Other reads of the result, logging it for
+    /// instance, return nothing else. A value computed from it, such as a comparison, is not it.
     [[nodiscard]] bool returnsResultOf(const llvm::Instruction& call);
 
     /// A proof that every thread a spawn starts is joined on every path to a normal return. Two
