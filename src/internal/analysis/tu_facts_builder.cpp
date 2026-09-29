@@ -406,6 +406,16 @@ namespace ctrace::concurrency::internal::analysis
             return RootBinding::global(*slotId);
         }
 
+        /// Whether `symbol` names an object handed to a thread rather than a global: its name is
+        /// an internal label the report must not print as a global's. The owner's own accesses
+        /// and the accesses projected at call sites both ask here, so they cannot disagree.
+        bool namesObjectSharedWithThread(const std::string& symbol,
+                                         const std::unordered_set<std::string>& sharedObjectIds,
+                                         const std::unordered_set<std::string>& localObjectIds)
+        {
+            return sharedObjectIds.contains(symbol) || localObjectIds.contains(symbol);
+        }
+
         /// The locks of a callee's access as its caller holds them. A lock the callee named after
         /// one of its parameters is the lock at that place in what the call passes there; with
         /// nothing nameable passed, it protects nothing the caller can see.
@@ -1331,6 +1341,10 @@ namespace ctrace::concurrency::internal::analysis
             {
                 pendingAccess.fact.symbol = pendingAccess.root.symbol;
                 pendingAccess.fact.region = pendingAccess.root.region;
+                // The root may name an object a thread holds rather than a global, and the two
+                // are not described the same way to the reader.
+                pendingAccess.fact.sharedObject = namesObjectSharedWithThread(
+                    pendingAccess.fact.symbol, sharedObjectIds, localObjectIds);
                 addConcreteAccess(concreteAccesses, concreteAccessKeys,
                                   std::move(pendingAccess.fact));
                 continue;
@@ -1379,8 +1393,8 @@ namespace ctrace::concurrency::internal::analysis
                         concrete.symbol = bindingIt->second.symbol;
                         // The binding may name an object a thread holds rather than a global,
                         // and the two are not described the same way to the reader.
-                        concrete.sharedObject = sharedObjectIds.contains(concrete.symbol) ||
-                                                localObjectIds.contains(concrete.symbol);
+                        concrete.sharedObject = namesObjectSharedWithThread(
+                            concrete.symbol, sharedObjectIds, localObjectIds);
                         // The callee's region is relative to the argument, which the call site
                         // itself may already have indexed into.
                         concrete.region = access.fact.region.rebasedOn(
