@@ -1332,6 +1332,126 @@ namespace
              .intent = "comparing two locks of one object cannot tell which object is lower "
                        "(#114)",
              .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_opposite_orders.c",
+             .intent = "a helper locks the accounts it is handed in the order it is given them "
+                       "(#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_local_accounts.c",
+             .intent = "the accounts a helper locks are fields of a local handed to the thread "
+                       "(#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_deadlock_transfer_helper_lock_guards.cpp",
+             .intent = "a helper guards the accounts it is handed with lock_guard (#114)",
+             .deadlock = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_deadlock_transfer_helper_unique_locks.cpp",
+             .intent = "a helper locks the accounts it is handed with unique_lock (#114)",
+             .deadlock = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_deadlock_member_locks_other_account.cpp",
+             .intent = "a member locks its own mutex, then the other object's (#114)",
+             .deadlock = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_deadlock_member_calls_other_account.cpp",
+             .intent = "a member holds its own mutex while a member of the other object locks "
+                       "the other's (#114)",
+             .deadlock = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_split_in_two_levels.c",
+             .intent = "the two accounts are locked by two helpers, one calling the other (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_ten_levels_down.c",
+             .intent = "the locking helper is ten calls down, each caller defined first (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_parameter_lock_under_global_two_callers.c",
+             .intent = "a helper locks the account it is handed under the caller's global lock, "
+                       "at one of two calls (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_parameter_lock_two_levels_under_global.c",
+             .intent = "the caller's global lock is held two calls above the account's lock "
+                       "(#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_named_lock_under_caller_lock.c",
+             .intent = "a helper's named lock is taken under the lock one of its callers holds "
+                       "(#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_parameter_lock_reacquired.c",
+             .intent = "a helper locks again the account lock its caller holds (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/deadlock_mutexes_passed_to_helper.c",
+             .intent = "a helper locks the two mutexes it is handed in the order it is given them "
+                       "(#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_deadlock_method_reenters_mutex.cpp",
+             .intent = "a method locks again through `this` the mutex its caller holds, once per "
+                       "call to the caller (#114)",
+             .deadlock = 2, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_consistent_order_no_diagnostic.c",
+             .intent = "both threads hand the helper the accounts in the same order (#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_one_thread_no_diagnostic.c",
+             .intent = "only one thread calls the helper in both orders (#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_settle_helper_own_accounts_no_diagnostic.c",
+             .intent = "each thread hands the helper its own account (#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_same_account_guard_no_diagnostic.c",
+             .intent = "one account passed for both parameters is no reacquisition: the helper "
+                       "may test for it (#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_before_spawn_no_diagnostic.c",
+             .intent = "the inverted call is over before the other thread exists (#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_address_order_no_diagnostic.c",
+             .intent = "a helper taking the lower address first orders every call alike (#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_address_order_then_fixed_order.c",
+             .intent = "a helper's fixed order stays apart from its address order on the same "
+                       "locks at each call (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_address_order_under_caller_lock_no_diagnostic.c",
+             .intent = "a lock one caller holds before an address-ordered pair closes no cycle "
+                       "(#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_on_longer_cycle.c",
+             .intent = "an address-ordered pair another order leaves may lie on a longer cycle "
+                       "(#114)",
+             .deadlock = 2},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_hand_over_hand_recursion_no_diagnostic.c",
+             .intent = "hand-over-hand locking by a recursion moving its pointer, one direction "
+                       "(#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_gated_calls_no_diagnostic.c",
+             .intent = "the gate held at both concurrent calls serializes the helper's orders "
+                       "(#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_gated_pair_no_diagnostic.c",
+             .intent = "the gate held at the only two inverted calls serializes them (#114)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_parameter_locks_held_around_inversion.c",
+             .intent = "an account lock each thread holds through its own parameter is no common "
+                       "gate (#114)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_escrow_account_no_diagnostic.c",
+             .intent = "a lock the caller cannot name is not the caller's parameter in that "
+                       "position (#114)"},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_transfer_helper_std_lock_adopted_no_diagnostic.cpp",
+             .intent = "std::lock in a helper takes the mutexes it is handed without deadlocking "
+                       "(#114)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_recursive_mutex_reentered_by_method_no_diagnostic.cpp",
+             .intent = "a recursive mutex locked again through `this` is no reacquisition (#114)",
+             .requiresCxx20 = true},
 
             // --- imported deadlock fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/deadlock/cpp_deadlock_self_lock.cpp",

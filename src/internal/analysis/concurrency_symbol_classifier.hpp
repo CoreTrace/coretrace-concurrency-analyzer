@@ -86,6 +86,9 @@ namespace ctrace::concurrency::internal::analysis
         /// already holds the mutexes it hands over, and the guard only takes charge of releasing
         /// them.
         [[nodiscard]] bool adoptsHeldLocks(const llvm::CallBase& call) const;
+        /// True when the callee is declared in namespace `std`: its body is the library's own
+        /// implementation of what it does to its arguments.
+        [[nodiscard]] bool callsStandardLibrary(const llvm::CallBase& call) const;
         /// True for a call a signal handler may not make. POSIX allows only async-signal-safe
         /// functions there: a handler interrupts its own thread mid-operation, so allocating,
         /// printing or locking can re-enter a structure the interrupted code left inconsistent.

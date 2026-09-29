@@ -76,6 +76,9 @@ namespace ctrace::concurrency::internal::analysis
                                             const std::optional<std::filesystem::path>& sourceRoot);
 
     [[nodiscard]] const llvm::GlobalVariable* resolveBaseGlobal(const llvm::Value& value);
+    /// The global, or the parameter, a pointer is based on, following copies through local
+    /// variables; null for anything else. A parameter stands for whatever object its caller passes.
+    [[nodiscard]] const llvm::Value* resolveBaseObject(const llvm::Value& value);
     [[nodiscard]] std::optional<std::string> canonicalGlobalId(const llvm::Value& value);
     /// Canonical identity of a lock object, field-sensitive so that two mutexes stored in the same
     /// global aggregate are not conflated. Without a data layout the offset cannot be folded and
@@ -113,6 +116,10 @@ namespace ctrace::concurrency::internal::analysis
     /// The id of the lock at `place` within `object`: the object's name and the combined offset
     /// for a named object, the caller's own parameter placeholder for one it received itself.
     [[nodiscard]] std::string lockIdAt(const RootBinding& object, const MemoryRegion& place);
+
+    /// Reads back the object a lock id names and the place in it. Every lock id is its object's
+    /// name followed by the suffix of that place, so `lockIdAt(lockIdRoot(id), {})` is `id`.
+    [[nodiscard]] RootBinding lockIdRoot(std::string_view lockId);
 
     /// Identity of an access made through a pointer the program holds in a named slot, when
     /// that slot is one the spawn sites identified as shared.

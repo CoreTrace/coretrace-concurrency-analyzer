@@ -446,6 +446,176 @@ namespace ctrace::concurrency::internal::analysis
             return locks;
         }
 
+        /// Bounds the orders a function keeps open for its callers. A recursion that moves the
+        /// pointer it passes names a new lock at every step, so a fixpoint alone would not end.
+        /// An order past the bound is lost, never invented.
+        constexpr std::size_t kMaxOpenLockOrdersPerFunction = 64;
+
+        /// True for a lock only a call site can name: one reached through a parameter, or what
+        /// the caller holds.
+        bool namesCallerFrame(const std::string& lockId)
+        {
+            return lockId == kLocksHeldByCaller || parameterLockPlace(lockId).has_value();
+        }
+
+        bool isOpenLockOrder(const LockOrderFact& order)
+        {
+            return namesCallerFrame(order.firstLockId) || namesCallerFrame(order.secondLockId);
+        }
+
+        /// Identifies an order in its function. Instantiated at a call, every order a callee takes
+        /// on two locks gets the call's location: the address mark keeps an order taken either way
+        /// apart from one taken lower address first, which would otherwise hide it.
+        std::string lockOrderKey(const LockOrderFact& order)
+        {
+            return order.functionId + "|" + order.firstLockId + "|" + order.secondLockId + "|" +
+                   order.location.file + "|" + std::to_string(order.location.line) + "|" +
+                   std::to_string(order.location.column) +
+                   (order.lowerAddressFirst ? "|lower-address-first" : "");
+        }
+
+        void addLockOrder(std::vector<LockOrderFact>& orders,
+                          std::unordered_set<std::string>& orderKeys, LockOrderFact order)
+        {
+            // A lock named after a parameter is a different lock at every call, and so is what
+            // the caller holds: neither is a gate two threads share.
+            std::erase_if(order.heldLocks, namesCallerFrame);
+            if (orderKeys.insert(lockOrderKey(order)).second)
+                orders.push_back(std::move(order));
+        }
+
+        /// The orders a function leaves open for its callers.
+        struct OpenLockOrders
+        {
+            std::vector<LockOrderFact> orders;
+            std::unordered_set<std::string> keys;
+        };
+
+        /// False when the function already keeps the order, or keeps as many as it may.
+        bool addOpenLockOrder(std::unordered_map<std::string, OpenLockOrders>& openByFunction,
+                              LockOrderFact order)
+        {
+            OpenLockOrders& open = openByFunction[order.functionId];
+            if (open.keys.size() >= kMaxOpenLockOrdersPerFunction ||
+                !open.keys.insert(lockOrderKey(order)).second)
+            {
+                return false;
+            }
+
+            open.orders.push_back(std::move(order));
+            return true;
+        }
+
+        /// The lock a callee names `calleeLockId`, as the caller of `call` names it. A named lock
+        /// is the same lock in every frame; one named after a parameter is the lock at that place
+        /// in what the call passes there, and nothing when the caller cannot name that.
+        std::optional<std::string> lockAtCall(const std::string& calleeLockId,
+                                              const llvm::CallBase& call,
+                                              const SynchronizationEffectResolver& callerLocks)
+        {
+            const std::optional<ParameterLockPlace> place = parameterLockPlace(calleeLockId);
+            if (!place.has_value())
+                return calleeLockId;
+
+            if (place->argumentIndex >= call.arg_size())
+                return std::nullopt;
+
+            const std::optional<std::string> passed =
+                callerLocks.lockIdOf(*call.getArgOperand(place->argumentIndex));
+            if (!passed.has_value())
+                return std::nullopt;
+
+            return lockIdAt(lockIdRoot(*passed), place->place);
+        }
+
+        /// What a direct call says about the orders its callee leaves open.
+        struct LockOrderCall
+        {
+            const DirectCallSite& site;
+            /// Names the locks the call passes as its caller names them.
+            const SynchronizationEffectResolver& callerLocks;
+            const std::set<std::string>& heldAtCall;
+            /// Held at every call to the callee: the callee already orders its own acquisitions
+            /// after them.
+            const std::set<std::string>& calleeEntryLocks;
+            const ThreadEntrySet& liveAtCall;
+            bool callerInRootTask = false;
+        };
+
+        /// The orders `order`, left open by the callee, stands for at `call`: orders of the
+        /// caller, taken at the call, between the locks the call passes and holds.
+        std::vector<LockOrderFact> instantiateAtCall(const LockOrderFact& order,
+                                                     const LockOrderCall& call)
+        {
+            const std::optional<std::string> second =
+                lockAtCall(order.secondLockId, *call.site.call, call.callerLocks);
+            if (!second.has_value())
+                return {};
+
+            std::set<std::string> held = call.heldAtCall;
+            for (const std::string& lockId : order.heldLocks)
+            {
+                if (lockId == kLocksHeldByCaller)
+                    continue;
+                if (std::optional<std::string> heldLock =
+                        lockAtCall(lockId, *call.site.call, call.callerLocks);
+                    heldLock.has_value())
+                {
+                    held.insert(std::move(*heldLock));
+                }
+            }
+
+            // Taken after whatever the caller holds: after each lock held at this call, and
+            // after whatever the caller's own callers hold.
+            std::vector<std::string> firsts;
+            if (order.firstLockId == kLocksHeldByCaller)
+            {
+                for (const std::string& heldLock : call.heldAtCall)
+                {
+                    if (!call.calleeEntryLocks.contains(heldLock))
+                        firsts.push_back(heldLock);
+                }
+                firsts.emplace_back(kLocksHeldByCaller);
+            }
+            else if (std::optional<std::string> first =
+                         lockAtCall(order.firstLockId, *call.site.call, call.callerLocks);
+                     first.has_value())
+            {
+                firsts.push_back(std::move(*first));
+            }
+
+            std::vector<LockOrderFact> instances;
+            for (std::string& first : firsts)
+            {
+                // Taking again a lock whose type allows it is not a deadlock.
+                if (first == *second && order.secondIsRecursive)
+                    continue;
+
+                // Two locks the callee keeps apart are one only for this caller, and the callee
+                // may test for that before taking the second, as in `if (from == to) return;`:
+                // a path this reading does not follow.
+                const bool aliasedByCall = order.firstLockId != kLocksHeldByCaller &&
+                                           order.firstLockId != order.secondLockId;
+                if (first == *second && aliasedByCall)
+                    continue;
+
+                instances.push_back(LockOrderFact{
+                    .functionId = call.site.callerFunctionId,
+                    .firstLockId = std::move(first),
+                    .secondLockId = *second,
+                    .location = call.site.userLocation,
+                    .heldLocks = held,
+                    .inRootTask = call.callerInRootTask,
+                    .liveEntries = call.liveAtCall,
+                    // The callee compares the addresses of whatever objects it is handed: at every
+                    // call, it takes this order only when its first lock's object is the lower.
+                    .lowerAddressFirst = order.lowerAddressFirst,
+                    .secondIsRecursive = order.secondIsRecursive,
+                });
+            }
+            return instances;
+        }
+
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
@@ -1005,6 +1175,8 @@ namespace ctrace::concurrency::internal::analysis
 
         LockOrderCollector lockOrderCollector(classifier, analyses, &lockWrapperSummaries,
                                               &sharedObjectBindings);
+        std::unordered_set<std::string> lockOrderKeys;
+        std::unordered_map<std::string, OpenLockOrders> openLockOrders;
         for (const llvm::Function& function : module)
         {
             if (!selection.lockOrders || function.isDeclaration())
@@ -1023,10 +1195,88 @@ namespace ctrace::concurrency::internal::analysis
             std::vector<LockOrderFact> functionLockOrders = lockOrderCollector.collect(
                 function, functionEntryLocks, taskConcurrency.liveEntriesAtInstruction);
             for (LockOrderFact& lockOrder : functionLockOrders)
+            {
                 lockOrder.inRootTask = inRootTask;
+                if (isOpenLockOrder(lockOrder))
+                    addOpenLockOrder(openLockOrders, std::move(lockOrder));
+                else
+                    addLockOrder(facts.lockOrders, lockOrderKeys, std::move(lockOrder));
+            }
+        }
 
-            facts.lockOrders.insert(facts.lockOrders.end(), functionLockOrders.begin(),
-                                    functionLockOrders.end());
+        // An order a helper takes on the locks it is handed, or after the locks its caller
+        // holds, happens at each call to it, between the locks that call passes and holds. It is
+        // instantiated there as the caller's own order, which the caller's callers instantiate in
+        // turn while it still names one of the caller's parameters. An order no call site can
+        // name is left out: its locks are not known to be any lock another thread takes.
+        const std::set<std::string> noLocks;
+        const ThreadEntrySet noEntries;
+        bool lockOrdersChanged = selection.lockOrders;
+        while (lockOrdersChanged)
+        {
+            lockOrdersChanged = false;
+            for (const DirectCallSite& site : directCallSites)
+            {
+                // A standard function's body is the library's own way of doing what it does to
+                // its arguments: std::lock takes its locks in both orders, backing off with
+                // try_lock, which only a path-sensitive reading would tell from a deadlock.
+                if (site.call == nullptr || classifier.callsStandardLibrary(*site.call))
+                    continue;
+
+                const auto calleeOrdersIt = openLockOrders.find(site.calleeFunctionId);
+                if (calleeOrdersIt == openLockOrders.end())
+                    continue;
+
+                const SharedObjectBinding* callerObject = nullptr;
+                if (const auto objectIt = sharedObjectBindings.find(site.callerFunctionId);
+                    objectIt != sharedObjectBindings.end())
+                {
+                    callerObject = &objectIt->second;
+                }
+                const SynchronizationEffectResolver callerLocks(
+                    classifier, module.getDataLayout(), &lockWrapperSummaries,
+                    /*nameParameterLocks=*/false, callerObject, &localObjectIds,
+                    /*nameParameterFieldLocks=*/true);
+
+                const auto heldIt = lockPropagation.effectiveHeldLocksByCall.find(site.call);
+                const auto entryIt =
+                    lockPropagation.entryLocksByFunction.find(site.calleeFunctionId);
+                const auto liveIt = taskConcurrency.liveEntriesAtInstruction.find(site.call);
+                const LockOrderCall call{
+                    .site = site,
+                    .callerLocks = callerLocks,
+                    .heldAtCall = heldIt != lockPropagation.effectiveHeldLocksByCall.end()
+                                      ? heldIt->second
+                                      : noLocks,
+                    .calleeEntryLocks = entryIt != lockPropagation.entryLocksByFunction.end()
+                                            ? entryIt->second
+                                            : noLocks,
+                    .liveAtCall = liveIt != taskConcurrency.liveEntriesAtInstruction.end()
+                                      ? liveIt->second
+                                      : noEntries,
+                    .callerInRootTask =
+                        taskConcurrency.rootTaskFunctions.contains(site.callerFunctionId),
+                };
+
+                // Copied: in a recursion the caller is the callee, whose orders this adds to.
+                const std::vector<LockOrderFact> calleeOrders = calleeOrdersIt->second.orders;
+                for (const LockOrderFact& order : calleeOrders)
+                {
+                    for (LockOrderFact& instance : instantiateAtCall(order, call))
+                    {
+                        if (isOpenLockOrder(instance))
+                        {
+                            lockOrdersChanged =
+                                addOpenLockOrder(openLockOrders, std::move(instance)) ||
+                                lockOrdersChanged;
+                        }
+                        else
+                        {
+                            addLockOrder(facts.lockOrders, lockOrderKeys, std::move(instance));
+                        }
+                    }
+                }
+            }
         }
 
         if (selection.recursiveLockIds)

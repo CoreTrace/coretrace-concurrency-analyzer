@@ -62,25 +62,25 @@ namespace ctrace::concurrency::internal::analysis
             return std::nullopt;
         }
 
-        /// The global a comparison reads the address of, directly or converted to an integer. Null
-        /// for anything else, which leaves the orders it chooses between as they are.
-        const llvm::GlobalVariable* comparedObject(const llvm::Value& operand)
+        /// The object a comparison reads the address of, directly or converted to an integer: a
+        /// global, or what a parameter points at. Null for anything else, which leaves the orders
+        /// it chooses between as they are.
+        const llvm::Value* comparedObject(const llvm::Value& operand)
         {
             if (const auto* toInteger = llvm::dyn_cast<llvm::PtrToIntOperator>(&operand))
-                return resolveBaseGlobal(*toInteger->getPointerOperand());
-            return resolveBaseGlobal(operand);
+                return resolveBaseObject(*toInteger->getPointerOperand());
+            return resolveBaseObject(operand);
         }
 
-        /// The global holding the lock `lockId` that `site` acquires: the one its operand naming
-        /// that lock points into.
-        const llvm::GlobalVariable* lockedObject(const llvm::Instruction& site,
-                                                 const std::string& lockId,
-                                                 const SynchronizationEffectResolver& locks)
+        /// The object holding the lock `lockId` that `site` acquires: the global, or the
+        /// parameter's object, its operand naming that lock points into.
+        const llvm::Value* lockedObject(const llvm::Instruction& site, const std::string& lockId,
+                                        const SynchronizationEffectResolver& locks)
         {
             for (const llvm::Value* operand : llvm::cast<llvm::CallBase>(site).args())
             {
                 if (locks.lockIdOf(*operand) == lockId)
-                    return resolveBaseGlobal(*operand);
+                    return resolveBaseObject(*operand);
             }
             return nullptr;
         }
@@ -103,9 +103,8 @@ namespace ctrace::concurrency::internal::analysis
                                      const SynchronizationEffectResolver& locks,
                                      const llvm::DominatorTree& dominatorTree)
         {
-            const llvm::GlobalVariable* firstObject = lockedObject(*backward.front(), first, locks);
-            const llvm::GlobalVariable* secondObject =
-                lockedObject(*forward.front(), second, locks);
+            const llvm::Value* firstObject = lockedObject(*backward.front(), first, locks);
+            const llvm::Value* secondObject = lockedObject(*forward.front(), second, locks);
             if (firstObject == nullptr || secondObject == nullptr)
                 return false;
 
@@ -121,8 +120,8 @@ namespace ctrace::concurrency::internal::analysis
 
                 // Read the comparison with `first`'s object on the left. It must tell the two
                 // objects apart, which one object holding both locks would not.
-                const llvm::GlobalVariable* lhs = comparedObject(*comparison->getOperand(0));
-                const llvm::GlobalVariable* rhs = comparedObject(*comparison->getOperand(1));
+                const llvm::Value* lhs = comparedObject(*comparison->getOperand(0));
+                const llvm::Value* rhs = comparedObject(*comparison->getOperand(1));
                 const bool straight = lhs == firstObject && rhs == secondObject;
                 const bool swapped = lhs == secondObject && rhs == firstObject;
                 if (straight == swapped)
@@ -179,9 +178,12 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        // A lock reached through a parameter is named after it, as for the locks held around
+        // accesses; each call site then names it after what it passes.
         const SynchronizationEffectResolver effectResolver(
             classifier_, function.getParent()->getDataLayout(), summaries_,
-            /*nameParameterLocks=*/false, sharedObject, &localObjects_);
+            /*nameParameterLocks=*/false, sharedObject, &localObjects_,
+            /*nameParameterFieldLocks=*/true);
         const FunctionLockEffects lockEffects =
             collectFunctionLockEffects(function, effectResolver);
 
@@ -203,7 +205,9 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         const llvm::BasicBlock* entryBlock = &function.getEntryBlock();
-        inStates[entryBlock] = initialHeldLocks;
+        LockSet entryLocks = initialHeldLocks;
+        entryLocks.emplace(kLocksHeldByCaller);
+        inStates[entryBlock] = std::move(entryLocks);
 
         bool changed = true;
         while (changed)
@@ -242,6 +246,10 @@ namespace ctrace::concurrency::internal::analysis
 
                         for (const std::string& acquiredLock : change.orderedAcquired)
                         {
+                            const bool recursive =
+                                std::find(change.recursivelyAcquirable.begin(),
+                                          change.recursivelyAcquirable.end(),
+                                          acquiredLock) != change.recursivelyAcquirable.end();
                             for (const std::string& heldLock : currentLocks)
                             {
                                 const std::string key = functionId(function) + "|" + heldLock +
@@ -269,6 +277,7 @@ namespace ctrace::concurrency::internal::analysis
                                     .location = location,
                                     .heldLocks = currentLocks,
                                     .liveEntries = liveEntries,
+                                    .secondIsRecursive = recursive,
                                 });
                                 factSites.push_back({&instruction});
                             }
