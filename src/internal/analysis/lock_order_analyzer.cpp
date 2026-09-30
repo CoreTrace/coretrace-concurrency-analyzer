@@ -146,45 +146,18 @@ namespace ctrace::concurrency::internal::analysis
             return gates.has_value() && !gates->empty();
         }
 
-        /// For each lock, the one lock every order into it comes from (`sources`), and the one
-        /// every order out of it goes to (`targets`), while all of those orders are taken lower
-        /// address first; empty once one is not.
-        struct AddressOrderedNeighbours
+        /// Each order is taken only when its first lock's object sits at the lower address, so the
+        /// locks of the cycle would each have to lie below the next, all around it: no layout
+        /// closes it. One order not proven so is enough to keep the choice, and another choice of
+        /// orders on the same locks, or another cycle through them, is judged on its own.
+        bool isAddressOrdered(const std::vector<const LockOrderFact*>& cycle)
         {
-            std::unordered_map<std::string, std::string> sources;
-            std::unordered_map<std::string, std::string> targets;
-        };
-
-        void noteAddressOrderedNeighbour(std::unordered_map<std::string, std::string>& neighbours,
-                                         const std::string& lockId, const std::string& neighbour,
-                                         bool lowerAddressFirst)
-        {
-            const std::string noted = lowerAddressFirst ? neighbour : std::string();
-            const auto [neighbourIt, inserted] = neighbours.try_emplace(lockId, noted);
-            if (!inserted && neighbourIt->second != noted)
-                neighbourIt->second.clear();
-        }
-
-        bool pairsEachWithTheOther(const std::unordered_map<std::string, std::string>& neighbours,
-                                   const LockOrderFact& order)
-        {
-            const auto first = neighbours.find(order.firstLockId);
-            const auto second = neighbours.find(order.secondLockId);
-            return first != neighbours.end() && first->second == order.secondLockId &&
-                   second != neighbours.end() && second->second == order.firstLockId;
-        }
-
-        /// Two locks every order into which comes from the other, lower address first, lie on no
-        /// cycle but their own, and so do two locks every order out of which goes to the other
-        /// that way. No layout closes that cycle: each of its orders is taken only when its first
-        /// lock is the lower. Otherwise an order entering one of the two and an order leaving one
-        /// may close another cycle through them, and the pair is reported.
-        bool isAddressOrderedPair(const std::vector<const LockOrderFact*>& cycle,
-                                  const AddressOrderedNeighbours& addressOrdered)
-        {
-            return cycle.size() == 2 &&
-                   (pairsEachWithTheOther(addressOrdered.sources, *cycle.front()) ||
-                    pairsEachWithTheOther(addressOrdered.targets, *cycle.front()));
+            for (const LockOrderFact* order : cycle)
+            {
+                if (!order->lowerAddressFirst)
+                    return false;
+            }
+            return true;
         }
 
         std::string cycleKey(const std::vector<const LockOrderFact*>& cycle)
@@ -294,8 +267,7 @@ namespace ctrace::concurrency::internal::analysis
         ///
         /// False when the walk from some lock stopped at the bound.
         bool reportDeadlockingCycles(DiagnosticReport& report, const LockGraph& graph,
-                                     const TUFacts& facts,
-                                     const AddressOrderedNeighbours& addressOrdered)
+                                     const TUFacts& facts)
         {
             std::vector<std::vector<std::size_t>> predecessors(graph.size());
             for (std::size_t lock = 0; lock < graph.size(); ++lock)
@@ -309,6 +281,15 @@ namespace ctrace::concurrency::internal::analysis
             std::vector<bool> onPath(graph.size());
             std::vector<const LockOrderFact*> path;
             std::unordered_set<std::string> emittedCycleKeys;
+            const auto emitOnce = [&](const std::vector<const LockOrderFact*>& cycle)
+            {
+                if (emittedCycleKeys.insert(cycleKey(cycle)).second)
+                    emitCycleDiagnostic(report, cycle, facts);
+            };
+            // The first address-ordered choice closing each cycle, until the search is known to
+            // have finished.
+            std::vector<std::vector<const LockOrderFact*>> addressOrderedCycles;
+            std::unordered_set<std::string> addressOrderedKeys;
             std::size_t examined = 0;
 
             // False once the walk from `start` has examined its share of orders.
@@ -335,11 +316,12 @@ namespace ctrace::concurrency::internal::analysis
                             withinShare = walk(successor.lock);
                             onPath[successor.lock] = false;
                         }
-                        else if (!hasCommonGateLock(path) &&
-                                 !isAddressOrderedPair(path, addressOrdered) &&
-                                 emittedCycleKeys.insert(cycleKey(path)).second)
+                        else if (!hasCommonGateLock(path))
                         {
-                            emitCycleDiagnostic(report, path, facts);
+                            if (!isAddressOrdered(path))
+                                emitOnce(path);
+                            else if (addressOrderedKeys.insert(cycleKey(path)).second)
+                                addressOrderedCycles.push_back(path);
                         }
                         path.pop_back();
 
@@ -371,6 +353,15 @@ namespace ctrace::concurrency::internal::analysis
                 examined = 0;
                 if (!walk(start))
                     complete = false;
+            }
+
+            // Skipping an address-ordered choice relies on every other cycle through its locks
+            // being judged on its own. Past the bound one may have been lost, and the choice is
+            // reported in its place.
+            if (!complete)
+            {
+                for (const std::vector<const LockOrderFact*>& cycle : addressOrderedCycles)
+                    emitOnce(cycle);
             }
             return complete;
         }
@@ -408,22 +399,15 @@ namespace ctrace::concurrency::internal::analysis
         // Any cycle in the lock-order graph can deadlock, not only the two-lock inversion. Each
         // elementary cycle is judged once, whatever lock the search reaches it by.
         EdgesByFirstLock edgesByFirstLock;
-        AddressOrderedNeighbours addressOrdered;
         for (const LockOrderFact& fact : facts.lockOrders)
         {
             if (fact.firstLockId == fact.secondLockId || !participatesInConcurrency(fact, facts))
                 continue;
 
             edgesByFirstLock[fact.firstLockId].push_back(&fact);
-
-            noteAddressOrderedNeighbour(addressOrdered.sources, fact.secondLockId, fact.firstLockId,
-                                        fact.lowerAddressFirst);
-            noteAddressOrderedNeighbour(addressOrdered.targets, fact.firstLockId, fact.secondLockId,
-                                        fact.lowerAddressFirst);
         }
 
-        if (!reportDeadlockingCycles(report, buildLockGraph(edgesByFirstLock), facts,
-                                     addressOrdered))
+        if (!reportDeadlockingCycles(report, buildLockGraph(edgesByFirstLock), facts))
         {
             report.notices.push_back(AnalysisNotice{
                 .id = "cycle-search-limit-reached",

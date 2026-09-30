@@ -1637,6 +1637,49 @@ namespace
              .intent = "orders that cannot run together, and locks that lead nowhere back, keep "
                        "the search within its bound: no notice (#127)",
              .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_entered_and_left_no_diagnostic.c",
+             .intent = "an address-ordered pair other orders both enter and leave closes no cycle "
+                       "of its own (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_left_only_no_diagnostic.c",
+             .intent = "an address-ordered pair other orders only leave (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_entered_and_left_direct_no_diagnostic.c",
+             .intent = "the same pair entered and left, each thread locking it by address itself "
+                       "(#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_ring_through_address_ordered_pair.c",
+             .intent = "a ring through an address-ordered pair is reported, the pair alone is not "
+                       "(#138)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_ring_through_address_ordered_pair_other_names.c",
+             .intent = "the same ring, other lock names: the search starts from its third lock "
+                       "(#138)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_and_order_before_spawn_no_diagnostic.c",
+             .intent = "an order closing a larger cycle before any worker exists keeps no report "
+                       "on the pair (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_three_locks_each_pair_by_address_no_diagnostic.c",
+             .intent = "three locks, each pair taken lower address first by its own worker: no "
+                       "ring closes (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_and_fixed_order_before_spawn_no_diagnostic.c",
+             .intent = "an address-ordered choice stays rejected when a fixed order also joins the "
+                       "pair (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_order_on_one_path_fixed_order_reversed.c",
+             .intent = "a cycle's order taken by address, followed by a fixed one, still deadlocks "
+                       "(#138)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_two_pairs_by_address_third_fixed.c",
+             .intent = "a ring whose orders are all taken by address but one still deadlocks "
+                       "(#138)",
+             .deadlock = 1},
 
             // --- imported deadlock fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/deadlock/cpp_deadlock_self_lock.cpp",
