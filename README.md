@@ -383,6 +383,14 @@ shared accesses, the three count fields are **absent** from each entry rather th
 rendered as zero — zero means the accesses were examined and none was found, which is a
 different statement. `--rules=all` reports everything.
 
+An analysis that stops at a limit before it has finished adds a notice to the report: an
+identifier, the rule concerned and a message. The lock-order cycle search gives
+`cycle-search-limit-reached` when it stops before judging every cycle: a deadlock it did not
+reach is then missing, not disproved. A notice is no diagnostic and counts in no summary. The
+JSON report lists notices in a `notices` array, **absent** when there is none; SARIF carries
+them as `toolExecutionNotifications` of the run's invocation, and the human output as a
+`Notice:` block before the summary.
+
 ## Trust Model for `--compile-arg` / `extraCompileArgs`
 
 `extraCompileArgs` are forwarded as raw compiler arguments to `compilerlib::compile(...)`

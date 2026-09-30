@@ -328,6 +328,8 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 moduleReport.diagnostics.insert(moduleReport.diagnostics.end(),
                                                 partial.diagnostics.begin(),
                                                 partial.diagnostics.end());
+                moduleReport.notices.insert(moduleReport.notices.end(), partial.notices.begin(),
+                                            partial.notices.end());
             };
 
             if (options_.isEnabled(RuleId::DataRaceGlobal))
@@ -364,6 +366,16 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
             {
                 if (reportedDiagnostics.insert(diagnosticKey(diagnostic)).second)
                     analysis.report.diagnostics.push_back(std::move(diagnostic));
+            }
+
+            // Units that reached the same limit say the same thing: it is said once.
+            for (AnalysisNotice& notice : moduleReport.notices)
+            {
+                if (std::find(analysis.report.notices.begin(), analysis.report.notices.end(),
+                              notice) == analysis.report.notices.end())
+                {
+                    analysis.report.notices.push_back(std::move(notice));
+                }
             }
 
             analysis.report.functions.insert(analysis.report.functions.end(),

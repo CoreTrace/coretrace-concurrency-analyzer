@@ -141,11 +141,25 @@ namespace ctrace::concurrency
         bool hasDiagnostics = false;
     };
 
+    /// A limit an analysis reached, which may leave findings of `ruleId` out of the report. It
+    /// is no finding: it counts in no summary and gates no exit code.
+    struct AnalysisNotice
+    {
+        /// Stable identifier for consumers to match on, e.g. "cycle-search-limit-reached".
+        std::string id;
+        RuleId ruleId = RuleId::DataRaceGlobal;
+        std::string message;
+
+        bool operator==(const AnalysisNotice&) const = default;
+    };
+
     struct DiagnosticReport
     {
         std::vector<FunctionSummary> functions;
         std::vector<Diagnostic> diagnostics;
         DiagnosticSummary diagnosticsSummary;
+        /// Empty when every analysis finished. The JSON report then has no `notices` key.
+        std::vector<AnalysisNotice> notices;
     };
 
     using AnalysisReport = DiagnosticReport;

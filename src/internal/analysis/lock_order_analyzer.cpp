@@ -178,8 +178,7 @@ namespace ctrace::concurrency::internal::analysis
         /// cycle but their own, and so do two locks every order out of which goes to the other
         /// that way. No layout closes that cycle: each of its orders is taken only when its first
         /// lock is the lower. Otherwise an order entering one of the two and an order leaving one
-        /// may close another cycle through them, which the search might only have reached through
-        /// this pair.
+        /// may close another cycle through them, and the pair is reported.
         bool isAddressOrderedPair(const std::vector<const LockOrderFact*>& cycle,
                                   const AddressOrderedNeighbours& addressOrdered)
         {
@@ -200,44 +199,180 @@ namespace ctrace::concurrency::internal::analysis
             return stream.str();
         }
 
-        void reportCycleIfDeadlocking(DiagnosticReport& report,
-                                      const std::vector<const LockOrderFact*>& path,
-                                      const std::string& cycleStartLock, const TUFacts& facts,
-                                      const AddressOrderedNeighbours& addressOrdered,
-                                      std::unordered_set<std::string>& emittedCycleKeys)
+        using EdgesByFirstLock = std::unordered_map<std::string, std::vector<const LockOrderFact*>>;
+
+        /// The orders from one lock to another, in the order they were collected.
+        struct LockSuccessor
         {
-            const auto cycleBegin =
-                std::find_if(path.begin(), path.end(), [&](const LockOrderFact* edge)
-                             { return edge->firstLockId == cycleStartLock; });
-            if (cycleBegin == path.end())
-                return;
+            std::size_t lock = 0;
+            std::vector<const LockOrderFact*> orders;
+        };
 
-            const std::vector<const LockOrderFact*> cycle(cycleBegin, path.end());
-            if (cycle.size() < 2)
-                return;
+        /// The successors of each lock, locks being numbered from 0.
+        using LockGraph = std::vector<std::vector<LockSuccessor>>;
 
-            // Every acquisition in the cycle must be able to run in parallel with every other one;
-            // otherwise no set of threads can hold the locks simultaneously.
-            for (std::size_t lhsIndex = 0; lhsIndex < cycle.size(); ++lhsIndex)
+        /// Numbers the locks in the order a depth-first walk first reaches them, starting from the
+        /// locks in name order and following orders in the order they were collected. A cycle is
+        /// reported from its lowest-numbered lock, the first of its locks that walk reaches.
+        LockGraph buildLockGraph(const EdgesByFirstLock& edgesByFirstLock)
+        {
+            std::unordered_map<std::string, std::size_t> numbers;
+            const std::function<void(const std::string&)> number = [&](const std::string& lockId)
             {
-                for (std::size_t rhsIndex = lhsIndex + 1; rhsIndex < cycle.size(); ++rhsIndex)
+                if (!numbers.try_emplace(lockId, numbers.size()).second)
+                    return;
+
+                const auto edgesIt = edgesByFirstLock.find(lockId);
+                if (edgesIt == edgesByFirstLock.end())
+                    return;
+                for (const LockOrderFact* edge : edgesIt->second)
+                    number(edge->secondLockId);
+            };
+
+            std::vector<std::string> orderedRoots;
+            orderedRoots.reserve(edgesByFirstLock.size());
+            for (const auto& [lockId, edges] : edgesByFirstLock)
+            {
+                (void)edges;
+                orderedRoots.push_back(lockId);
+            }
+            std::sort(orderedRoots.begin(), orderedRoots.end());
+            for (const std::string& lockId : orderedRoots)
+                number(lockId);
+
+            LockGraph graph(numbers.size());
+            for (const auto& [lockId, edges] : edgesByFirstLock)
+            {
+                std::vector<LockSuccessor>& successors = graph[numbers.at(lockId)];
+                std::unordered_map<std::size_t, std::size_t> positions;
+                for (const LockOrderFact* edge : edges)
                 {
-                    if (!mayHappenInParallel(*cycle[lhsIndex], entriesFor(*cycle[lhsIndex], facts),
-                                             *cycle[rhsIndex], entriesFor(*cycle[rhsIndex], facts),
-                                             facts))
-                    {
-                        return;
-                    }
+                    const std::size_t target = numbers.at(edge->secondLockId);
+                    const auto [position, inserted] =
+                        positions.try_emplace(target, successors.size());
+                    if (inserted)
+                        successors.push_back(LockSuccessor{.lock = target});
+                    successors[position->second].orders.push_back(edge);
                 }
             }
+            return graph;
+        }
 
-            if (hasCommonGateLock(cycle) || isAddressOrderedPair(cycle, addressOrdered))
-                return;
+        /// Every acquisition in the cycle must be able to run in parallel with every other one;
+        /// otherwise no set of threads can hold the locks simultaneously.
+        bool mayHappenInParallelWithEach(const LockOrderFact& order,
+                                         const std::vector<const LockOrderFact*>& taken,
+                                         const TUFacts& facts)
+        {
+            for (const LockOrderFact* other : taken)
+            {
+                if (!mayHappenInParallel(*other, entriesFor(*other, facts), order,
+                                         entriesFor(order, facts), facts))
+                {
+                    return false;
+                }
+            }
+            return true;
+        }
 
-            if (!emittedCycleKeys.insert(cycleKey(cycle)).second)
-                return;
+        /// Orders the walk from one lock may examine. A dense lock hierarchy that a few orders
+        /// invert closes more cycles than a report can list: past this many, the walk moves on to
+        /// the next lock. A cycle through this one may then go unreported, and the report says
+        /// the search is incomplete.
+        constexpr std::size_t kMaxOrdersExaminedPerLock = std::size_t{1} << 16;
 
-            emitCycleDiagnostic(report, cycle, facts);
+        /// Reports each elementary cycle of `graph` once, when some choice of one order between
+        /// each two successive locks may deadlock. Two locks may be joined by several orders taken
+        /// in different contexts: one taken before a thread exists, or under a gate, must hide
+        /// none that is not.
+        ///
+        /// From each lock `start` in turn, a depth-first walk follows orders toward the locks
+        /// numbered after `start` that lead back to it, and closes a cycle at each order into it.
+        /// It takes an order only when that order may run in parallel with each one already on
+        /// the path: no cycle extending the path could deadlock otherwise. Orders are tried in the
+        /// order they were collected, so a cycle is reported with the first choice that passes.
+        ///
+        /// False when the walk from some lock stopped at the bound.
+        bool reportDeadlockingCycles(DiagnosticReport& report, const LockGraph& graph,
+                                     const TUFacts& facts,
+                                     const AddressOrderedNeighbours& addressOrdered)
+        {
+            std::vector<std::vector<std::size_t>> predecessors(graph.size());
+            for (std::size_t lock = 0; lock < graph.size(); ++lock)
+            {
+                for (const LockSuccessor& successor : graph[lock])
+                    predecessors[successor.lock].push_back(lock);
+            }
+
+            std::size_t start = 0;
+            std::vector<bool> leadsToStart(graph.size());
+            std::vector<bool> onPath(graph.size());
+            std::vector<const LockOrderFact*> path;
+            std::unordered_set<std::string> emittedCycleKeys;
+            std::size_t examined = 0;
+
+            // False once the walk from `start` has examined its share of orders.
+            const std::function<bool(std::size_t)> walk = [&](std::size_t lock) -> bool
+            {
+                for (const LockSuccessor& successor : graph[lock])
+                {
+                    const bool closes = successor.lock == start;
+                    if (!closes && (!leadsToStart[successor.lock] || onPath[successor.lock]))
+                        continue;
+
+                    for (const LockOrderFact* order : successor.orders)
+                    {
+                        if (++examined > kMaxOrdersExaminedPerLock)
+                            return false;
+                        if (!mayHappenInParallelWithEach(*order, path, facts))
+                            continue;
+
+                        path.push_back(order);
+                        bool withinShare = true;
+                        if (!closes)
+                        {
+                            onPath[successor.lock] = true;
+                            withinShare = walk(successor.lock);
+                            onPath[successor.lock] = false;
+                        }
+                        else if (!hasCommonGateLock(path) &&
+                                 !isAddressOrderedPair(path, addressOrdered) &&
+                                 emittedCycleKeys.insert(cycleKey(path)).second)
+                        {
+                            emitCycleDiagnostic(report, path, facts);
+                        }
+                        path.pop_back();
+
+                        if (!withinShare)
+                            return false;
+                    }
+                }
+                return true;
+            };
+
+            bool complete = true;
+            for (; start < graph.size(); ++start)
+            {
+                std::fill(leadsToStart.begin(), leadsToStart.end(), false);
+                std::vector<std::size_t> pending{start};
+                while (!pending.empty())
+                {
+                    const std::size_t reached = pending.back();
+                    pending.pop_back();
+                    for (const std::size_t predecessor : predecessors[reached])
+                    {
+                        if (predecessor > start && !leadsToStart[predecessor])
+                        {
+                            leadsToStart[predecessor] = true;
+                            pending.push_back(predecessor);
+                        }
+                    }
+                }
+                examined = 0;
+                if (!walk(start))
+                    complete = false;
+            }
+            return complete;
         }
 
         void emitSelfDeadlockDiagnostic(DiagnosticReport& report, const LockOrderFact& fact)
@@ -257,7 +392,6 @@ namespace ctrace::concurrency::internal::analysis
     DiagnosticReport LockOrderAnalyzer::run(const TUFacts& facts) const
     {
         DiagnosticReport report;
-        std::unordered_set<std::string> emittedCycleKeys;
 
         for (const LockOrderFact& fact : facts.lockOrders)
         {
@@ -271,9 +405,9 @@ namespace ctrace::concurrency::internal::analysis
             emitSelfDeadlockDiagnostic(report, fact);
         }
 
-        // Any cycle in the lock-order graph can deadlock, not only the two-lock inversion. Edges
-        // are grouped by lock pair so that a cycle of any length is found by a depth-first search.
-        std::unordered_map<std::string, std::vector<const LockOrderFact*>> edgesByFirstLock;
+        // Any cycle in the lock-order graph can deadlock, not only the two-lock inversion. Each
+        // elementary cycle is judged once, whatever lock the search reaches it by.
+        EdgesByFirstLock edgesByFirstLock;
         AddressOrderedNeighbours addressOrdered;
         for (const LockOrderFact& fact : facts.lockOrders)
         {
@@ -288,55 +422,15 @@ namespace ctrace::concurrency::internal::analysis
                                         fact.lowerAddressFirst);
         }
 
-        std::vector<const LockOrderFact*> currentPath;
-        std::unordered_set<std::string> onPath;
-        std::unordered_set<std::string> exhausted;
-
-        const std::function<void(const std::string&)> explore =
-            [&](const std::string& lockId) -> void
+        if (!reportDeadlockingCycles(report, buildLockGraph(edgesByFirstLock), facts,
+                                     addressOrdered))
         {
-            onPath.insert(lockId);
-
-            const auto edgesIt = edgesByFirstLock.find(lockId);
-            if (edgesIt != edgesByFirstLock.end())
-            {
-                for (const LockOrderFact* edge : edgesIt->second)
-                {
-                    currentPath.push_back(edge);
-
-                    if (onPath.contains(edge->secondLockId))
-                    {
-                        reportCycleIfDeadlocking(report, currentPath, edge->secondLockId, facts,
-                                                 addressOrdered, emittedCycleKeys);
-                    }
-                    else if (!exhausted.contains(edge->secondLockId))
-                    {
-                        explore(edge->secondLockId);
-                    }
-
-                    currentPath.pop_back();
-                }
-            }
-
-            onPath.erase(lockId);
-            exhausted.insert(lockId);
-        };
-
-        std::vector<std::string> orderedRoots;
-        orderedRoots.reserve(edgesByFirstLock.size());
-        for (const auto& [lockId, edges] : edgesByFirstLock)
-        {
-            (void)edges;
-            orderedRoots.push_back(lockId);
-        }
-        std::sort(orderedRoots.begin(), orderedRoots.end());
-
-        for (const std::string& lockId : orderedRoots)
-        {
-            if (exhausted.contains(lockId))
-                continue;
-
-            explore(lockId);
+            report.notices.push_back(AnalysisNotice{
+                .id = "cycle-search-limit-reached",
+                .ruleId = RuleId::DeadlockLockOrder,
+                .message = "lock-order cycle search incomplete: exploration limit reached; some "
+                           "lock-order cycles may not be reported",
+            });
         }
 
         return report;
