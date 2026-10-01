@@ -47,6 +47,22 @@ namespace ctrace::concurrency::internal::analysis
         return false;
     }
 
+    /// The initial thread executes `rootSide` while one of `otherEntries` is running.
+    template <typename FactType>
+    [[nodiscard]] bool racesWithRootTask(const FactType& rootSide,
+                                         const ThreadEntrySet& otherEntries)
+    {
+        if (!rootSide.inRootTask)
+            return false;
+
+        for (const std::string& entry : otherEntries)
+        {
+            if (rootSide.liveEntries.contains(entry))
+                return true;
+        }
+        return false;
+    }
+
     /// May-happen-in-parallel relation between two program points, described by the entries that
     /// can execute them and, for code on the initial thread, the entries alive at that point.
     /// Two points reached only by the initial thread never race: it executes them in sequence.
@@ -55,16 +71,6 @@ namespace ctrace::concurrency::internal::analysis
                                            const FactType& rhs, const ThreadEntrySet& rhsEntries,
                                            const TUFacts& facts)
     {
-        auto racesWithRootTask = [](const FactType& rootSide, const ThreadEntrySet& otherEntries)
-        {
-            if (!rootSide.inRootTask)
-                return false;
-
-            return std::any_of(otherEntries.begin(), otherEntries.end(),
-                               [&](const std::string& entry)
-                               { return rootSide.liveEntries.contains(entry); });
-        };
-
         // A helper called both from `main` and from a worker races with itself across the two
         // contexts, even though a single thread entry reaches it.
         if (racesWithRootTask(lhs, rhsEntries) || racesWithRootTask(rhs, lhsEntries))
