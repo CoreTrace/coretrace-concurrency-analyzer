@@ -192,6 +192,10 @@ namespace ctrace::concurrency::internal::analysis
         bool inRootTask = false;
         /// Spawned entries already running when a root-task access executes.
         ThreadEntrySet liveEntries;
+        /// The symbol is the object a spawn hands its thread, which only that thread's run of the
+        /// entry reaches: a direct call of the entry reaches what the call passes. A copy of this
+        /// access at a call site keeps the flag, and the object it names.
+        bool boundBySpawn = false;
         std::set<std::string> heldLocks;
         /// Atomic flags whose releasing publication this access happens before, and flags whose
         /// observed publication it happens after. An access before a release and one after the

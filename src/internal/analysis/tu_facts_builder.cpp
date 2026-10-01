@@ -1764,6 +1764,11 @@ namespace ctrace::concurrency::internal::analysis
                     fact.heldLocks = locksOnSharedObject(fact.heldLocks, binding);
                     // A global keeps its own name in the report; other objects have none to show.
                     fact.sharedObject = binding.kind != SharedObjectKind::Global;
+                    // Only the thread the spawn starts reaches this object. The initial thread, or
+                    // another thread, reaches the entry through a direct call, on what that call
+                    // passes, and the call's own binding makes that an access of the caller.
+                    fact.inRootTask = false;
+                    fact.boundBySpawn = true;
                     addConcreteAccess(concreteAccesses, concreteAccessKeys, std::move(fact));
                 }
             }

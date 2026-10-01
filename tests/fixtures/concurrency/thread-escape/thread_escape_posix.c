@@ -38,3 +38,33 @@ int main() {
     printf("Buffer filled up to index: %d\n", buffer_index);
     return 0;
 }
+
+// EXPECT-HUMAN-DIAGNOSTICS-BEGIN
+// Function: add_to_buffer
+// 	severity: ERROR
+// 	ruleId: DataRaceGlobal
+// 	cwe: CWE-362
+// 	symbol: buffer_index
+// 	at line 11, column 9
+// 	[!!!Error] unsynchronized concurrent access to global 'buffer_index'
+// 	     ↳ first access: read at ${REPO_ROOT}/tests/fixtures/concurrency/thread-escape/thread_escape_posix.c:11:9 in add_to_buffer (thread entries: thread_func)
+// 	     ↳ conflicting access: write at ${REPO_ROOT}/tests/fixtures/concurrency/thread-escape/thread_escape_posix.c:13:21 in add_to_buffer (thread entries: thread_func)
+// 	     ↳ possible conflict kinds: read/write
+// 	     ↳ no common recognized lock protects the conflicting accesses
+// 	     ↳ additional conflicting access pairs on this location: 2
+// 	related: Conflicting access -> ${REPO_ROOT}/tests/fixtures/concurrency/thread-escape/thread_escape_posix.c:13:21 in add_to_buffer
+// 	related: Conflicting site -> ${REPO_ROOT}/tests/fixtures/concurrency/thread-escape/thread_escape_posix.c:12:23 in add_to_buffer
+//
+// Function: add_to_buffer
+// 	severity: ERROR
+// 	ruleId: DataRaceGlobal
+// 	cwe: CWE-362
+// 	symbol: shared_buffer
+// 	at line 12, column 37
+// 	[!!!Error] unsynchronized concurrent access to global 'shared_buffer'
+// 	     ↳ first access: write at ${REPO_ROOT}/tests/fixtures/concurrency/thread-escape/thread_escape_posix.c:12:37 in add_to_buffer (thread entries: thread_func)
+// 	     ↳ conflicting access: write at ${REPO_ROOT}/tests/fixtures/concurrency/thread-escape/thread_escape_posix.c:12:37 in add_to_buffer (thread entries: thread_func)
+// 	     ↳ possible conflict kinds: write/write
+// 	     ↳ no common recognized lock protects the conflicting accesses
+// 	related: Conflicting access -> ${REPO_ROOT}/tests/fixtures/concurrency/thread-escape/thread_escape_posix.c:12:37 in add_to_buffer
+// EXPECT-HUMAN-DIAGNOSTICS-END

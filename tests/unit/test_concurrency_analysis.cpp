@@ -1608,8 +1608,109 @@ namespace
              .intent = "sibling mutexes are distinct locks, so the field is unprotected",
              .dataRace = 1, .racingSymbol = "state"},
             {.path = "tests/fixtures/concurrency/thread-escape/thread_escape_posix.c",
-             .intent = "a helper called from main and from a worker races with itself",
-             .dataRace = 1, .racingSymbol = "buffer_index"},
+             .intent = "a helper called from main and from a worker races with itself, on the "
+                       "index and on the element it writes (#155)",
+             .dataRace = 2, .racingSymbol = "buffer_index"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_from_main_and_thread.c",
+             .intent = "a helper's single write races between main's call and the thread's (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_write_called_by_main_while_running.c",
+             .intent = "an entry's single write races between main's call and its thread (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_two_calls_below_main.c",
+             .intent = "a helper main reaches two calls down races with the thread's call (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_passes_global_from_main_and_thread.c",
+             .intent = "a global a helper hands on races between main's call and the thread's "
+                       "(#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_increment_from_main_and_thread.c",
+             .intent = "a helper's increment from main and a thread is one race, not two (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_increment_called_by_main_while_running.c",
+             .intent = "an entry's increment called by main while its thread runs is one race "
+                       "(#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_twice_and_called_by_main.c",
+             .intent = "an entry started twice and called by main is one race (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_called_by_main_on_its_thread_object.c",
+             .intent = "the thread's object and the call's argument are two accesses, one race "
+                       "(#155)",
+             .dataRace = 1, .racingSymbol = "result"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_increment_called_by_main_on_its_thread_object.c",
+             .intent = "the accesses bound by the spawn are the thread's alone, so the "
+                       "increment is one race (#155)",
+             .dataRace = 1, .racingSymbol = "result"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_from_two_threads.c",
+             .intent = "a helper's single write races between two different threads (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_from_two_threads_after_main_call.c",
+             .intent = "two threads race on a helper main called before starting them (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_from_thread_and_its_child.c",
+             .intent = "a thread and the child it runs beside race on a helper's write (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_write_called_by_other_thread.c",
+             .intent = "an entry's single write races between its thread and another thread's "
+                       "call (#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_called_by_other_thread_on_its_thread_object.c",
+             .intent = "the access bound by the spawn is its thread's alone, even where another "
+                       "thread calls the entry: one race (#155)",
+             .dataRace = 1, .racingSymbol = "a"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_called_on_other_object_by_main_and_thread.c",
+             .intent = "a copy of the spawn's access at a call stays the thread's: only the "
+                       "calls' own object races (#155)",
+             .dataRace = 1, .racingSymbol = "b"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_opaque_call_from_two_threads_beside_observed_race.c",
+             .intent = "an inferred effect compared with itself is noise beside a seen race "
+                       "(#155)",
+             .dataRace = 1, .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_from_main_after_join_no_fp.c",
+             .intent = "main's call after the join is ordered after the thread's (#155)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_write_called_by_main_after_join_no_fp.c",
+             .intent = "main's call of the entry after the join is ordered after its thread "
+                       "(#155)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_from_main_before_spawn_no_fp.c",
+             .intent = "main's call before the spawn is ordered before the thread's (#155)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_under_lock_from_main_and_thread_no_fp.c",
+             .intent = "a helper's write under its own lock is guarded in both callers (#155)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_read_from_main_and_thread_no_fp.c",
+             .intent = "a helper's single read races with nothing (#155)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_atomic_store_from_main_and_thread_no_fp.c",
+             .intent = "a helper's atomic store never races with itself (#155)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_from_sequenced_threads_no_fp.c",
+             .intent = "a join between two threads orders their calls of a helper (#155)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_write_from_two_threads_under_lock_no_fp.c",
+             .intent = "two threads calling a helper under one lock are ordered (#155)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_read_from_two_threads_no_fp.c",
+             .intent = "a helper's single read races with nothing across threads (#155)"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_lambda_trampoline_thread_entry.cpp",
              .intent = "a captureless lambda converted to a function pointer is a thread entry",

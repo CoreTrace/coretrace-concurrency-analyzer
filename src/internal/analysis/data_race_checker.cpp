@@ -165,6 +165,31 @@ namespace ctrace::concurrency::internal::analysis
             return !sameSourceLocation(access.userLocation, access.loweredLocation);
         }
 
+        /// An access of a function several contexts reach stands for its run in each of them, and
+        /// two of those runs conflict when they may overlap: the initial thread's while a thread
+        /// reaching it is running, or those of two different threads. One entry started more
+        /// than once is left to the self-concurrent report, which describes it as such. An access
+        /// bound by a spawn has one run only, the spawned thread's, whatever else reaches it.
+        bool racesWithItself(const AccessFact& access, const EntrySet& entries,
+                             const TUFacts& facts)
+        {
+            if (access.boundBySpawn)
+                return false;
+
+            if (racesWithRootTask(access, entries))
+                return true;
+
+            for (const std::string& lhsEntry : entries)
+            {
+                for (const std::string& rhsEntry : entries)
+                {
+                    if (lhsEntry < rhsEntry && mayRunConcurrently({lhsEntry}, {rhsEntry}, facts))
+                        return true;
+                }
+            }
+            return false;
+        }
+
         bool shareSelfConcurrentEntry(const EntrySet& lhsEntries, const EntrySet& rhsEntries,
                                       const TUFacts& facts)
         {
@@ -507,6 +532,39 @@ namespace ctrace::concurrency::internal::analysis
                         conflict.relatedSites.emplace_back("Conflicting site", site->userLocation);
                     }
                 }
+            }
+
+            // An access compared with itself: two of its runs that may overlap. It comes after the
+            // pairs of two accesses, and adds only a location and contexts they leave unreported:
+            // where they report one, they already describe the race it would.
+            for (const AccessFact* access : accesses)
+            {
+                if (access->kind != AccessKind::Write || access->isAtomic)
+                    continue;
+
+                const EntrySet& entries = entriesOf(*access);
+                if (!racesWithItself(*access, entries, facts))
+                    continue;
+
+                if (shareRecognizedLock(*access, *access))
+                    continue;
+
+                const bool isPrecise = !access->coarseCallEffect && !access->guessedIdentity;
+                if (!isPrecise && preciseConflictSymbols.contains(access->symbol))
+                    continue;
+
+                const auto [it, isNewLocation] = conflictsByLocation.try_emplace(
+                    conflictLocationKey(*access, *access, entries, entries));
+                if (!isNewLocation)
+                    continue;
+
+                LocationConflict& conflict = it->second;
+                conflict.lhs = access;
+                conflict.rhs = access;
+                conflict.confidence = inferConfidence(*access);
+                conflict.isWriteWrite = true;
+                conflict.isPrecise = isPrecise;
+                conflict.showsLoweredOrigin = hasDistinctLoweredLocation(*access);
             }
 
             for (auto& [locationKey, conflict] : conflictsByLocation)
