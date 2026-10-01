@@ -349,6 +349,14 @@ namespace ctrace::concurrency::internal::analysis
 
         using ThreadInstances = std::set<ThreadInstance>;
 
+        ThreadEntrySet entriesOf(const ThreadInstances& instances)
+        {
+            ThreadEntrySet entries;
+            for (const ThreadInstance& instance : instances)
+                entries.insert(instance.entryFunctionId);
+            return entries;
+        }
+
         std::vector<const llvm::Instruction*> normalReturns(const llvm::Function& function,
                                                             const llvm::DominatorTree& dominators)
         {
@@ -538,11 +546,21 @@ namespace ctrace::concurrency::internal::analysis
             [[nodiscard]] ThreadInstances liveAt(const llvm::Function& function,
                                                  const llvm::Instruction& point) const
             {
-                ThreadInstances live;
+                ThreadInstances live = startedAt(function, point);
+                live.merge(inheritedAt(function, point));
+                return live;
+            }
+
+            /// The threads running at `point` that `function` started, itself or through a call
+            /// it made: no caller brings them in.
+            [[nodiscard]] ThreadInstances startedAt(const llvm::Function& function,
+                                                    const llvm::Instruction& point) const
+            {
+                ThreadInstances started;
                 for (const SpawnSite& spawn : sitesOf(function).spawns)
                 {
                     if (spawnIsLiveAt(function, spawn, point))
-                        live.insert(
+                        started.insert(
                             ThreadInstance{spawn.entryFunctionId, spawnHandle(function, spawn)});
                 }
 
@@ -556,10 +574,17 @@ namespace ctrace::concurrency::internal::analysis
                             continue;
                         if (!instance.handle.has_value() ||
                             !joinedAt(function, *instance.handle, point, call))
-                            live.insert(instance);
+                            started.insert(instance);
                     }
                 }
+                return started;
+            }
 
+            /// The threads running where `function` was called that are still running at `point`.
+            [[nodiscard]] ThreadInstances inheritedAt(const llvm::Function& function,
+                                                      const llvm::Instruction& point) const
+            {
+                ThreadInstances live;
                 if (const auto inherited = inherited_.find(&function);
                     inherited != inherited_.end())
                 {
@@ -1002,13 +1027,14 @@ namespace ctrace::concurrency::internal::analysis
 
                 for (const llvm::Instruction& instruction : block)
                 {
-                    const ThreadInstances live = running.liveAt(function, instruction);
-                    if (live.empty())
-                        continue;
-
-                    ThreadEntrySet& entries = result.liveEntriesAtInstruction[&instruction];
-                    for (const ThreadInstance& instance : live)
-                        entries.insert(instance.entryFunctionId);
+                    const ThreadInstances started = running.startedAt(function, instruction);
+                    ThreadInstances live = running.inheritedAt(function, instruction);
+                    live.insert(started.begin(), started.end());
+                    if (!started.empty())
+                        result.startedEntriesAtInstruction.emplace(&instruction,
+                                                                   entriesOf(started));
+                    if (!live.empty())
+                        result.liveEntriesAtInstruction.emplace(&instruction, entriesOf(live));
                 }
             }
         }
