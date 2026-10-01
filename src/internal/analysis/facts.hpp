@@ -116,6 +116,19 @@ namespace ctrace::concurrency::internal::analysis
         }
     };
 
+    /// `offset + scale * parameter`, over one integer parameter of the enclosing function, or
+    /// the constant `offset` when there is none.
+    struct LinearIndex
+    {
+        std::optional<unsigned> parameter;
+        std::int64_t scale = 0;
+        std::int64_t offset = 0;
+        /// Moved around a call cycle, so the place is unknown whatever the parameter holds, as
+        /// for a pointer the cycle moves (#118). The access still waits on `parameter`: the call
+        /// entering the cycle makes it an access of its own caller.
+        bool widened = false;
+    };
+
     struct RootBinding
     {
         RootBindingKind kind = RootBindingKind::Global;
@@ -127,6 +140,10 @@ namespace ctrace::concurrency::internal::analysis
         /// full. For a pointer to an array element it is the whole array, starting before
         /// `region`.
         MemoryRegion designated;
+        /// The byte offset `region` starts at, when an integer parameter of the function picks
+        /// it, as for `slots[index]`. Until a call supplies the parameter, `region` itself has an
+        /// unknown offset, which is what everything reading only `region` sees.
+        std::optional<LinearIndex> index;
 
         [[nodiscard]] static RootBinding global(std::string globalSymbol, MemoryRegion region = {})
         {

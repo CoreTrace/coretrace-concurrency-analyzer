@@ -163,11 +163,23 @@ namespace ctrace::concurrency::internal::analysis
                                                                unsigned argumentIndex,
                                                                const RootBinding& object);
     /// Resolves the tracked root of a pointer: where in it the pointer points, with `byteSize` as
-    /// the extent (zero when unknown), and the object the pointer designates.
+    /// the extent (zero when unknown), and the object the pointer designates. When an integer
+    /// parameter of the function picks the place, that is recorded as its `index`.
     [[nodiscard]] std::optional<RootBinding>
     resolveTrackedRoot(const llvm::Value& value, const llvm::DataLayout* layout,
                        std::uint64_t byteSize,
                        const ProgramDefinedGlobals* programDefined = nullptr);
+    /// An integer as the enclosing function receives or fixes it: a non-negative constant, or
+    /// one of its integer parameters, including through the local variable unoptimized code keeps
+    /// it in and a sign or zero extension. Anything the function computes from it is left unknown.
+    [[nodiscard]] std::optional<LinearIndex> resolveLinearIndex(const llvm::Value& value);
+    /// An integer parameter of the enclosing function an integer is computed from, through local
+    /// variables, conversions and arithmetic; empty when it comes from none.
+    [[nodiscard]] std::optional<unsigned> integerSourceParameter(const llvm::Value& value);
+    /// `outer` with its parameter replaced by `inner`; empty when the arithmetic overflows.
+    /// Widened as soon as either is.
+    [[nodiscard]] std::optional<LinearIndex> substituteLinearIndex(const LinearIndex& outer,
+                                                                   const LinearIndex& inner);
     [[nodiscard]] std::optional<AliasResolvedGlobal>
     resolveAliasGlobal(const llvm::Instruction& accessInstruction, llvm::AAResults& aaResults,
                        const std::vector<const llvm::GlobalVariable*>& candidateGlobals,

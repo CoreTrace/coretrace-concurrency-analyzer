@@ -58,6 +58,9 @@ namespace ctrace::concurrency::internal::analysis
             std::string callerFunctionId;
             std::string calleeFunctionId;
             std::unordered_map<unsigned, RootBinding> argumentBindings;
+            /// What the call passes for the integer parameters it knows: a constant, or one of
+            /// the caller's own parameters. An integer argument missing here is unknown.
+            std::unordered_map<unsigned, LinearIndex> indexArguments;
             SourceLocation callsiteLocation;
             std::set<std::string> callsiteHeldLocks;
             bool callerInRootTask = false;
@@ -71,10 +74,20 @@ namespace ctrace::concurrency::internal::analysis
 
         std::string rootBindingKey(const RootBinding& binding)
         {
-            if (binding.kind == RootBindingKind::Global)
-                return "global:" + binding.symbol + binding.region.suffix();
+            std::string index;
+            if (binding.index.has_value())
+            {
+                index = binding.index->widened ? std::string("@*")
+                                               : "@" + std::to_string(binding.index->offset) + "+" +
+                                                     std::to_string(binding.index->scale);
+                index += "*arg" + std::to_string(binding.index->parameter.value_or(0));
+            }
 
-            return "argument:" + std::to_string(binding.argumentIndex) + binding.region.suffix();
+            if (binding.kind == RootBindingKind::Global)
+                return "global:" + binding.symbol + binding.region.suffix() + index;
+
+            return "argument:" + std::to_string(binding.argumentIndex) + binding.region.suffix() +
+                   index;
         }
 
         std::string accessFactKey(const AccessFact& fact)
@@ -737,6 +750,88 @@ namespace ctrace::concurrency::internal::analysis
             return false;
         }
 
+        /// The object a callee's access reaches, and the place in it, as the caller of `call` sees
+        /// them. A pointer parameter becomes the object the call hands over, and an index
+        /// parameter what the call passes: a constant settles the place, the caller's own
+        /// parameter leaves it waiting on that one, widened or not, and anything else leaves it
+        /// unknown. Empty when the call hands over no object the analysis can name.
+        std::optional<RootBinding> rootAtCall(const ParameterizedAccess& access,
+                                              const DirectCallBinding& call)
+        {
+            // In the callee's global, or relative to the pointer parameter it goes through.
+            MemoryRegion place = access.fact.region;
+            std::optional<LinearIndex> index;
+            if (access.root.index.has_value())
+            {
+                if (const auto argumentIt = call.indexArguments.find(*access.root.index->parameter);
+                    argumentIt != call.indexArguments.end())
+                {
+                    index = substituteLinearIndex(*access.root.index, argumentIt->second);
+                }
+
+                if (index.has_value() && !index->parameter.has_value())
+                {
+                    if (!index->widened)
+                    {
+                        place.hasKnownOffset = true;
+                        place.byteOffset = index->offset;
+                    }
+                    index.reset();
+                }
+            }
+
+            if (access.root.kind == RootBindingKind::Global)
+            {
+                RootBinding root = access.root;
+                root.region = place;
+                root.index = index;
+                return root;
+            }
+
+            const auto bindingIt = call.argumentBindings.find(access.root.argumentIndex);
+            if (bindingIt == call.argumentBindings.end())
+                return std::nullopt;
+
+            // The callee's place is relative to the argument, which the call site itself may
+            // already have indexed into. An index the caller used there is not followed.
+            const RootBinding& object = bindingIt->second;
+            RootBinding root = object;
+            root.region = place.rebasedOn(object.region, object.designated);
+            root.index.reset();
+            if (index.has_value() && object.region.hasKnownOffset)
+            {
+                root.index = substituteLinearIndex(
+                    LinearIndex{.scale = 1, .offset = object.region.byteOffset}, *index);
+            }
+            return root;
+        }
+
+        /// The caller's own parameter, handed on unchanged: the one index a call may carry around
+        /// a cycle, since it names the same value every round.
+        bool handsOnParameter(const std::optional<LinearIndex>& index)
+        {
+            return index.has_value() && index->parameter.has_value() && index->scale == 1 &&
+                   index->offset == 0;
+        }
+
+        /// Any other index a call closing a cycle passes would move the place every round, as a
+        /// pointer the cycle moves would (#118): it is widened. The access keeps waiting on an
+        /// integer parameter of the caller, the one the index comes from or else the one in the
+        /// same position, so that the call entering the cycle makes it an access of its own
+        /// caller, at an unknown place. Empty when the caller has neither.
+        std::optional<LinearIndex> widenedIndexArgument(const llvm::Value& operand,
+                                                        unsigned position,
+                                                        const llvm::CallBase& call)
+        {
+            if (const std::optional<unsigned> source = integerSourceParameter(operand))
+                return LinearIndex{.parameter = source, .widened = true};
+
+            const llvm::Function& caller = *call.getFunction();
+            if (position < caller.arg_size() && caller.getArg(position)->getType()->isIntegerTy())
+                return LinearIndex{.parameter = position, .widened = true};
+            return std::nullopt;
+        }
+
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
@@ -766,10 +861,23 @@ namespace ctrace::concurrency::internal::analysis
                     binding.callsiteHeldLocks = heldLocksIt->second;
                 }
 
+                // A call passing an integer instantiates the accesses its callee places with it
+                // even when it passes nothing else, if only at an unknown place.
+                bool passesInteger = false;
                 for (unsigned argumentIndex = 0; argumentIndex < site.call->arg_size();
                      ++argumentIndex)
                 {
                     const llvm::Value& operand = *site.call->getArgOperand(argumentIndex);
+                    if (operand.getType()->isIntegerTy())
+                    {
+                        passesInteger = true;
+                        std::optional<LinearIndex> index = resolveLinearIndex(operand);
+                        if (cycleCalls.contains(site.call) && !handsOnParameter(index))
+                            index = widenedIndexArgument(operand, argumentIndex, *site.call);
+                        if (index.has_value())
+                            binding.indexArguments.emplace(argumentIndex, *index);
+                    }
+
                     // Resolved against the layout, like the accesses themselves: without it every
                     // indexing step reads as an unknown offset, and a member handed to a helper
                     // would stand for the whole object the helper's accesses are projected onto.
@@ -795,7 +903,7 @@ namespace ctrace::concurrency::internal::analysis
                         binding.argumentBindings.emplace(argumentIndex, *root);
                 }
 
-                if (!binding.argumentBindings.empty())
+                if (!binding.argumentBindings.empty() || passesInteger)
                     bindings.push_back(std::move(binding));
             }
 
@@ -1469,6 +1577,32 @@ namespace ctrace::concurrency::internal::analysis
         if (selection.weakPublications)
             facts.weakPublications = std::move(publications.weakPublications);
 
+        // An access to a global whose place waits on an index is placed at each call passing it.
+        // A function some run of which no call of this unit starts, a thread's or main's, gets no
+        // index for that run: the access stays in the function, at an unknown place that covers
+        // every run, and is placed at none of its calls, where it would be counted twice.
+        std::unordered_set<std::string> calledFunctionIds;
+        for (const DirectCallSite& site : directCallSites)
+            calledFunctionIds.insert(site.calleeFunctionId);
+        auto addSummary = [&](const std::string& functionKey, ParameterizedAccess access)
+        {
+            if (access.root.kind != RootBindingKind::Global ||
+                (calledFunctionIds.contains(functionKey) &&
+                 !facts.entryConcurrency.contains(functionKey)))
+            {
+                return addParameterizedAccess(summariesByFunction, summaryKeysByFunction,
+                                              functionKey, std::move(access));
+            }
+
+            AccessFact unplaced = std::move(access.fact);
+            unplaced.symbol = access.root.symbol;
+            unplaced.sharedObject =
+                namesObjectSharedWithThread(unplaced.symbol, sharedObjectIds, localObjectIds);
+            unplaced.allowCallsiteProjection = false;
+            addConcreteAccess(concreteAccesses, concreteAccessKeys, std::move(unplaced));
+            return false;
+        };
+
         for (PendingAccess& pendingAccess : pendingAccesses)
         {
             if (pendingAccess.restatesCalleeAccesses)
@@ -1502,7 +1636,8 @@ namespace ctrace::concurrency::internal::analysis
             pendingAccess.fact.inRootTask =
                 taskConcurrency.rootTaskFunctions.contains(pendingAccess.fact.functionId);
 
-            if (pendingAccess.root.kind == RootBindingKind::Global)
+            if (pendingAccess.root.kind == RootBindingKind::Global &&
+                !pendingAccess.root.index.has_value())
             {
                 pendingAccess.fact.symbol = pendingAccess.root.symbol;
                 pendingAccess.fact.region = pendingAccess.root.region;
@@ -1518,11 +1653,10 @@ namespace ctrace::concurrency::internal::analysis
             const std::string functionKey = pendingAccess.fact.functionId;
             pendingAccess.fact.region = pendingAccess.root.region;
             pendingAccess.fact.allowCallsiteProjection = true;
-            addParameterizedAccess(summariesByFunction, summaryKeysByFunction, functionKey,
-                                   ParameterizedAccess{
-                                       .root = pendingAccess.root,
-                                       .fact = std::move(pendingAccess.fact),
-                                   });
+            addSummary(functionKey, ParameterizedAccess{
+                                        .root = pendingAccess.root,
+                                        .fact = std::move(pendingAccess.fact),
+                                    });
         }
 
         const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
@@ -1543,27 +1677,20 @@ namespace ctrace::concurrency::internal::analysis
                 const std::vector<ParameterizedAccess> calleeSummary = summaryIt->second;
                 for (const ParameterizedAccess& access : calleeSummary)
                 {
-                    if (access.root.kind != RootBindingKind::Argument)
+                    const std::optional<RootBinding> root = rootAtCall(access, callBinding);
+                    if (!root.has_value())
                         continue;
 
-                    const auto bindingIt =
-                        callBinding.argumentBindings.find(access.root.argumentIndex);
-                    if (bindingIt == callBinding.argumentBindings.end())
-                        continue;
-
-                    if (bindingIt->second.kind == RootBindingKind::Global)
+                    if (root->kind == RootBindingKind::Global && !root->index.has_value())
                     {
                         AccessFact concrete = access.fact;
                         concrete.functionId = callBinding.callerFunctionId;
-                        concrete.symbol = bindingIt->second.symbol;
+                        concrete.symbol = root->symbol;
                         // The binding may name an object a thread holds rather than a global,
                         // and the two are not described the same way to the reader.
                         concrete.sharedObject = namesObjectSharedWithThread(
                             concrete.symbol, sharedObjectIds, localObjectIds);
-                        // The callee's region is relative to the argument, which the call site
-                        // itself may already have indexed into.
-                        concrete.region = access.fact.region.rebasedOn(
-                            bindingIt->second.region, bindingIt->second.designated);
+                        concrete.region = root->region;
                         concrete.heldLocks =
                             mergeHeldLocks(locksAtCallSite(concrete.heldLocks, callBinding),
                                            callBinding.callsiteHeldLocks);
@@ -1583,11 +1710,9 @@ namespace ctrace::concurrency::internal::analysis
                     }
 
                     ParameterizedAccess propagatedAccess{
-                        .root = bindingIt->second,
+                        .root = *root,
                         .fact = access.fact,
                     };
-                    propagatedAccess.root.region = access.fact.region.rebasedOn(
-                        bindingIt->second.region, bindingIt->second.designated);
                     propagatedAccess.fact.functionId = callBinding.callerFunctionId;
                     propagatedAccess.fact.region = propagatedAccess.root.region;
                     propagatedAccess.fact.heldLocks = mergeHeldLocks(
@@ -1600,10 +1725,9 @@ namespace ctrace::concurrency::internal::analysis
                         propagatedAccess.fact.userLocation = callBinding.callsiteLocation;
                     }
 
-                    changed = addParameterizedAccess(summariesByFunction, summaryKeysByFunction,
-                                                     callBinding.callerFunctionId,
-                                                     std::move(propagatedAccess)) ||
-                              changed;
+                    changed =
+                        addSummary(callBinding.callerFunctionId, std::move(propagatedAccess)) ||
+                        changed;
                 }
             }
         }
@@ -1653,6 +1777,11 @@ namespace ctrace::concurrency::internal::analysis
             const std::vector<AccessFact> currentConcreteAccesses = concreteAccesses;
             for (const DirectCallBinding& callBinding : directCallBindings)
             {
+                // Only the calls that hand their callee an object: one bound for its integers
+                // alone is here to place the accesses those integers index, nothing else.
+                if (callBinding.argumentBindings.empty())
+                    continue;
+
                 for (const AccessFact& access : currentConcreteAccesses)
                 {
                     if (access.functionId != callBinding.calleeFunctionId)

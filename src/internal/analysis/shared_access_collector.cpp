@@ -193,6 +193,9 @@ namespace ctrace::concurrency::internal::analysis
             {
                 RootBinding effectRoot = root;
                 effectRoot.region = region;
+                // The region was placed without the pointer's index, as the whole object or at an
+                // unknown place: the index does not describe it.
+                effectRoot.index.reset();
                 const std::string key = callEffectKey(effectRoot, kind) + (isAtomic ? "|a" : "");
                 if (!seenEffects.insert(key).second)
                     return;
