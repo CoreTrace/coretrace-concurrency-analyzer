@@ -1163,6 +1163,132 @@ namespace
              .intent = "a function returning past a failed join leaves the thread running (#99)",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_checked_no_fp.c",
+             .intent = "a join result kept in a local and tested proves success past the test "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_failed_race.c",
+             .intent = "on the branch where a kept join result reports a failure the thread may "
+                       "still run (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_unread_no_fp.c",
+             .intent = "a join result kept in a local never read is ignored, like an unused one "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_printed_race.c",
+             .intent = "a kept join result read but never tested proves nothing (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_reported_no_fp.c",
+             .intent = "printing a tested join result does not undo what the test proves (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_overwritten_race.c",
+             .intent = "a local written again no longer holds the join result it tests (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_previous_join_status_race.c",
+             .intent = "a kept join status tested before the next join is that earlier join's "
+                       "(#121)",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_success_no_fp.c",
+             .intent = "a helper returning its join's status is tested like the join (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_failure_race.c",
+             .intent = "on the branch where a helper's join status reports a failure the thread "
+                       "may still run (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_local_helper_join_status_success_no_fp.c",
+             .intent = "a helper returning the status of joining the handle it is given ends that "
+                       "thread where the status reads as success (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_nested_helper_join_status_success_no_fp.c",
+             .intent = "a function returning a helper's join status is tested like the join "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_negated_race.c",
+             .intent = "a helper transforming its join's status is not tested like the join "
+                       "(#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_logged_no_fp.c",
+             .intent = "a helper that also logs its join's status still returns that status "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_recorded_no_fp.c",
+             .intent = "a helper that also records its join's status still returns that status "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_logged_on_failure_no_fp.c",
+             .intent = "a status read back past a branch is still the one the helper kept (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_compared_race.c",
+             .intent = "a helper returning a comparison of its join's status does not return the "
+                       "status (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_failure_swallowed_race.c",
+             .intent = "a helper overwriting its kept status no longer returns it (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_aborting_on_join_status_no_fp.c",
+             .intent = "a function testing a helper's join status before every return joins like "
+                       "the join (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_ignoring_join_status_race.c",
+             .intent = "a function going on past a helper's failed join has not joined (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_failed_local_join_race.c",
+             .intent = "a join proven to cover every return ends a local handle's thread only where "
+                       "it succeeded (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_failed_global_join_race.c",
+             .intent = "the failed-join read with a global handle, which no completion proof "
+                       "covers (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_successful_local_join_no_fp.c",
+             .intent = "past a local handle's successful join the thread has ended (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_local_join_status_reported_no_fp.c",
+             .intent = "a local handle's join status tested, printed and aborted on ends the "
+                       "thread past the test (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_failed_local_join_status_stored_race.c",
+             .intent = "a kept join status reporting a failure leaves a local handle's thread "
+                       "running (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_local_helper_join_status_failure_race.c",
+             .intent = "a helper reporting a failed join has not ended the thread of the handle it "
+                       "was given (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_started_after_failed_local_join_race.c",
+             .intent = "a thread started where joining another failed runs beside it (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_started_after_failed_global_join_race.c",
+             .intent = "the same with the first handle in a global (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_writer_after_join_loop_aborting_on_failure_no_fp.c",
+             .intent = "a join loop that aborts on a failed join ends every thread it joins "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_writer_after_join_loop_ignoring_failure_race.c",
+             .intent = "a join loop going on past a failed join joins every handle but ends "
+                       "nothing (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_writer_after_join_loop_checking_stored_status_no_fp.c",
+             .intent = "a join loop that aborts on a failed kept status ends every thread it joins "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_restarted_in_other_function_race.c",
              .intent = "a join before a restart ends the earlier thread, not the restarted one "
                        "(#99)",
@@ -1778,6 +1904,20 @@ namespace
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_partial_join_loop.c",
              .intent = "a join loop one short of the creation range leaves a worker reading a gone frame",
              .missingJoin = 1,
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_after_failed_join_in_branch.c",
+             .intent = "a join every return passes has not kept the frame alive where it failed (#121)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_aborts_on_failed_join_in_branch_no_fp.c",
+             .intent = "past a join's success on every return the frame outlives the thread (#121)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_by_status_helper_no_fp.c",
+             .intent = "a helper's join status tested before every return keeps the frame alive (#121)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_after_status_helper_failure.c",
+             .intent = "a helper reporting a failed join has not kept the frame alive (#121)",
              .threadArgumentEscape = 1},
 
             {.path = "tests/fixtures/concurrency/thread-escape/std_thread_ref_capture_joined_no_fp.cpp",

@@ -50,58 +50,6 @@ namespace ctrace::concurrency::internal::analysis
         // ponytail: fixed depth; follow recursive structures if deep object graphs need it.
         constexpr std::size_t kMaxHandleSteps = 16;
 
-        /// Where a join has certainly waited for its thread: after a `std::thread::join`, which
-        /// throws otherwise, and after a `pthread_join` whose result is unused; on the branch
-        /// taken when its result, compared with zero, reads as success. A result used any other
-        /// way gives no such place, and the join then ends nothing.
-        struct JoinSuccess
-        {
-            const llvm::Instruction* after = nullptr;
-            const llvm::BasicBlock* branch = nullptr;
-            const llvm::BasicBlock* successor = nullptr;
-
-            /// Dominance, not reachability: the failure branch may rejoin the success one, and an
-            /// invoked join has returned only past its normal edge.
-            [[nodiscard]] bool covers(const llvm::Instruction& point,
-                                      const llvm::DominatorTree& dominators) const
-            {
-                if (after != nullptr)
-                    return after != &point && dominators.dominates(after, &point);
-                return dominators.dominates(llvm::BasicBlockEdge(branch, successor),
-                                            point.getParent());
-            }
-        };
-
-        bool isZero(const llvm::Value* value)
-        {
-            const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
-            return constant != nullptr && constant->isZero();
-        }
-
-        std::optional<JoinSuccess> joinSuccessOf(const llvm::CallBase& join, CallKind kind)
-        {
-            if (kind == CallKind::StdThreadJoin || join.use_empty())
-                return JoinSuccess{.after = &join};
-            if (!join.hasOneUse())
-                return std::nullopt;
-
-            const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(*join.user_begin());
-            if (compare == nullptr || !compare->isEquality() || !compare->hasOneUse())
-                return std::nullopt;
-
-            const llvm::Value* other =
-                compare->getOperand(0) == &join ? compare->getOperand(1) : compare->getOperand(0);
-            const auto* branch = llvm::dyn_cast<llvm::BranchInst>(*compare->user_begin());
-            if (!isZero(other) || branch == nullptr || !branch->isConditional())
-                return std::nullopt;
-
-            const bool successWhenTrue = compare->getPredicate() == llvm::CmpInst::ICMP_EQ;
-            return JoinSuccess{
-                .branch = branch->getParent(),
-                .successor = branch->getSuccessor(successWhenTrue ? 0 : 1),
-            };
-        }
-
         struct SpawnSite
         {
             const llvm::Instruction* instruction = nullptr;
@@ -473,8 +421,8 @@ namespace ctrace::concurrency::internal::analysis
                 if (const auto* call = llvm::dyn_cast<llvm::CallBase>(spawn.instruction))
                 {
                     const auto completion = completions_.find(call);
-                    if (completion != completions_.end() &&
-                        dominators.dominates(completion->second, &point))
+                    if (completion != completions_.end() && completion->second.ended.has_value() &&
+                        completion->second.ended->covers(point, dominators))
                         return false;
                 }
 
@@ -622,6 +570,9 @@ namespace ctrace::concurrency::internal::analysis
                 std::set<std::string> started;
                 /// Handles it joins on every path to a normal return.
                 std::set<std::string> joined;
+                /// Handles it joins, returning that join's status as its own: a call to it is then
+                /// a join whose status is the call's result.
+                std::set<std::string> reported;
             };
 
             struct FunctionThreads
@@ -643,8 +594,8 @@ namespace ctrace::concurrency::internal::analysis
                 return it != functionsById_.end() ? it->second : nullptr;
             }
 
-            /// Summarizes every function, iterated to a fixed point. Neither set depends on the
-            /// other, or on what functions leave running, so both only grow.
+            /// Summarizes every function, iterated to a fixed point. No set depends on what
+            /// functions leave running, and each only grows.
             void summarizeHandles()
             {
                 bool changed = true;
@@ -655,6 +606,15 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         const llvm::DominatorTree& dominators =
                             analyses_.getDominatorTree(*function);
+                        auto onEveryPath = [&](const JoinSuccess& success)
+                        {
+                            for (const llvm::Instruction* exit : data.returns)
+                            {
+                                if (!success.covers(*exit, dominators))
+                                    return false;
+                            }
+                            return true;
+                        };
                         HandleSummary& summary = data.summary;
                         for (const SpawnSite& spawn : data.sites.spawns)
                             changed = summary.started.insert(spawn.handleGroupId).second || changed;
@@ -664,13 +624,12 @@ namespace ctrace::concurrency::internal::analysis
 
                         for (const JoinSite& join : data.sites.joins)
                         {
-                            if (!join.success.has_value() || !isNameableHandle(join.handleGroupId))
+                            if (!isNameableHandle(join.handleGroupId))
                                 continue;
-                            bool onEveryPath = true;
-                            for (const llvm::Instruction* exit : data.returns)
-                                onEveryPath =
-                                    onEveryPath && join.success->covers(*exit, dominators);
-                            if (onEveryPath)
+                            if (returnsResultOf(*join.instruction))
+                                changed =
+                                    summary.reported.insert(join.handleGroupId).second || changed;
+                            if (join.success.has_value() && onEveryPath(*join.success))
                                 changed =
                                     summary.joined.insert(join.handleGroupId).second || changed;
                         }
@@ -689,10 +648,24 @@ namespace ctrace::concurrency::internal::analysis
                                 }
                             }
 
-                            bool onEveryPath = true;
-                            for (const llvm::Instruction* exit : data.returns)
-                                onEveryPath = onEveryPath && dominators.dominates(site->call, exit);
-                            if (!onEveryPath)
+                            // The call is the join it reports, so its result is that join's status.
+                            const std::optional<JoinSuccess> reportedSuccess =
+                                callee.reported.empty()
+                                    ? std::nullopt
+                                    : joinSuccessOf(*site->call, CallKind::PThreadJoin);
+                            for (const std::string& calleeHandle : callee.reported)
+                            {
+                                const std::optional<std::string> handle = handleAtCaller(
+                                    calleeHandle, site->calleeFunctionId, *site->call);
+                                if (!handle.has_value())
+                                    continue;
+                                if (returnsResultOf(*site->call))
+                                    changed = summary.reported.insert(*handle).second || changed;
+                                if (reportedSuccess.has_value() && onEveryPath(*reportedSuccess))
+                                    changed = summary.joined.insert(*handle).second || changed;
+                            }
+
+                            if (!onEveryPath(JoinSuccess{.after = site->call}))
                                 continue;
                             for (const std::string& calleeHandle : callee.joined)
                             {
@@ -708,26 +681,36 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
 
-            /// Calls in `function` after which `handle` has been joined: calls to a function that
-            /// joins what they pass on every path out.
-            [[nodiscard]] const std::vector<const llvm::Instruction*>&
+            /// Calls in `function` that join `handle`, with where they have: after a call to a
+            /// function that joins what it is passed on every path out, and where the caller finds
+            /// the status a call reports successful.
+            [[nodiscard]] const std::vector<std::pair<const llvm::Instruction*, JoinSuccess>>&
             joiningCalls(const llvm::Function& function, const std::string& handle) const
             {
                 const auto key = std::pair{&function, handle};
                 if (const auto cached = joiningCalls_.find(key); cached != joiningCalls_.end())
                     return cached->second;
 
-                std::vector<const llvm::Instruction*> calls;
+                std::vector<std::pair<const llvm::Instruction*, JoinSuccess>> calls;
                 for (const DirectCallSite* site : functions_.at(&function).calls)
                 {
-                    for (const std::string& calleeHandle : summaryOf(*site).joined)
+                    auto passes = [&](const std::set<std::string>& calleeHandles)
                     {
-                        if (handleAtCaller(calleeHandle, site->calleeFunctionId, *site->call) ==
-                            handle)
+                        for (const std::string& calleeHandle : calleeHandles)
                         {
-                            calls.push_back(site->call);
-                            break;
+                            if (handleAtCaller(calleeHandle, site->calleeFunctionId, *site->call) ==
+                                handle)
+                                return true;
                         }
+                        return false;
+                    };
+                    if (passes(summaryOf(*site).joined))
+                        calls.emplace_back(site->call, JoinSuccess{.after = site->call});
+                    else if (passes(summaryOf(*site).reported))
+                    {
+                        if (std::optional<JoinSuccess> success =
+                                joinSuccessOf(*site->call, CallKind::PThreadJoin))
+                            calls.emplace_back(site->call, *success);
                     }
                 }
                 return joiningCalls_.emplace(key, std::move(calls)).first->second;
@@ -742,9 +725,9 @@ namespace ctrace::concurrency::internal::analysis
                                                    const llvm::Instruction* start) const
             {
                 const llvm::DominatorTree& dominators = analyses_.getDominatorTree(function);
-                for (const llvm::Instruction* call : joiningCalls(function, handle))
+                for (const auto& [call, success] : joiningCalls(function, handle))
                 {
-                    if (call != &point && dominators.dominates(call, &point) &&
+                    if (success.covers(point, dominators) &&
                         (start == nullptr || dominators.dominates(start, call)))
                         return true;
                 }
@@ -933,7 +916,7 @@ namespace ctrace::concurrency::internal::analysis
                                std::vector<std::pair<const llvm::Instruction*, ThreadInstance>>>
                 introducedByCalls_;
             mutable std::map<std::pair<const llvm::Function*, std::string>,
-                             std::vector<const llvm::Instruction*>>
+                             std::vector<std::pair<const llvm::Instruction*, JoinSuccess>>>
                 joiningCalls_;
         };
     } // namespace

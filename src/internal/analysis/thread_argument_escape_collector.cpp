@@ -185,7 +185,8 @@ namespace ctrace::concurrency::internal::analysis
                           const llvm::DominatorTree& dominators)
         {
             if (const auto completion = completions.find(&creation);
-                completion != completions.end() && dominators.dominates(completion->second, &point))
+                completion != completions.end() && completion->second.ended.has_value() &&
+                completion->second.ended->covers(point, dominators))
             {
                 return true;
             }
@@ -503,9 +504,11 @@ namespace ctrace::concurrency::internal::analysis
                                                     : kStdThreadCallableOperandIndex));
                 const ResolvedSourceLocations locations = resolveSourceLocations(*creation);
 
+                const auto completion = completions.find(creation);
+                const bool endedBeforeReturning =
+                    completion != completions.end() && completion->second.ended.has_value();
                 const bool escapes =
-                    !completions.contains(creation) &&
-                    escapingLocal(*creation, kind, function) != nullptr &&
+                    !endedBeforeReturning && escapingLocal(*creation, kind, function) != nullptr &&
                     !(handleGroupId.has_value() &&
                       joinPrecedesEveryReturn(function, *handleGroupId, joins, dominatorTree));
                 if (escapes)

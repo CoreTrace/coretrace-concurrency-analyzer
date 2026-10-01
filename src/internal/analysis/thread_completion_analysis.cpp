@@ -57,6 +57,67 @@ namespace ctrace::concurrency::internal::analysis
             return result;
         }
 
+        bool isZero(const llvm::Value* value)
+        {
+            const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+            return constant != nullptr && constant->isZero();
+        }
+
+        /// Where `user` finds that the join succeeded, when it compares `result` with zero for a
+        /// branch and nothing else.
+        std::optional<JoinSuccess> successTestedBy(const llvm::User& user,
+                                                   const llvm::Value& result)
+        {
+            const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(&user);
+            if (compare == nullptr || !compare->isEquality() || !compare->hasOneUse())
+                return std::nullopt;
+
+            const llvm::Value* other =
+                compare->getOperand(0) == &result ? compare->getOperand(1) : compare->getOperand(0);
+            const auto* branch = llvm::dyn_cast<llvm::BranchInst>(*compare->user_begin());
+            if (!isZero(other) || branch == nullptr || !branch->isConditional())
+                return std::nullopt;
+
+            const bool successWhenTrue = compare->getPredicate() == llvm::CmpInst::ICMP_EQ;
+            return JoinSuccess{
+                .branch = branch->getParent(),
+                .successor = branch->getSuccessor(successWhenTrue ? 0 : 1),
+            };
+        }
+
+        /// The local `store` writes to, when that store is its only write and nothing takes its
+        /// address.
+        const llvm::AllocaInst* localWrittenOnlyBy(const llvm::StoreInst& store)
+        {
+            const auto* local = llvm::dyn_cast<llvm::AllocaInst>(store.getPointerOperand());
+            if (local == nullptr)
+                return nullptr;
+            for (const llvm::User* user : local->users())
+            {
+                if (user != &store && !llvm::isa<llvm::LoadInst>(user))
+                    return nullptr;
+            }
+            return local;
+        }
+
+        /// Whether `value` reads `result` back from a local only the store of `result` writes. A
+        /// defined program reads such a local only once that store has run.
+        bool readsBack(const llvm::Value* value, const llvm::Value& result)
+        {
+            const auto* load = llvm::dyn_cast_or_null<llvm::LoadInst>(value);
+            if (load == nullptr)
+                return false;
+            for (const llvm::User* user : result.users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store != nullptr && store->getValueOperand() == &result &&
+                    store->getPointerOperand() == load->getPointerOperand() &&
+                    localWrittenOnlyBy(*store) != nullptr)
+                    return true;
+            }
+            return false;
+        }
+
         /// Only immutable local copies are forwarded. Reaching through a mutable bound
         /// would incorrectly equate a complete join loop with a shortened one.
         const llvm::Value* invariantValue(const llvm::Value* value)
@@ -85,6 +146,11 @@ namespace ctrace::concurrency::internal::analysis
             /// A `pthread_t` travels by value, loaded from the storage its creation wrote; a
             /// `std::thread` is handed over by address.
             bool byValue = false;
+            /// The call's result is the join's status: a `pthread_join`, or a helper reporting one.
+            bool reportsStatus = false;
+            /// Where the join has certainly waited, when its result proves it anywhere. The call
+            /// joins the thread either way.
+            std::optional<JoinSuccess> success;
 
             [[nodiscard]] const llvm::Value& handle() const
             {
@@ -517,10 +583,10 @@ namespace ctrace::concurrency::internal::analysis
             return indexed;
         }
 
-        const llvm::Instruction* loopCompletion(const llvm::CallBase& create, const JoinSite& join,
-                                                const llvm::LoopInfo& loops,
-                                                const llvm::DominatorTree& dominators,
-                                                const ConcurrencySymbolClassifier& classifier)
+        std::optional<ThreadCompletion>
+        loopCompletion(const llvm::CallBase& create, const JoinSite& join,
+                       const llvm::LoopInfo& loops, const llvm::DominatorTree& dominators,
+                       const ConcurrencySymbolClassifier& classifier)
         {
             const llvm::Loop* first = loops.getLoopFor(create.getParent());
             const llvm::Loop* second = loops.getLoopFor(join.call->getParent());
@@ -529,7 +595,7 @@ namespace ctrace::concurrency::internal::analysis
                 !dominators.dominates(&create, first->getLoopLatch()->getTerminator()) ||
                 !dominators.dominates(join.call, second->getLoopLatch()->getTerminator()) ||
                 !noEarlyNormalExit(*first) || !noEarlyNormalExit(*second))
-                return nullptr;
+                return std::nullopt;
             const auto a = countedLoop(*first, dominators);
             const auto b = countedLoop(*second, dominators);
             const bool indexed = a && b && a->begin == b->begin && a->end == b->end &&
@@ -538,7 +604,7 @@ namespace ctrace::concurrency::internal::analysis
                                                   handleAddress(join.handle(), true), *a, *b) &&
                                  arrayStorageUnchanged(create, *join.call, dominators, classifier);
             if (!indexed && !(a && vectorJoinRange(create, join, *first, *second, *a, dominators)))
-                return nullptr;
+                return std::nullopt;
             const auto* firstBranch =
                 llvm::dyn_cast<llvm::BranchInst>(first->getHeader()->getTerminator());
             const auto* secondBranch =
@@ -548,10 +614,18 @@ namespace ctrace::concurrency::internal::analysis
             const llvm::BasicBlock* secondExit =
                 secondBranch ? secondBranch->getSuccessor(1) : nullptr;
             if (firstExit == nullptr || secondExit == nullptr ||
-                !dominators.dominates(firstExit, second->getHeader()) ||
-                !completionCoversReturns(create, *secondExit->getFirstNonPHIOrDbgOrLifetime()))
-                return nullptr;
-            return &*secondExit->getFirstNonPHIOrDbgOrLifetime();
+                !dominators.dominates(firstExit, second->getHeader()))
+                return std::nullopt;
+            const llvm::Instruction& barrier = *secondExit->getFirstNonPHIOrDbgOrLifetime();
+            if (!completionCoversReturns(create, barrier))
+                return std::nullopt;
+            // Every round makes its join; all the threads have ended past the loop only when each
+            // round goes on past its join's success.
+            ThreadCompletion completion;
+            if (join.success.has_value() &&
+                join.success->covers(*second->getLoopLatch()->getTerminator(), dominators))
+                completion.ended = JoinSuccess{.after = &barrier};
+            return completion;
         }
 
         std::vector<JoinSite> joinSites(const llvm::Function& function,
@@ -568,40 +642,139 @@ namespace ctrace::concurrency::internal::analysis
                     const auto kind = classifier.classify(*call);
                     if (kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin)
                     {
-                        sites.push_back({call, 0, kind == CallKind::PThreadJoin});
+                        sites.push_back({.call = call,
+                                         .operand = 0,
+                                         .byValue = kind == CallKind::PThreadJoin,
+                                         .reportsStatus = kind == CallKind::PThreadJoin,
+                                         .success = joinSuccessOf(*call, kind)});
                         continue;
                     }
                     const auto helper = helpers.find(call->getCalledFunction());
                     if (helper == helpers.end())
                         continue;
                     for (const JoinedParameter& parameter : helper->second)
-                        if (parameter.index < call->arg_size())
-                            sites.push_back({call, parameter.index, parameter.byValue});
+                    {
+                        if (parameter.index >= call->arg_size())
+                            continue;
+                        std::optional<JoinSuccess> success;
+                        if (parameter.ended)
+                            success = JoinSuccess{.after = call};
+                        else if (parameter.reported)
+                            success = joinSuccessOf(*call, CallKind::PThreadJoin);
+                        sites.push_back({.call = call,
+                                         .operand = parameter.index,
+                                         .byValue = parameter.byValue,
+                                         .reportsStatus = parameter.reported,
+                                         .success = success});
+                    }
                 }
             return sites;
         }
 
     } // namespace
 
+    bool JoinSuccess::covers(const llvm::Instruction& point,
+                             const llvm::DominatorTree& dominators) const
+    {
+        if (after != nullptr)
+            return after != &point && dominators.dominates(after, &point);
+        return dominators.dominates(llvm::BasicBlockEdge(branch, successor), point.getParent());
+    }
+
+    std::optional<JoinSuccess> joinSuccessOf(const llvm::CallBase& join, CallKind kind)
+    {
+        if (kind == CallKind::StdThreadJoin)
+            return JoinSuccess{.after = &join};
+
+        // A read proves success only by testing the result for a branch, which gives that
+        // branch's edge; any other read proves nothing, and a result never read counts as
+        // success, as an unused one does. A local keeping the result is followed to its loads
+        // after the store in the same block: a load elsewhere may read an earlier call's.
+        std::optional<JoinSuccess> success;
+        bool readOtherwise = false;
+        auto read = [&](const llvm::User& user, const llvm::Value& result)
+        {
+            if (std::optional<JoinSuccess> tested = successTestedBy(user, result))
+                success = tested;
+            else
+                readOtherwise = true;
+        };
+
+        for (const llvm::User* user : join.users())
+        {
+            const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+            const llvm::AllocaInst* local = store != nullptr && store->getValueOperand() == &join
+                                                ? localWrittenOnlyBy(*store)
+                                                : nullptr;
+            if (local == nullptr)
+            {
+                read(*user, join);
+                continue;
+            }
+            for (const llvm::User* reader : local->users())
+            {
+                const auto* load = llvm::dyn_cast<llvm::LoadInst>(reader);
+                if (load == nullptr)
+                    continue;
+                if (load->getParent() != store->getParent() || !store->comesBefore(load))
+                    readOtherwise = true;
+                else
+                    for (const llvm::User* use : load->users())
+                        read(*use, *load);
+            }
+        }
+
+        if (success.has_value())
+            return success;
+        if (!readOtherwise)
+            return JoinSuccess{.after = &join};
+        return std::nullopt;
+    }
+
+    bool returnsResultOf(const llvm::Instruction& call)
+    {
+        for (const llvm::BasicBlock& block : *call.getFunction())
+        {
+            const auto* exit = llvm::dyn_cast<llvm::ReturnInst>(block.getTerminator());
+            if (exit != nullptr && exit->getReturnValue() != &call &&
+                !readsBack(exit->getReturnValue(), call))
+                return false;
+        }
+        return true;
+    }
+
     bool completionCoversReturns(const llvm::Instruction& start,
                                  const llvm::Instruction& completion)
     {
-        if (start.getFunction() != completion.getFunction())
+        return completionCoversReturns(start, JoinSuccess{.after = &completion});
+    }
+
+    bool completionCoversReturns(const llvm::Instruction& start, const JoinSuccess& completion)
+    {
+        // Past `after`, its whole block is cut off; past a branch, only the success edge is.
+        const llvm::BasicBlock* cut =
+            completion.after != nullptr ? completion.after->getParent() : nullptr;
+        const llvm::Function* function =
+            cut != nullptr ? cut->getParent() : completion.branch->getParent();
+        if (start.getFunction() != function)
             return false;
-        if (start.getParent() == completion.getParent())
-            return &start == &completion || start.comesBefore(&completion);
+        if (start.getParent() == cut)
+            return &start == completion.after || start.comesBefore(completion.after);
         llvm::SmallPtrSet<const llvm::BasicBlock*, 32> visited;
         std::vector<const llvm::BasicBlock*> pending{start.getParent()};
         while (!pending.empty())
         {
             const llvm::BasicBlock* block = pending.back();
             pending.pop_back();
-            if (block == completion.getParent() || !visited.insert(block).second)
+            if (block == cut || !visited.insert(block).second)
                 continue;
             if (llvm::isa<llvm::ReturnInst>(block->getTerminator()))
                 return false;
             for (const llvm::BasicBlock* successor : llvm::successors(block))
-                pending.push_back(successor);
+            {
+                if (block != completion.branch || successor != completion.successor)
+                    pending.push_back(successor);
+            }
         }
         return true;
     }
@@ -609,8 +782,9 @@ namespace ctrace::concurrency::internal::analysis
     /// A function joins a parameter when a join of it, in place or through another joining
     /// helper, stands on every path from the entry to a normal return. The parameter is
     /// followed only through a local copy written once, so the handle joined is the one the
-    /// caller passed. Iterated to a fixed point: a helper calling a helper is found whatever
-    /// order the module lists them in.
+    /// caller passed. Whether the thread has also ended there, or the function hands the join's
+    /// status to its caller, is summarized beside it. Iterated to a fixed point: a helper calling
+    /// a helper is found whatever order the module lists them in.
     JoiningHelpers collectJoiningHelpers(const llvm::Module& module,
                                          const ConcurrencySymbolClassifier& classifier,
                                          JoiningHelpers known)
@@ -631,14 +805,30 @@ namespace ctrace::concurrency::internal::analysis
                         llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
                     if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
                         continue;
+                    const bool ended =
+                        site.success.has_value() && completionCoversReturns(entry, *site.success);
+                    const bool reported = site.reportsStatus && returnsResultOf(*site.call);
                     std::vector<JoinedParameter>& joined = helpers[&function];
-                    bool known = false;
-                    for (const JoinedParameter& existing : joined)
-                        known = known || existing.index == parameter->getArgNo();
-                    if (known)
-                        continue;
-                    joined.push_back({parameter->getArgNo(), site.byValue});
-                    changed = true;
+                    JoinedParameter* summary = nullptr;
+                    for (JoinedParameter& existing : joined)
+                    {
+                        if (existing.index == parameter->getArgNo())
+                            summary = &existing;
+                    }
+                    if (summary == nullptr)
+                    {
+                        joined.push_back({.index = parameter->getArgNo(),
+                                          .byValue = site.byValue,
+                                          .ended = ended,
+                                          .reported = reported});
+                        changed = true;
+                    }
+                    else if ((ended && !summary->ended) || (reported && !summary->reported))
+                    {
+                        summary->ended = summary->ended || ended;
+                        summary->reported = summary->reported || reported;
+                        changed = true;
+                    }
                 }
             }
         }
@@ -673,10 +863,10 @@ namespace ctrace::concurrency::internal::analysis
                 {
                     if (create->arg_empty())
                         continue;
-                    if (const auto* barrier =
+                    if (const std::optional<ThreadCompletion> completion =
                             loopCompletion(*create, join, loops, dominators, classifier))
                     {
-                        result.emplace(create, barrier);
+                        result.emplace(create, *completion);
                         break;
                     }
                     if (loops.getLoopFor(create->getParent()) != nullptr)
@@ -703,7 +893,11 @@ namespace ctrace::concurrency::internal::analysis
                         dominators.dominates(create, join.call) &&
                         completionCoversReturns(*create, *join.call))
                     {
-                        result.emplace(create, join.call);
+                        ThreadCompletion completion;
+                        if (join.success.has_value() &&
+                            completionCoversReturns(*create, *join.success))
+                            completion.ended = join.success;
+                        result.emplace(create, completion);
                         break;
                     }
                 }
