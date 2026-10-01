@@ -47,3 +47,15 @@ int main(void)
     pthread_join(thread, NULL);
     return 0;
 }
+
+// EXPECT-HUMAN-DIAGNOSTICS-BEGIN
+// Function: work
+// 	severity: ERROR
+// 	ruleId: DeadlockLockOrder
+// 	cwe: CWE-833
+// 	at line 29, column 9
+// 	[!!!Error] potential deadlock caused by inconsistent lock acquisition order
+// 	     ↳ first order: acquire 'second' while holding 'first' at ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_order_on_one_path.c:29:9 in work (thread entries: backward)
+// 	     ↳ conflicting order: acquire 'first' while holding 'second' at ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_order_on_one_path.c:18:13 in work (thread entries: backward)
+// 	related: Conflicting lock order -> ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_order_on_one_path.c:18:13 in work
+// EXPECT-HUMAN-DIAGNOSTICS-END

@@ -323,6 +323,35 @@ namespace
                           "an inversion through helpers defined elsewhere must be reported");
     }
 
+    /// A unit whose lock-order search stops at its bound says so in the project's report, next
+    /// to the units after it, and once however often it is listed.
+    bool testCycleSearchLimitReachesTheProjectReport()
+    {
+        CompiledProject project;
+        if (!project.add(
+                "../concurrency/deadlock/deadlock_cycle_search_reaches_exploration_limit.c") ||
+            !project.add("cross-tu-lock-wrapper/sync.c"))
+        {
+            return false;
+        }
+
+        const AnalysisOptions options{.enabledRules = {RuleId::DeadlockLockOrder}};
+        const ProjectAnalysisReport once =
+            ProjectConcurrencyAnalyzer(options).analyze(project.units());
+
+        ProjectUnitSource repeated = project.units();
+        repeated.add(repeated.identifier(0), project.bitcodeAt(0));
+        const ProjectAnalysisReport twice = ProjectConcurrencyAnalyzer(options).analyze(repeated);
+
+        return assertTrue(once.report.notices.size() == 1 &&
+                              once.report.notices.front().id == "cycle-search-limit-reached",
+                          "a unit's stopped search should reach the project's report") &&
+               assertTrue(countDeadlocks(once.report) == 4,
+                          "the notice should count as no diagnostic in a project") &&
+               assertTrue(twice.report.notices == once.report.notices,
+                          "a unit listed twice should give its notice once");
+    }
+
     /// The same for a helper defined in another unit: what it does to the lock it is handed
     /// changes the lock state workers.c is judged under, which matters to a rule reading lock
     /// state and to no other (#52).
@@ -1469,6 +1498,7 @@ int main()
     ok = testNarrowRuleSelectionKeepsCrossUnitConclusions() && ok;
     ok = testExternGlobalReanalysisFollowsTheSelection() && ok;
     ok = testLockSummaryReanalysisFollowsTheSelection() && ok;
+    ok = testCycleSearchLimitReachesTheProjectReport() && ok;
     ok = testUnitLocalRulesReanalyseNothing() && ok;
     ok = testNarrowFunctionsMatchWhatTheRulesComputed() && ok;
     ok = testConstantDeclarationsTriggerNoSecondPass() && ok;

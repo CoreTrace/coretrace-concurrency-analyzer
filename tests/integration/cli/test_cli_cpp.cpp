@@ -528,6 +528,88 @@ namespace
         return ok;
     }
 
+    std::size_t countOccurrences(const std::string& text, std::string_view token)
+    {
+        std::size_t count = 0;
+        for (std::size_t at = text.find(token); at != std::string::npos;
+             at = text.find(token, at + token.size()))
+        {
+            ++count;
+        }
+        return count;
+    }
+
+    /// A lock-order search stopped at its bound is said in every format, and counted in none.
+    bool testLockOrderSearchLimitNotice()
+    {
+        bool ok = true;
+        const std::string limited =
+            fixturePath("concurrency/deadlock/deadlock_cycle_search_reaches_exploration_limit.c")
+                .string();
+        const std::string complete = fixturePath("concurrency/deadlock/deadlock_basic.c").string();
+
+        {
+            const RunResult human = runAnalyzer({limited, "--analyze"});
+            ok = assertTrue(human.exitCode == 0, "a limited search should still succeed") && ok;
+            ok = assertContains(human.output, "Notice: cycle-search-limit-reached",
+                                "human output of a limited search") &&
+                 ok;
+            ok = assertContains(human.output, "lock-order cycle search incomplete",
+                                "human output of a limited search") &&
+                 ok;
+            ok = assertContains(human.output, "info=0, warning=0, error=4",
+                                "human output of a limited search") &&
+                 ok;
+        }
+
+        {
+            const RunResult json = runAnalyzer({limited, "--analyze", "--format=json"});
+            ok = assertContains(json.output, "\"id\": \"cycle-search-limit-reached\"",
+                                "json output of a limited search") &&
+                 ok;
+            ok = assertTrue(countOccurrences(json.output, "\"severity\":") == 4,
+                            "json output of a limited search should hold four diagnostics") &&
+                 ok;
+            ok =
+                assertContains(json.output, "\"info\": 0", "json output of a limited search") && ok;
+        }
+
+        {
+            const RunResult sarif = runAnalyzer({limited, "--analyze", "--format=sarif"});
+            ok = assertContains(sarif.output, "\"toolExecutionNotifications\"",
+                                "sarif output of a limited search") &&
+                 ok;
+            ok = assertContains(sarif.output, "\"id\": \"cycle-search-limit-reached\"",
+                                "sarif output of a limited search") &&
+                 ok;
+            ok = assertContains(sarif.output, "\"executionSuccessful\": true",
+                                "sarif output of a limited search") &&
+                 ok;
+            ok = assertTrue(countOccurrences(sarif.output, "\"partialFingerprints\"") == 4,
+                            "sarif output of a limited search should hold four results") &&
+                 ok;
+        }
+
+        {
+            const RunResult human = runAnalyzer({complete, "--analyze"});
+            const RunResult json = runAnalyzer({complete, "--analyze", "--format=json"});
+            const RunResult sarif = runAnalyzer({complete, "--analyze", "--format=sarif"});
+            ok = assertNotContains(human.output, "Notice:", "human output of a complete search") &&
+                 ok;
+            ok =
+                assertNotContains(json.output, "\"notices\"", "json output of a complete search") &&
+                ok;
+            ok = assertTrue(countOccurrences(json.output, "\"severity\":") == 1,
+                            "json output of a complete search should hold its one diagnostic") &&
+                 ok;
+            ok = assertNotContains(sarif.output, "\"toolExecutionNotifications\"",
+                                   "sarif output of a complete search") &&
+                 ok;
+        }
+
+        return ok;
+    }
+
     bool testRuleSelectionAndNewChecks()
     {
         bool ok = true;
@@ -1035,6 +1117,7 @@ int main()
     ok = testSuccessfulCompilesAndVerboseMode() && ok;
     ok = testAnalyzeMode() && ok;
     ok = testRuleSelectionAndNewChecks() && ok;
+    ok = testLockOrderSearchLimitNotice() && ok;
     ok = testInputValidationFailuresAndBackendDiagnostics() && ok;
     ok = testPermissionRelatedInputFailures() && ok;
     ok = testCompilationNeedsNoTemporaryBitcodeFile() && ok;

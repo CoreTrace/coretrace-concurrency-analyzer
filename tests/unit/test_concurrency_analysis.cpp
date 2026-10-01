@@ -27,6 +27,7 @@ namespace
     using ctrace::concurrency::FunctionSummary;
     using ctrace::concurrency::InMemoryIRCompiler;
     using ctrace::concurrency::IRFormat;
+    using ctrace::concurrency::RelatedLocation;
     using ctrace::concurrency::RuleId;
     using ctrace::concurrency::SingleTUConcurrencyAnalyzer;
 
@@ -829,6 +830,67 @@ namespace
                           "independent lock pairs should not report deadlock") &&
                assertTrue(report->diagnosticsSummary.error == 0,
                           "independent lock pairs should not count error diagnostics");
+    }
+
+    /// What two runs report, in order: identical for the same program.
+    std::vector<std::string> describeDiagnostics(const DiagnosticReport& report)
+    {
+        std::vector<std::string> described;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+        {
+            std::string text = diagnostic.message + " @" +
+                               std::to_string(diagnostic.location.line) + ":" +
+                               std::to_string(diagnostic.location.column);
+            for (const RelatedLocation& related : diagnostic.relatedLocations)
+                text += " | " + related.label + " @" + std::to_string(related.location.line);
+            described.push_back(std::move(text));
+        }
+        return described;
+    }
+
+    bool testLockOrderSearchLimitIsANoticeNotAFinding()
+    {
+        constexpr std::string_view fixture =
+            "tests/fixtures/concurrency/deadlock/deadlock_cycle_search_reaches_exploration_limit.c";
+        const AnalysisOptions options{.enabledRules = {RuleId::DeadlockLockOrder}};
+        const std::optional<DiagnosticReport> first = analyzeFixture(fixture, options);
+        const std::optional<DiagnosticReport> second = analyzeFixture(fixture, options);
+        if (!first.has_value() || !second.has_value())
+            return false;
+
+        // The walks from two locks stop at the bound; the report says so once.
+        const bool oneNotice =
+            first->notices.size() == 1 &&
+            first->notices.front().id == "cycle-search-limit-reached" &&
+            first->notices.front().ruleId == RuleId::DeadlockLockOrder &&
+            first->notices.front().message.starts_with("lock-order cycle search incomplete");
+
+        return assertTrue(oneNotice, "a search stopped at its bound should give one notice") &&
+               assertTrue(first->diagnostics.size() == 4 && first->diagnosticsSummary.error == 4 &&
+                              first->diagnosticsSummary.warning == 0 &&
+                              first->diagnosticsSummary.info == 0,
+                          "the notice should count as no diagnostic") &&
+               assertTrue(describeDiagnostics(*first) == describeDiagnostics(*second) &&
+                              first->notices == second->notices,
+                          "a search stopped at its bound should report the same twice");
+    }
+
+    bool testCompleteLockOrderSearchGivesNoNotice()
+    {
+        const AnalysisOptions options{.enabledRules = {RuleId::DeadlockLockOrder}};
+        const std::optional<DiagnosticReport> cycle = analyzeFixture(
+            "tests/fixtures/concurrency/deadlock/deadlock_three_lock_cycle.c", options);
+        // Dense orders the search prunes: without either pruning, it would stop at its bound.
+        const std::optional<DiagnosticReport> pruned = analyzeFixture(
+            "tests/fixtures/concurrency/deadlock/deadlock_cycle_search_finishes_by_pruning.c",
+            options);
+        if (!cycle.has_value() || !pruned.has_value())
+            return false;
+
+        return assertTrue(cycle->diagnostics.size() == 1 && cycle->notices.empty(),
+                          "a search that judged every cycle should give no notice") &&
+               assertTrue(pruned->diagnostics.size() == 1 && pruned->notices.empty(),
+                          "a search its prunings keep within bound should give no notice");
     }
 
     // -----------------------------------------------------------------------------------
@@ -1664,6 +1726,107 @@ namespace
                      "cpp_recursive_mutex_reentered_by_method_no_diagnostic.cpp",
              .intent = "a recursive mutex locked again through `this` is no reacquisition (#114)",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_pair_taken_before_and_after_spawn.c",
+             .intent = "an order taken before the worker exists hides none taken while it runs "
+                       "(#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_pair_taken_before_and_after_spawn_other_names.c",
+             .intent = "the same program, other lock names: the search starts from the other lock "
+                       "(#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_before_and_after_spawn.c",
+             .intent = "a transfer made before the worker exists hides none made while it runs "
+                       "(#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gated_section_before_ungated_section.c",
+             .intent = "an order made under a common gate hides no order made without it (#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_ungated_section_before_gated_section.c",
+             .intent = "the same two sections, the ungated one first (#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_longer_cycle_behind_one_thread_inversion.c",
+             .intent = "an inversion one thread takes alone hides no longer cycle through its locks "
+                       "(#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_longer_cycle_behind_one_thread_inversion_other_names.c",
+             .intent = "the same program, other lock names: the search starts from the ring's "
+                       "third lock (#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_gated_calls_ungated_worker.c",
+             .intent = "main's gated transfer meets the worker's ungated one, behind a transfer "
+                       "made before the worker exists (#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_ungated_worker_no_call_before_spawn.c",
+             .intent = "the same gated transfer, without the one made before the worker exists "
+                       "(#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_cycle_reported_from_lock_reached_first.c",
+             .intent = "a cycle is reported from the lock the search reaches first; the fixture's "
+                       "golden block pins its first order (#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_cycle_search_reaches_exploration_limit.c",
+             .intent = "a search stopped at its bound keeps the cycles found before and after the "
+                       "cut; the golden block pins them and the notice (#127)",
+             .deadlock = 4},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_cycle_search_finishes_by_pruning.c",
+             .intent = "orders that cannot run together, and locks that lead nowhere back, keep "
+                       "the search within its bound: no notice (#127)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_entered_and_left_no_diagnostic.c",
+             .intent = "an address-ordered pair other orders both enter and leave closes no cycle "
+                       "of its own (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_left_only_no_diagnostic.c",
+             .intent = "an address-ordered pair other orders only leave (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_entered_and_left_direct_no_diagnostic.c",
+             .intent = "the same pair entered and left, each thread locking it by address itself "
+                       "(#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_ring_through_address_ordered_pair.c",
+             .intent = "a ring through an address-ordered pair is reported, the pair alone is not "
+                       "(#138)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_ring_through_address_ordered_pair_other_names.c",
+             .intent = "the same ring, other lock names: the search starts from its third lock "
+                       "(#138)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_and_order_before_spawn_no_diagnostic.c",
+             .intent = "an order closing a larger cycle before any worker exists keeps no report "
+                       "on the pair (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_three_locks_each_pair_by_address_no_diagnostic.c",
+             .intent = "three locks, each pair taken lower address first by its own worker: no "
+                       "ring closes (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_ordered_pair_and_fixed_order_before_spawn_no_diagnostic.c",
+             .intent = "an address-ordered choice stays rejected when a fixed order also joins the "
+                       "pair (#138)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_address_order_on_one_path_fixed_order_reversed.c",
+             .intent = "a cycle's order taken by address, followed by a fixed one, still deadlocks "
+                       "(#138)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_two_pairs_by_address_third_fixed.c",
+             .intent = "a ring whose orders are all taken by address but one still deadlocks "
+                       "(#138)",
+             .deadlock = 1},
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_transfer_helper_starts_worker_then_locks.c",
              .intent = "a worker the helper starts runs beside the orders it then takes (#124)",
@@ -2693,6 +2856,8 @@ int main()
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
+    ok = testLockOrderSearchLimitIsANoticeNotAFinding() && ok;
+    ok = testCompleteLockOrderSearchGivesNoNotice() && ok;
     ok = testOwnerAccessToLocalObjectNamesSharedObjectNotGlobal() && ok;
     ok = testOwnerAccessToGlobalObjectStillNamesGlobal() && ok;
     ok = testDefaultOptionsEnableEveryAvailableRule() && ok;

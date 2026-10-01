@@ -168,6 +168,8 @@ namespace ctrace::concurrency
         {
             report.diagnostics.insert(report.diagnostics.end(), partialReport.diagnostics.begin(),
                                       partialReport.diagnostics.end());
+            report.notices.insert(report.notices.end(), partialReport.notices.begin(),
+                                  partialReport.notices.end());
         };
 
         DiagnosticReport report;

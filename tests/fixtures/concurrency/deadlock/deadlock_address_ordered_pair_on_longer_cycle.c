@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // main takes a_west then b_zone, and a westward worker takes them the other way: one cycle. Two
 // workers take c_first and d_second lower address first, and a zone worker takes d_second then
-// b_zone. When c_first is the lower, main holding a_west, a pair worker holding c_first, the zone
-// worker holding d_second and the westward worker holding b_zone can wait for each other in a
-// ring. The search reaches b_zone before that ring and never finds it again: the report on
-// c_first and d_second, which the ring runs through, is the one that stands for it.
-// Expected: two deadlocks, the a_west/b_zone inversion and the c_first/d_second pair.
+// b_zone. The pair alone cannot deadlock: both its orders are taken by address, so every worker
+// takes the lower lock first. When c_first is the lower, main holding a_west (it takes c_first
+// next), a pair worker holding c_first, the zone worker holding d_second and the westward worker
+// holding b_zone can wait for each other in a ring through the pair.
+// Expected: two deadlocks, the a_west/b_zone inversion and the four-lock ring, none on the pair.
 #include <pthread.h>
 #include <stddef.h>
 
@@ -86,3 +86,29 @@ int main(void)
     pthread_join(west, NULL);
     return 0;
 }
+
+// EXPECT-HUMAN-DIAGNOSTICS-BEGIN
+// Function: main
+// 	severity: ERROR
+// 	ruleId: DeadlockLockOrder
+// 	cwe: CWE-833
+// 	at line 78, column 5
+// 	[!!!Error] potential deadlock caused by inconsistent lock acquisition order
+// 	     ↳ first order: acquire 'b_zone' while holding 'a_west' at ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:78:5 in main (thread entries: <main-task>)
+// 	     ↳ conflicting order: acquire 'a_west' while holding 'b_zone' at ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:61:5 in westWorker (thread entries: westWorker)
+// 	related: Conflicting lock order -> ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:61:5 in westWorker
+
+// Function: main
+// 	severity: ERROR
+// 	ruleId: DeadlockLockOrder
+// 	cwe: CWE-833
+// 	at line 80, column 5
+// 	[!!!Error] potential deadlock caused by a cycle of 4 lock acquisitions
+// 	     ↳ first order: acquire 'c_first' while holding 'a_west' at ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:80:5 in main (thread entries: <main-task>)
+// 	     ↳ conflicting order: acquire 'd_second' while holding 'c_first' at ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:22:9 in lockPairByAddress (thread entries: otherPairWorker, pairWorker)
+// 	     ↳ conflicting order: acquire 'b_zone' while holding 'd_second' at ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:51:5 in zoneWorker (thread entries: zoneWorker)
+// 	     ↳ conflicting order: acquire 'a_west' while holding 'b_zone' at ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:61:5 in westWorker (thread entries: westWorker)
+// 	related: Conflicting lock order -> ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:22:9 in lockPairByAddress
+// 	related: Conflicting lock order -> ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:51:5 in zoneWorker
+// 	related: Conflicting lock order -> ${REPO_ROOT}/tests/fixtures/concurrency/deadlock/deadlock_address_ordered_pair_on_longer_cycle.c:61:5 in westWorker
+// EXPECT-HUMAN-DIAGNOSTICS-END

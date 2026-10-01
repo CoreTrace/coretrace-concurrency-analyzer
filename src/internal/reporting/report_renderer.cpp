@@ -139,6 +139,14 @@ namespace ctrace::concurrency::internal::reporting
             return std::nullopt;
         }
 
+        std::optional<std::string> primaryCweIdentifier(RuleId ruleId)
+        {
+            const auto& taxonomy = lookupRuleMetadata(ruleId).primaryTaxonomy;
+            if (taxonomy.has_value() && taxonomy->scheme == "CWE")
+                return std::string(taxonomy->scheme) + "-" + std::string(taxonomy->id);
+            return std::nullopt;
+        }
+
         llvm::json::Value toJsonValue(const DiagnosticPropertyValue& value)
         {
             return std::visit(
@@ -258,14 +266,6 @@ namespace ctrace::concurrency::internal::reporting
             llvm::raw_string_ostream stream(rendered);
 
             stream << "Mode: " << context.mode << "\n";
-            if (report.diagnostics.empty())
-            {
-                stream << "\nDiagnostics summary: info=" << report.diagnosticsSummary.info
-                       << ", warning=" << report.diagnosticsSummary.warning
-                       << ", error=" << report.diagnosticsSummary.error << "\n";
-                return rendered;
-            }
-
             for (const Diagnostic& diagnostic : report.diagnostics)
             {
                 if (!diagnostic.location.function.empty())
@@ -306,6 +306,13 @@ namespace ctrace::concurrency::internal::reporting
                     stream << "\trelated: " << related.label << " -> "
                            << formatDetailedLocation(related.location, context) << "\n";
                 }
+            }
+
+            for (const AnalysisNotice& notice : report.notices)
+            {
+                stream << "\nNotice: " << notice.id << "\n";
+                stream << "\truleId: " << toString(notice.ruleId) << "\n";
+                stream << "\t" << notice.message << "\n";
             }
 
             stream << "\nDiagnostics summary: info=" << report.diagnosticsSummary.info
@@ -388,7 +395,7 @@ namespace ctrace::concurrency::internal::reporting
                 });
             }
 
-            return llvm::json::Object{
+            llvm::json::Object document{
                 {"meta",
                  llvm::json::Object{
                      {"tool", context.toolName},
@@ -405,6 +412,22 @@ namespace ctrace::concurrency::internal::reporting
                      {"error", static_cast<int64_t>(report.diagnosticsSummary.error)},
                  }},
             };
+
+            // Only a report some analysis could not finish has notices, and only then the key.
+            if (!report.notices.empty())
+            {
+                llvm::json::Array notices;
+                for (const AnalysisNotice& notice : report.notices)
+                {
+                    notices.emplace_back(llvm::json::Object{
+                        {"id", notice.id},
+                        {"ruleId", std::string(toString(notice.ruleId))},
+                        {"message", notice.message},
+                    });
+                }
+                document["notices"] = std::move(notices);
+            }
+            return document;
         }
 
         std::string renderJson(const DiagnosticReport& report, const RenderContext& context)
@@ -417,15 +440,15 @@ namespace ctrace::concurrency::internal::reporting
         {
             std::set<RuleId> emitted_rules;
             llvm::json::Array rules;
-            for (const Diagnostic& diagnostic : report.diagnostics)
+            const auto describeRule = [&](RuleId ruleId, const std::optional<std::string>& cwe)
             {
-                if (!emitted_rules.insert(diagnostic.ruleId).second)
-                    continue;
+                if (!emitted_rules.insert(ruleId).second)
+                    return;
 
-                const auto& metadata = lookupRuleMetadata(diagnostic.ruleId);
+                const auto& metadata = lookupRuleMetadata(ruleId);
                 llvm::json::Array tags;
                 tags.emplace_back("concurrency");
-                if (const auto cwe = firstCweIdentifier(diagnostic); cwe.has_value())
+                if (cwe.has_value())
                     tags.emplace_back(*cwe);
 
                 rules.emplace_back(llvm::json::Object{
@@ -438,7 +461,12 @@ namespace ctrace::concurrency::internal::reporting
                      llvm::json::Object{{"level", sarifLevel(metadata.defaultSeverity)}}},
                     {"properties", llvm::json::Object{{"tags", std::move(tags)}}},
                 });
-            }
+            };
+            for (const Diagnostic& diagnostic : report.diagnostics)
+                describeRule(diagnostic.ruleId, firstCweIdentifier(diagnostic));
+            // A notice's rule is described as well, so that its notification can refer to it.
+            for (const AnalysisNotice& notice : report.notices)
+                describeRule(notice.ruleId, primaryCweIdentifier(notice.ruleId));
 
             llvm::json::Array results;
             for (const Diagnostic& diagnostic : report.diagnostics)
@@ -484,24 +512,51 @@ namespace ctrace::concurrency::internal::reporting
                 });
             }
 
+            llvm::json::Object driver{
+                {"name", context.toolName},
+                {"rules", std::move(rules)},
+            };
+            llvm::json::Object run;
+
+            // A limit the analysis reached is no result: SARIF carries it as a notification of
+            // the tool's execution, which still succeeded.
+            if (!report.notices.empty())
+            {
+                std::set<std::string> described_notices;
+                llvm::json::Array notification_descriptors;
+                llvm::json::Array notifications;
+                for (const AnalysisNotice& notice : report.notices)
+                {
+                    if (described_notices.insert(notice.id).second)
+                    {
+                        notification_descriptors.emplace_back(
+                            llvm::json::Object{{"id", notice.id}});
+                    }
+
+                    notifications.emplace_back(llvm::json::Object{
+                        {"descriptor", llvm::json::Object{{"id", notice.id}}},
+                        {"associatedRule",
+                         llvm::json::Object{{"id", std::string(toString(notice.ruleId))}}},
+                        {"level", "warning"},
+                        {"message", llvm::json::Object{{"text", notice.message}}},
+                    });
+                }
+                llvm::json::Object invocation{
+                    {"executionSuccessful", true},
+                    {"toolExecutionNotifications", std::move(notifications)},
+                };
+                run.insert({"invocations", llvm::json::Array{std::move(invocation)}});
+                driver.insert({"notifications", std::move(notification_descriptors)});
+            }
+
+            run.insert({"tool", llvm::json::Object{{"driver", std::move(driver)}}});
+            run.insert({"results", std::move(results)});
+
             const llvm::json::Value document = llvm::json::Object{
                 {"version", "2.1.0"},
                 {"$schema",
                  "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json"},
-                {"runs",
-                 llvm::json::Array{
-                     llvm::json::Object{
-                         {"tool",
-                          llvm::json::Object{
-                              {"driver",
-                               llvm::json::Object{
-                                   {"name", context.toolName},
-                                   {"rules", std::move(rules)},
-                               }},
-                          }},
-                         {"results", std::move(results)},
-                     },
-                 }},
+                {"runs", llvm::json::Array{std::move(run)}},
             };
 
             return llvm::formatv("{0:2}", document).str();
