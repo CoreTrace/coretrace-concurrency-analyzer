@@ -5,6 +5,7 @@
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
 
+#include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -16,7 +17,9 @@
 #include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
+#include <llvm/Support/CheckedArithmetic.h>
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -164,7 +167,89 @@ namespace ctrace::concurrency::internal::analysis
             const llvm::Value* begin = nullptr;
             const llvm::Value* end = nullptr;
             llvm::CmpInst::Predicate predicate = llvm::CmpInst::BAD_ICMP_PREDICATE;
+            /// The store raising the counter by one, once a round.
+            const llvm::StoreInst* increment = nullptr;
         };
+
+        /// A bound of a slot range: a known index, or a value that only equals itself.
+        struct SlotBound
+        {
+            std::optional<std::int64_t> index;
+            const llvm::Value* value = nullptr;
+        };
+
+        /// The slots of one handle array that a spawn fills or a join loop visits: the handles
+        /// `stride` bytes apart from `origin`, the byte offset of index 0 in `array`, for the
+        /// indices in `[begin, end)` as a loop comparing with `predicate` runs over them.
+        struct SlotRange
+        {
+            const llvm::Value* array = nullptr;
+            std::int64_t origin = 0;
+            std::int64_t stride = 0;
+            SlotBound begin;
+            SlotBound end;
+            llvm::CmpInst::Predicate predicate = llvm::CmpInst::BAD_ICMP_PREDICATE;
+        };
+
+        /// The slots each spawn of a function fills, where its handle address names them.
+        using SpawnFills = std::unordered_map<const llvm::CallBase*, SlotRange>;
+
+        bool atMost(const SlotBound& lower, const SlotBound& upper)
+        {
+            if (lower.index.has_value() && upper.index.has_value())
+                return *lower.index <= *upper.index;
+            return lower.value != nullptr && lower.value == upper.value;
+        }
+
+        /// Whether every slot `filled` names is one `visited` names.
+        bool covers(const SlotRange& visited, const SlotRange& filled)
+        {
+            // Two loops bounded by one value run alike only when they compare with it alike: a
+            // negative `n` stops a signed loop at once and sends an unsigned one far past it.
+            const bool known =
+                visited.begin.index && visited.end.index && filled.begin.index && filled.end.index;
+            return visited.array == filled.array && visited.origin == filled.origin &&
+                   visited.stride == filled.stride &&
+                   (known || visited.predicate == filled.predicate) &&
+                   atMost(visited.begin, filled.begin) && atMost(filled.end, visited.end);
+        }
+
+        /// The byte offsets of the first and the last handle `range` names, when its bounds are
+        /// known and it names any.
+        std::optional<std::pair<std::int64_t, std::int64_t>> knownSpan(const SlotRange& range)
+        {
+            if (!range.begin.index || !range.end.index || *range.begin.index >= *range.end.index)
+                return std::nullopt;
+            const auto first = llvm::checkedMulAdd(range.stride, *range.begin.index, range.origin);
+            const auto last = llvm::checkedMulAdd(range.stride, *range.end.index - 1, range.origin);
+            if (!first || !last)
+                return std::nullopt;
+            return std::pair{*first, *last};
+        }
+
+        /// Whether two ranges of known bounds name no slot in common. Laid out on one grid, two
+        /// handles meet only where they start together.
+        bool disjoint(const SlotRange& first, const SlotRange& second)
+        {
+            const auto a = knownSpan(first);
+            const auto b = knownSpan(second);
+            const auto shift = llvm::checkedSub(first.origin, second.origin);
+            return first.array == second.array && first.stride > 0 &&
+                   first.stride == second.stride && shift && *shift % first.stride == 0 && a && b &&
+                   (a->second < b->first || b->second < a->first);
+        }
+
+        /// Whether `other` stores its handle only into slots `create` never fills.
+        bool fillsApart(const llvm::CallBase& create, const llvm::CallBase& other,
+                        const SpawnFills* fills)
+        {
+            if (fills == nullptr)
+                return false;
+            const auto mine = fills->find(&create);
+            const auto theirs = fills->find(&other);
+            return mine != fills->end() && theirs != fills->end() &&
+                   disjoint(mine->second, theirs->second);
+        }
 
         bool reachesNormalReturn(const llvm::BasicBlock* start)
         {
@@ -216,8 +301,10 @@ namespace ctrace::concurrency::internal::analysis
             return reaching;
         }
 
+        /// Nothing but `create` and the joins touches the handle array from `create` on. Another
+        /// spawn may store into it only where `fills` shows it never meets `create`'s slots.
         bool arrayStorageUnchanged(const llvm::CallBase& create, const llvm::CallBase& join,
-                                   const llvm::DominatorTree& dominators,
+                                   const SpawnFills* fills, const llvm::DominatorTree& dominators,
                                    const ConcurrencySymbolClassifier& classifier)
         {
             const llvm::Value* base = llvm::getUnderlyingObject(create.getArgOperand(0));
@@ -281,7 +368,8 @@ namespace ctrace::concurrency::internal::analysis
                             continue;
                         for (const auto& argument : call->args())
                             if (argument->getType()->isPointerTy() &&
-                                llvm::getUnderlyingObject(argument.get()) == base)
+                                llvm::getUnderlyingObject(argument.get()) == base &&
+                                !(argument.getOperandNo() == 0 && fillsApart(create, *call, fills)))
                                 return false;
                     }
                 }
@@ -536,7 +624,7 @@ namespace ctrace::concurrency::internal::analysis
             // Reject mutable bounds, including memory changed indirectly inside either loop.
             if (begin == nullptr || end == nullptr || llvm::isa<llvm::LoadInst>(end))
                 return std::nullopt;
-            return CountedLoop{slot, begin, end, compare->getPredicate()};
+            return CountedLoop{slot, begin, end, compare->getPredicate(), increment};
         }
 
         const llvm::Value* handleAddress(const llvm::Value& handle, bool byValue)
@@ -552,39 +640,95 @@ namespace ctrace::concurrency::internal::analysis
             return value->stripPointerCasts();
         }
 
-        /// Match the same array element path, with the only varying index being each
-        /// loop's induction variable. Equal storage-group strings alone lose that index.
-        bool sameIndexedRange(const llvm::Value* left, const llvm::Value* right,
-                              const CountedLoop& first, const CountedLoop& second)
+        /// A handle address as `object + offset + scale * index`, `index` being the one value
+        /// that varies, null when none does.
+        struct SlotAddress
         {
-            const auto* lhs = llvm::dyn_cast_or_null<llvm::GEPOperator>(left);
-            const auto* rhs = llvm::dyn_cast_or_null<llvm::GEPOperator>(right);
-            if (lhs == nullptr || rhs == nullptr || lhs->getNumIndices() != rhs->getNumIndices() ||
-                lhs->getSourceElementType() != rhs->getSourceElementType() ||
-                lhs->getPointerOperand() != rhs->getPointerOperand())
-                return false;
-            bool indexed = false;
-            auto rightIndex = rhs->idx_begin();
-            for (const llvm::Use& index : lhs->indices())
+            const llvm::Value* object = nullptr;
+            std::int64_t offset = 0;
+            const llvm::Value* index = nullptr;
+            std::int64_t scale = 0;
+        };
+
+        /// Reads `pointer` through its chain of element addresses; the index of any of them
+        /// becomes a byte offset, so two paths to one element read alike.
+        std::optional<SlotAddress> slotAddress(const llvm::Value* pointer,
+                                               const llvm::DataLayout& layout)
+        {
+            SlotAddress address;
+            pointer = pointer->stripPointerCasts();
+            while (const auto* element = llvm::dyn_cast<llvm::GEPOperator>(pointer))
             {
-                const llvm::Value* a = stripIntegerCasts(index.get());
-                const llvm::Value* b = stripIntegerCasts(rightIndex->get());
-                ++rightIndex;
-                if (llvm::isa<llvm::ConstantInt>(a) && a == b)
-                    continue;
-                const auto* al = llvm::dyn_cast<llvm::LoadInst>(a);
-                const auto* bl = llvm::dyn_cast<llvm::LoadInst>(b);
-                if (indexed || al == nullptr || bl == nullptr ||
-                    al->getPointerOperand() != first.induction ||
-                    bl->getPointerOperand() != second.induction)
-                    return false;
-                indexed = true;
+                const unsigned width = layout.getIndexSizeInBits(element->getPointerAddressSpace());
+                llvm::SmallMapVector<llvm::Value*, llvm::APInt, 4> variables;
+                llvm::APInt constant(width, 0);
+                if (width > 64 || !element->collectOffset(layout, width, variables, constant) ||
+                    variables.size() > (address.index == nullptr ? 1U : 0U))
+                    return std::nullopt;
+                if (!variables.empty())
+                {
+                    address.index = variables.front().first;
+                    address.scale = variables.front().second.getSExtValue();
+                }
+                const auto offset = llvm::checkedAdd(address.offset, constant.getSExtValue());
+                if (!offset)
+                    return std::nullopt;
+                address.offset = *offset;
+                pointer = element->getPointerOperand()->stripPointerCasts();
             }
-            return indexed;
+            address.object = pointer;
+            return address;
+        }
+
+        SlotBound slotBound(const llvm::Value* value)
+        {
+            // A negative constant is left to identity: signed and unsigned loops read it apart.
+            if (const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(value);
+                constant != nullptr && !constant->isNegative() &&
+                constant->getValue().getActiveBits() < 64)
+                return {.index = constant->getSExtValue()};
+            return {.value = value};
+        }
+
+        /// The slots `pointer` names over the rounds of a counted loop: its only varying index
+        /// must be the counter, read in the round before the counter is raised. Read after,
+        /// it names the next round's slot, one past the range.
+        std::optional<SlotRange> countedSlots(const llvm::Value* pointer, const CountedLoop& count,
+                                              const llvm::DominatorTree& dominators,
+                                              const llvm::DataLayout& layout)
+        {
+            const std::optional<SlotAddress> address =
+                pointer != nullptr ? slotAddress(pointer, layout) : std::nullopt;
+            if (!address || address->index == nullptr || address->scale <= 0)
+                return std::nullopt;
+            const auto* read = llvm::dyn_cast<llvm::LoadInst>(stripIntegerCasts(address->index));
+            if (read == nullptr || read->getPointerOperand() != count.induction ||
+                !dominators.dominates(read, count.increment))
+                return std::nullopt;
+            return SlotRange{.array = address->object,
+                             .origin = address->offset,
+                             .stride = address->scale,
+                             .begin = slotBound(count.begin),
+                             .end = slotBound(count.end),
+                             .predicate = count.predicate};
+        }
+
+        /// The slots `create` stores its handle into over the run, when its address names them.
+        std::optional<SlotRange> slotsFilled(const llvm::CallBase& create,
+                                             const llvm::LoopInfo& loops,
+                                             const llvm::DominatorTree& dominators)
+        {
+            const llvm::Loop* loop = loops.getLoopFor(create.getParent());
+            const std::optional<CountedLoop> count =
+                loop != nullptr ? countedLoop(*loop, dominators) : std::nullopt;
+            if (!count)
+                return std::nullopt;
+            return countedSlots(create.getArgOperand(0), *count, dominators,
+                                create.getModule()->getDataLayout());
         }
 
         std::optional<ThreadCompletion>
-        loopCompletion(const llvm::CallBase& create, const JoinSite& join,
+        loopCompletion(const llvm::CallBase& create, const JoinSite& join, const SpawnFills& fills,
                        const llvm::LoopInfo& loops, const llvm::DominatorTree& dominators,
                        const ConcurrencySymbolClassifier& classifier)
         {
@@ -598,11 +742,16 @@ namespace ctrace::concurrency::internal::analysis
                 return std::nullopt;
             const auto a = countedLoop(*first, dominators);
             const auto b = countedLoop(*second, dominators);
-            const bool indexed = a && b && a->begin == b->begin && a->end == b->end &&
-                                 a->predicate == b->predicate &&
-                                 sameIndexedRange(handleAddress(*create.getArgOperand(0), false),
-                                                  handleAddress(join.handle(), true), *a, *b) &&
-                                 arrayStorageUnchanged(create, *join.call, dominators, classifier);
+            // The join loop joins every thread the spawn started when it visits every slot the
+            // spawn filled, and no other spawn stores over them in between.
+            const auto filled = fills.find(&create);
+            const std::optional<SlotRange> visited =
+                b ? countedSlots(handleAddress(join.handle(), true), *b, dominators,
+                                 create.getModule()->getDataLayout())
+                  : std::nullopt;
+            const bool indexed =
+                filled != fills.end() && visited && covers(*visited, filled->second) &&
+                arrayStorageUnchanged(create, *join.call, &fills, dominators, classifier);
             if (!indexed && !(a && vectorJoinRange(create, join, *first, *second, *a, dominators)))
                 return std::nullopt;
             const auto* firstBranch =
@@ -883,13 +1032,18 @@ namespace ctrace::concurrency::internal::analysis
                 continue;
             const auto& dominators = analyses.getDominatorTree(function);
             const auto& loops = analyses.getLoopInfo(function);
+            SpawnFills fills;
+            for (const auto* create : creates)
+                if (!create->arg_empty())
+                    if (std::optional<SlotRange> filled = slotsFilled(*create, loops, dominators))
+                        fills.emplace(create, *filled);
             for (const auto* create : creates)
                 for (const JoinSite& join : joins)
                 {
                     if (create->arg_empty())
                         continue;
                     if (const std::optional<ThreadCompletion> completion =
-                            loopCompletion(*create, join, loops, dominators, classifier))
+                            loopCompletion(*create, join, fills, loops, dominators, classifier))
                     {
                         result.emplace(create, *completion);
                         break;
@@ -914,7 +1068,8 @@ namespace ctrace::concurrency::internal::analysis
                             canonicalStorageGroupId(*other->getArgOperand(0)) == first)
                             overwritten = true;
                     if (!overwritten && sameAddress && first && first == second &&
-                        arrayStorageUnchanged(*create, *join.call, dominators, classifier) &&
+                        arrayStorageUnchanged(*create, *join.call, nullptr, dominators,
+                                              classifier) &&
                         dominators.dominates(create, join.call) &&
                         completionCoversReturns(*create, *join.call))
                     {
