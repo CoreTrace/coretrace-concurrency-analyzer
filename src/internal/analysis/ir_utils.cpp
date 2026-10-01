@@ -17,7 +17,9 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IR/Operator.h>
 #include <llvm/IR/Value.h>
+#include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/Support/MathExtras.h>
 #include <llvm/Support/raw_ostream.h>
 
 #include <charconv>
@@ -175,6 +177,9 @@ namespace ctrace::concurrency::internal::analysis
             /// Whether the walk may end at a local variable. Only the analyses naming a local
             /// object handed to a thread ask for that; everyone else stops short of locals.
             bool acceptsLocalStorage = false;
+            /// The offset as a function of an integer parameter, while every variable index seen
+            /// is that parameter; empty once another one appears.
+            std::optional<LinearIndex> index = LinearIndex{};
 
             [[nodiscard]] MemoryRegion region(std::uint64_t byteSize = 0) const
             {
@@ -427,6 +432,47 @@ namespace ctrace::concurrency::internal::analysis
             walk.byteOffset += offset.getSExtValue();
         }
 
+        /// Folds the GEP into the offset as a function of an integer parameter. The walk keeps it
+        /// only while the one variable index it meets is a parameter as the function received it:
+        /// any other, one the function computes, fixes or reads, leaves the offset unknown.
+        void accumulateGepIndex(AccessPathWalk& walk, const llvm::GEPOperator& gep)
+        {
+            if (!walk.index.has_value())
+                return;
+
+            if (walk.layout == nullptr)
+            {
+                walk.index.reset();
+                return;
+            }
+
+            const unsigned width = walk.layout->getIndexTypeSizeInBits(gep.getType());
+            llvm::SmallMapVector<llvm::Value*, llvm::APInt, 4> variableOffsets;
+            llvm::APInt constantOffset(width, 0);
+            if (!gep.collectOffset(*walk.layout, width, variableOffsets, constantOffset))
+            {
+                walk.index.reset();
+                return;
+            }
+
+            walk.index = substituteLinearIndex(
+                LinearIndex{.scale = 1, .offset = constantOffset.getSExtValue()}, *walk.index);
+            for (const auto& [variable, scale] : variableOffsets)
+            {
+                const std::optional<LinearIndex> value = resolveLinearIndex(*variable);
+                if (!walk.index.has_value() || walk.index->parameter.has_value() ||
+                    !value.has_value() || !value->parameter.has_value())
+                {
+                    walk.index.reset();
+                    return;
+                }
+
+                walk.index = substituteLinearIndex(
+                    LinearIndex{.scale = scale.getSExtValue(), .offset = walk.index->offset},
+                    *value);
+            }
+        }
+
         /// Resolves a call result only when every normal return names the same function.
         /// This includes lambda conversion operators without depending on their ABI names.
         /// Arguments and other computed returns stay unresolved: they belong to the callee's
@@ -504,6 +550,7 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         noteGepTypes(*walk, *gep);
                         accumulateGepOffset(*walk, *gep);
+                        accumulateGepIndex(*walk, *gep);
                     }
                     current = stripCastsKeepingIndexing(gep->getPointerOperand());
                     continue;
@@ -1061,8 +1108,96 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         if (binding.has_value())
+        {
             binding->designated = walk.designatedRegion();
+            if (walk.index.has_value() && walk.index->parameter.has_value())
+                binding->index = walk.index;
+        }
         return binding;
+    }
+
+    std::optional<LinearIndex> resolveLinearIndex(const llvm::Value& value)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        const llvm::Value* current = &value;
+        while (current != nullptr && seen.insert(current).second)
+        {
+            // Only a value sign and zero extension both leave unchanged, whichever the callee
+            // applies: through a pointer into an array, a negative index is a valid one. A
+            // constant wider than an int64 names nothing the offsets can hold.
+            if (const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(current))
+            {
+                if (constant->isNegative() || constant->getValue().getActiveBits() > 63)
+                    return std::nullopt;
+                return LinearIndex{.offset = static_cast<std::int64_t>(constant->getZExtValue())};
+            }
+
+            if (const auto* argument = llvm::dyn_cast<llvm::Argument>(current))
+                return LinearIndex{.parameter = argument->getArgNo(), .scale = 1};
+
+            if (llvm::isa<llvm::SExtInst, llvm::ZExtInst>(current))
+            {
+                current = llvm::cast<llvm::CastInst>(current)->getOperand(0);
+                continue;
+            }
+
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(current))
+            {
+                current = followStoredPointerValue(*load, seen);
+                continue;
+            }
+
+            return std::nullopt;
+        }
+
+        return std::nullopt;
+    }
+
+    std::optional<unsigned> integerSourceParameter(const llvm::Value& value)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        std::vector<const llvm::Value*> pending{&value};
+        while (!pending.empty())
+        {
+            const llvm::Value* current = pending.back();
+            pending.pop_back();
+            if (current == nullptr || !current->getType()->isIntegerTy() ||
+                !seen.insert(current).second)
+            {
+                continue;
+            }
+
+            if (const auto* argument = llvm::dyn_cast<llvm::Argument>(current))
+                return argument->getArgNo();
+
+            if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(current))
+            {
+                pending.push_back(followStoredPointerValue(*load, seen));
+            }
+            else if (llvm::isa<llvm::BinaryOperator, llvm::CastInst>(current))
+            {
+                for (const llvm::Value* operand : llvm::cast<llvm::User>(current)->operand_values())
+                    pending.push_back(operand);
+            }
+        }
+        return std::nullopt;
+    }
+
+    std::optional<LinearIndex> substituteLinearIndex(const LinearIndex& outer,
+                                                     const LinearIndex& inner)
+    {
+        if (outer.widened || inner.widened)
+            return LinearIndex{.parameter = inner.parameter, .widened = true};
+
+        LinearIndex result{.parameter = inner.parameter};
+        std::int64_t shift = 0;
+        if (llvm::MulOverflow(outer.scale, inner.scale, result.scale) ||
+            llvm::MulOverflow(outer.scale, inner.offset, shift) ||
+            llvm::AddOverflow(outer.offset, shift, result.offset))
+        {
+            return std::nullopt;
+        }
+        return result;
     }
 
     namespace

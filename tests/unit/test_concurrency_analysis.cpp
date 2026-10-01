@@ -1203,6 +1203,137 @@ namespace
              .intent = "a recursion handing on its pointer unchanged keeps each field apart "
                        "(#117)"},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameter_distinct_elements_no_fp.c",
+             .intent = "a helper's store at the index each call passes: distinct elements (#159)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameter_distinct_elements_increment_no_fp.c",
+             .intent = "a helper's increment at the index each call passes: distinct elements "
+                       "(#159)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameter_same_element.c",
+             .intent = "two calls passing the same index race on that element (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameter_unknown_at_calls.c",
+             .intent = "indices unknown at both calls may name one element (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameter_known_against_unknown.c",
+             .intent = "an unknown index may name the element a known one does (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameter_two_calls_below_main_no_fp.c",
+             .intent = "a constant index passed two calls below main still places the access "
+                       "(#159)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameter_forwarded_no_fp.c",
+             .intent = "an index handed on unchanged by another helper still places the access "
+                       "(#159)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_expression_same_element.c",
+             .intent = "an index computed from the parameter is not the parameter (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_two_index_parameters_same_element.c",
+             .intent = "two variable indices leave the element unknown (#159)",
+             .dataRace = 1, .racingSymbol = "grid"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameter_negative_through_pointer.c",
+             .intent = "a negative index is not read as a large unsigned one (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_pointer_and_index_parameters_no_fp.c",
+             .intent = "a helper's access through its pointer at its index: distinct elements "
+                       "(#159)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_pointer_and_index_parameters_same_element.c",
+             .intent = "the pointer and the index together name one element (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_pointer_and_forwarded_index_no_fp.c",
+             .intent = "an index handed on to a helper indexing a pointer still places it (#159)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_from_unknown_element.c",
+             .intent = "a known index from an unknown element stays unknown (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_parameters_forwarded_twice.c",
+             .intent = "two indices handed on from two parameters stay apart (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_opaque_call_at_index_parameter_reaches_earlier_element.c",
+             .intent = "a call handed an element may reach any element, whatever the index "
+                       "(#159, #99)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_memset_from_index_parameter_no_fp.c",
+             .intent = "a memset from the element an index picks runs forward only (#159)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_index_too_large_stays_unknown.c",
+             .intent = "an index whose offset overflows stays unknown (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_called_with_integers_by_three_contexts.c",
+             .intent = "a call handing only integers leaves the callee's other accesses where "
+                       "they were (#159)",
+             .dataRace = 1, .racingSymbol = "total"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_main_indexes_with_its_argument.c",
+             .intent = "an index no call passes stays unknown in the function (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_index_parameter_unchanged_no_fp.c",
+             .intent = "an index a recursion hands on unchanged terminates and keeps its element "
+                       "(#159)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_index_parameter_advancing.c",
+             .intent = "an index a recursion moves terminates and stays unknown (#159, #117)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_index_advancing_from_main_and_thread.c",
+             .intent = "two recursions moving their index up race once (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_pointer_advancing_from_main_and_thread.c",
+             .intent = "two recursions moving their pointer race once (#159, #118)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_index_descending_from_main_and_thread.c",
+             .intent = "two recursions moving their index down race once (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_mutual_recursion_index_from_main_and_thread.c",
+             .intent = "two mutual recursions moving their index race once (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_constant_index_from_main_and_thread.c",
+             .intent = "a recursive call passing a constant is widened too: one race (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_index_through_wrapper.c",
+             .intent = "a recursion's widened accesses follow the index through a wrapper (#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_mutual_recursion_index_in_other_position.c",
+             .intent = "around a cycle the index is followed from its parameter, not its position "
+                       "(#159)",
+             .dataRace = 1, .racingSymbol = "slots"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_recursion_index_from_pointer_caller.c",
+             .intent = "a recursion's accesses never wait on a pointer its calls cannot name "
+                       "(#159)",
+             .dataRace = 1, .racingSymbol = "counts"},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_member_indexes_member_array_no_fp.cpp",
+             .intent = "a method's access at its index in its object: distinct elements (#159)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_member_indexes_member_array_same_element.cpp",
+             .intent = "a method's access at the same index in one object races (#159)",
+             .dataRace = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/cpp_thread_started_on_index_function.cpp",
+             .intent = "a thread started on the function passes no index a call shows (#159)",
+             .dataRace = 1, .racingSymbol = "_ZL5slots", .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_joined_in_other_function_no_fp.c",
              .intent = "a join in another function ends the thread through the same field (#99)"},
             {.path = "tests/fixtures/concurrency/data-race/"

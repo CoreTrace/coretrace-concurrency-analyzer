@@ -179,11 +179,23 @@ namespace ctrace::concurrency::internal::analysis
                 if (!place.has_value())
                 {
                     touchWhole(footprint_.all, kind);
-                    touchWhole(footprint_.unshown, kind);
+                    if (!placedAtCalls(pointer, reach))
+                        touchWhole(footprint_.unshown, kind);
                     return;
                 }
 
                 addRange(footprint_.all, kind, rangeOf(*place, isAtomic));
+            }
+
+            /// An access at the element an integer parameter picks is placed at each call, at the
+            /// element the call passes or anywhere in the object when the call's is unknown.
+            bool placedAtCalls(const llvm::Value& pointer, Reach reach) const
+            {
+                if (reach != Reach::IntoObject)
+                    return false;
+
+                const std::optional<RootBinding> root = rootInObject(pointer);
+                return root.has_value() && root->index.has_value();
             }
 
             /// Records a thread handle the function writes through `pointer`, which no access
