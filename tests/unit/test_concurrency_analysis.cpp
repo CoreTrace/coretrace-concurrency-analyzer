@@ -1919,6 +1919,33 @@ namespace
                      "thread_argument_returned_after_status_helper_failure.c",
              .intent = "a helper reporting a failed join has not kept the frame alive (#121)",
              .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_after_failed_join.c",
+             .intent = "a join that failed has not kept the frame alive (#122)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_after_failed_local_join.c",
+             .intent = "a join of a local handle that failed has not kept the frame alive (#122)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_aborts_on_failed_join_no_fp.c",
+             .intent = "returning only past a successful join keeps the frame alive (#122)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_without_join.c",
+             .intent = "returning without a join leaves the thread reading a gone frame (#122)",
+             .dataRace = 1, .missingJoin = 1, .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_on_both_branches_no_fp.c",
+             .intent = "joins on both branches keep the frame alive though neither dominates the "
+                       "return (#122); the missing join is #143, the race #113",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_joined_once_no_fp.c",
+             .intent = "one join before the return keeps the frame alive (#122)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_on_one_branch.c",
+             .intent = "a join on one branch leaves the other returning while the thread runs "
+                       "(#122)",
+             .dataRace = 1, .missingJoin = 1, .threadArgumentEscape = 1},
 
             {.path = "tests/fixtures/concurrency/thread-escape/std_thread_ref_capture_joined_no_fp.cpp",
              .intent = "a by-reference capture is safe when the std::thread is joined before return"},
@@ -2087,6 +2114,32 @@ namespace
              .intent = "a thread that never touches its argument cannot use it after the free"},
             {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_reassigned_then_freed_no_fp.c",
              .intent = "the freed pointer is another allocation than the one the thread was given"},
+            {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_freed_after_failed_join.c",
+             .intent = "a free on the branch where the join failed comes too early (#122)",
+             .threadArgumentFreed = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_freed_after_failed_local_join.c",
+             .intent = "the same with a local handle, which the completion proof covers (#122)",
+             .threadArgumentFreed = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_freed_after_successful_join_no_fp.c",
+             .intent = "a free on the branch where the join succeeded comes after the thread (#122)"},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_joined_on_both_branches_then_freed_no_fp.c",
+             .intent = "joins on both branches precede the free though neither dominates it "
+                       "(#122); the missing join is #143, the race #113",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_joined_once_then_freed_no_fp.c",
+             .intent = "one join precedes the free (#122)"},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_joined_on_one_branch_then_freed.c",
+             .intent = "a join on one branch leaves the other freeing while the thread runs (#122)",
+             .dataRace = 1, .missingJoin = 1, .threadArgumentFreed = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_freed_before_join_after_branch.c",
+             .intent = "a free before the join, past a branch, comes too early (#122)",
+             .threadArgumentFreed = 1},
             {.path = "tests/fixtures/concurrency/use-after-free/use_after_free_concurrent.c",
              .intent = "freeing through a shared pointer another thread reads races on the pointer",
              .dataRace = 1,
@@ -2108,6 +2161,21 @@ namespace
              .threadLocalEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-local/tls_pointer_reassigned_no_fp.c",
              .intent = "a pointer that also receives heap memory is not known to reach a dead thread-local"},
+            {.path = "tests/fixtures/concurrency/thread-local/"
+                     "tls_read_after_joins_on_both_branches.c",
+             .intent = "joins on both branches end the thread and its thread-local (#122); the "
+                       "missing join is #143, the race #113",
+             .dataRace = 1, .missingJoin = 1, .threadLocalEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_read_after_failed_join_race.c",
+             .intent = "where the join failed the thread and its thread-local may still live "
+                       "(#122)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_read_after_successful_join.c",
+             .intent = "where the join succeeded the thread-local has ended with its thread (#122)",
+             .threadLocalEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-local/"
+                     "tls_read_before_thread_started_no_fp.c",
+             .intent = "a read before the thread starts is not after its end (#122)"},
 
             // --- imported thread-local fixtures (Nihil, 91e7431; #50) ---
             {.path = "tests/fixtures/concurrency/thread-local/c_tls_dangling_ptr.c",

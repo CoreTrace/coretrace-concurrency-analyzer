@@ -751,30 +751,55 @@ namespace ctrace::concurrency::internal::analysis
 
     bool completionCoversReturns(const llvm::Instruction& start, const JoinSuccess& completion)
     {
-        // Past `after`, its whole block is cut off; past a branch, only the success edge is.
-        const llvm::BasicBlock* cut =
-            completion.after != nullptr ? completion.after->getParent() : nullptr;
-        const llvm::Function* function =
-            cut != nullptr ? cut->getParent() : completion.branch->getParent();
-        if (start.getFunction() != function)
+        return completedOnEveryPath(start, {completion});
+    }
+
+    bool completedOnEveryPath(const llvm::Instruction& start,
+                              const std::vector<JoinSuccess>& completions,
+                              const llvm::Instruction* point)
+    {
+        // A completion past an instruction cuts off what follows it, successors included; one
+        // past a branch cuts off that edge only.
+        llvm::SmallPtrSet<const llvm::BasicBlock*, 32> entered;
+        std::vector<const llvm::BasicBlock*> pending;
+        // Whether a path walking `block` from `first` reaches `point`, or a return when there is
+        // no point, before any completion. Successors it may go on to are queued.
+        auto reaches = [&](const llvm::BasicBlock& block, llvm::BasicBlock::const_iterator first)
+        {
+            for (auto instruction = first; instruction != block.end(); ++instruction)
+            {
+                if (&*instruction == point)
+                    return true;
+                for (const JoinSuccess& completion : completions)
+                {
+                    if (completion.after == &*instruction)
+                        return false;
+                }
+            }
+            if (point == nullptr && llvm::isa<llvm::ReturnInst>(block.getTerminator()))
+                return true;
+            for (const llvm::BasicBlock* successor : llvm::successors(&block))
+            {
+                bool cutOff = false;
+                for (const JoinSuccess& completion : completions)
+                {
+                    cutOff = cutOff ||
+                             (completion.branch == &block && completion.successor == successor);
+                }
+                if (!cutOff && entered.insert(successor).second)
+                    pending.push_back(successor);
+            }
             return false;
-        if (start.getParent() == cut)
-            return &start == completion.after || start.comesBefore(completion.after);
-        llvm::SmallPtrSet<const llvm::BasicBlock*, 32> visited;
-        std::vector<const llvm::BasicBlock*> pending{start.getParent()};
+        };
+
+        if (reaches(*start.getParent(), start.getIterator()))
+            return false;
         while (!pending.empty())
         {
             const llvm::BasicBlock* block = pending.back();
             pending.pop_back();
-            if (block == cut || !visited.insert(block).second)
-                continue;
-            if (llvm::isa<llvm::ReturnInst>(block->getTerminator()))
+            if (reaches(*block, block->begin()))
                 return false;
-            for (const llvm::BasicBlock* successor : llvm::successors(block))
-            {
-                if (block != completion.branch || successor != completion.successor)
-                    pending.push_back(successor);
-            }
         }
         return true;
     }
