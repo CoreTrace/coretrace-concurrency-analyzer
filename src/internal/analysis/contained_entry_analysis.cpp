@@ -11,6 +11,7 @@
 #include <llvm/IR/Module.h>
 
 #include <functional>
+#include <optional>
 #include <unordered_map>
 
 namespace ctrace::concurrency::internal::analysis
@@ -20,7 +21,8 @@ namespace ctrace::concurrency::internal::analysis
         struct Frame
         {
             const llvm::Instruction* start = nullptr;
-            const llvm::Instruction* completion = nullptr;
+            /// Where everything started at `start` has certainly ended.
+            std::optional<JoinSuccess> completion;
         };
 
         struct Occurrence
@@ -46,8 +48,8 @@ namespace ctrace::concurrency::internal::analysis
                 a->start->getFunction() != b->start->getFunction())
                 return false;
             const auto& dominators = analyses.getDominatorTree(*a->start->getFunction());
-            return (a->completion && dominators.dominates(a->completion, b->start)) ||
-                   (b->completion && dominators.dominates(b->completion, a->start));
+            return (a->completion && a->completion->covers(*b->start, dominators)) ||
+                   (b->completion && b->completion->covers(*a->start, dominators));
         }
     } // namespace
 
@@ -141,8 +143,10 @@ namespace ctrace::concurrency::internal::analysis
                             continue;
                         }
                         const auto found = completions.find(call);
-                        result.push_back(Occurrence{
-                            entry, {{call, found == completions.end() ? nullptr : found->second}}});
+                        result.push_back(
+                            Occurrence{entry,
+                                       {{call, found == completions.end() ? std::nullopt
+                                                                          : found->second.ended}}});
                         continue;
                     }
                     const auto* callee = classifier.directCallee(*call);
@@ -163,7 +167,9 @@ namespace ctrace::concurrency::internal::analysis
                         if (const auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(call))
                             completedCall =
                                 &*invoke->getNormalDest()->getFirstNonPHIOrDbgOrLifetime();
-                        occurrence.frames.push_back({call, contained ? completedCall : nullptr});
+                        occurrence.frames.push_back(
+                            {call, contained ? std::optional(JoinSuccess{.after = completedCall})
+                                             : std::nullopt});
                         result.push_back(std::move(occurrence));
                     }
                 }

@@ -768,6 +768,27 @@ namespace
                           "recursive_deadlock should report reacquiring the same lock");
     }
 
+    bool testHelperOrderReportedWhereTaken()
+    {
+        const std::optional<DiagnosticReport> report = analyzeFixture(
+            "tests/fixtures/concurrency/deadlock/deadlock_helper_order_kept_where_taken.c",
+            AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic =
+            findFirstDiagnosticForRule(*report, RuleId::DeadlockLockOrder);
+        bool pointsToHelper = diagnostic != nullptr && diagnostic->location.function == "forward";
+        if (diagnostic != nullptr)
+        {
+            for (const ctrace::concurrency::RelatedLocation& related : diagnostic->relatedLocations)
+                pointsToHelper = pointsToHelper || related.location.function == "forward";
+        }
+        return assertTrue(pointsToHelper,
+                          "an order its calls add no lock to should point to forward, where it is "
+                          "taken (#136)");
+    }
+
     bool testConsistentLockOrderHasNoDeadlock()
     {
         const std::optional<DiagnosticReport> report = analyzeFixture(
@@ -1203,6 +1224,132 @@ namespace
                      "data_race_task_join_failure_ignored_in_other_function_race.c",
              .intent = "a function returning past a failed join leaves the thread running (#99)",
              .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_checked_no_fp.c",
+             .intent = "a join result kept in a local and tested proves success past the test "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_failed_race.c",
+             .intent = "on the branch where a kept join result reports a failure the thread may "
+                       "still run (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_unread_no_fp.c",
+             .intent = "a join result kept in a local never read is ignored, like an unused one "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_printed_race.c",
+             .intent = "a kept join result read but never tested proves nothing (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_reported_no_fp.c",
+             .intent = "printing a tested join result does not undo what the test proves (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_stored_join_overwritten_race.c",
+             .intent = "a local written again no longer holds the join result it tests (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_previous_join_status_race.c",
+             .intent = "a kept join status tested before the next join is that earlier join's "
+                       "(#121)",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_success_no_fp.c",
+             .intent = "a helper returning its join's status is tested like the join (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_failure_race.c",
+             .intent = "on the branch where a helper's join status reports a failure the thread "
+                       "may still run (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_local_helper_join_status_success_no_fp.c",
+             .intent = "a helper returning the status of joining the handle it is given ends that "
+                       "thread where the status reads as success (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_nested_helper_join_status_success_no_fp.c",
+             .intent = "a function returning a helper's join status is tested like the join "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_negated_race.c",
+             .intent = "a helper transforming its join's status is not tested like the join "
+                       "(#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_logged_no_fp.c",
+             .intent = "a helper that also logs its join's status still returns that status "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_recorded_no_fp.c",
+             .intent = "a helper that also records its join's status still returns that status "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_logged_on_failure_no_fp.c",
+             .intent = "a status read back past a branch is still the one the helper kept (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_status_compared_race.c",
+             .intent = "a helper returning a comparison of its join's status does not return the "
+                       "status (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_join_failure_swallowed_race.c",
+             .intent = "a helper overwriting its kept status no longer returns it (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_aborting_on_join_status_no_fp.c",
+             .intent = "a function testing a helper's join status before every return joins like "
+                       "the join (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_helper_ignoring_join_status_race.c",
+             .intent = "a function going on past a helper's failed join has not joined (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_failed_local_join_race.c",
+             .intent = "a join proven to cover every return ends a local handle's thread only where "
+                       "it succeeded (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_failed_global_join_race.c",
+             .intent = "the failed-join read with a global handle, which no completion proof "
+                       "covers (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_successful_local_join_no_fp.c",
+             .intent = "past a local handle's successful join the thread has ended (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_local_join_status_reported_no_fp.c",
+             .intent = "a local handle's join status tested, printed and aborted on ends the "
+                       "thread past the test (#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_failed_local_join_status_stored_race.c",
+             .intent = "a kept join status reporting a failure leaves a local handle's thread "
+                       "running (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_read_after_local_helper_join_status_failure_race.c",
+             .intent = "a helper reporting a failed join has not ended the thread of the handle it "
+                       "was given (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_started_after_failed_local_join_race.c",
+             .intent = "a thread started where joining another failed runs beside it (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_started_after_failed_global_join_race.c",
+             .intent = "the same with the first handle in a global (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_writer_after_join_loop_aborting_on_failure_no_fp.c",
+             .intent = "a join loop that aborts on a failed join ends every thread it joins "
+                       "(#121)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_writer_after_join_loop_ignoring_failure_race.c",
+             .intent = "a join loop going on past a failed join joins every handle but ends "
+                       "nothing (#121)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_writer_after_join_loop_checking_stored_status_no_fp.c",
+             .intent = "a join loop that aborts on a failed kept status ends every thread it joins "
+                       "(#121)"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_restarted_in_other_function_race.c",
              .intent = "a join before a restart ends the earlier thread, not the restarted one "
@@ -1680,6 +1827,98 @@ namespace
              .intent = "a ring whose orders are all taken by address but one still deadlocks "
                        "(#138)",
              .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_starts_worker_then_locks.c",
+             .intent = "a worker the helper starts runs beside the orders it then takes (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_joins_worker_then_locks_no_diagnostic.c",
+             .intent = "a worker the helper joins has ended before the orders it then takes "
+                       "(#124)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_helper_starts_worker_then_locks_named_accounts.c",
+             .intent = "a helper starts the worker, then locks two accounts by name (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_called_while_worker_runs.c",
+             .intent = "the worker main started runs beside the helper's orders (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_helper_joins_worker_then_locks_named_accounts_no_diagnostic.c",
+             .intent = "a helper joins the worker, then locks two accounts by name (#124)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_called_after_worker_joined_no_diagnostic.c",
+             .intent = "the worker main joined is over before the helper's orders (#124)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_called_by_helper_starting_worker.c",
+             .intent = "a worker started one call above the locking helper runs beside its "
+                       "orders (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_called_by_helper_joining_worker_no_diagnostic.c",
+             .intent = "a worker joined one call above the locking helper has ended before its "
+                       "orders (#124)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_starts_worker_also_passed_in.c",
+             .intent = "a worker the helper starts runs beside its orders even at a call no "
+                       "worker runs at, though another call passes one in (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_locks_before_and_after_starting_worker.c",
+             .intent = "two acquisitions of the helper that give one order at the call keep the "
+                       "threads beside either (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_transfer_helper_after_call_starting_worker.c",
+             .intent = "a worker a call of the helper leaves running runs beside the helper's "
+                       "orders (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_relayed_helper_locks_before_and_after_starting_worker.c",
+             .intent = "an order a caller keeps open widens once a later round finds another "
+                       "acquisition behind it, and its callers see it (#124)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_taken_through_parameter_no_diagnostic.c",
+             .intent = "the account lock both threads pass their helper is a gate around its "
+                       "orders (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_taken_by_name_in_helpers_no_diagnostic.c",
+             .intent = "the helpers take the gate by name (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_and_inversion_through_parameters_no_diagnostic.c",
+             .intent = "the gate and the inverted locks are all passed to the helpers (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_held_at_concurrent_calls_only_no_diagnostic.c",
+             .intent = "a gate held at the calls that can run together, not at one made before "
+                       "the worker exists (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_held_at_every_call_no_diagnostic.c",
+             .intent = "a gate held at every call to the helpers (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_helper_order_kept_where_taken.c",
+             .intent = "calls that add no lock leave the helper's order where it is taken (#136)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_ledger_reacquired_under_different_locks.c",
+             .intent = "a reacquisition in a helper called under different locks is one, where it "
+                       "is taken (#136)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_settle_run_directly_and_as_threads.c",
+             .intent = "a function also started as a thread keeps its own orders for the threads "
+                       "(#136)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_deadlock_default_delete_locks_resource.cpp",
+             .intent = "a function of namespace std keeps its own orders, which no call takes "
+                       "over (#136)",
+             .deadlock = 1, .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gated_helper_starts_worker_then_locks.c",
+             .intent = "an order judged at the call keeps the worker the helper starts before it "
+                       "(#136)",
+             .deadlock = 1},
 
             // --- imported deadlock fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/deadlock/cpp_deadlock_self_lock.cpp",
@@ -1829,6 +2068,47 @@ namespace
              .intent = "a join loop one short of the creation range leaves a worker reading a gone frame",
              .missingJoin = 1,
              .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_after_failed_join_in_branch.c",
+             .intent = "a join every return passes has not kept the frame alive where it failed (#121)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_aborts_on_failed_join_in_branch_no_fp.c",
+             .intent = "past a join's success on every return the frame outlives the thread (#121)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_by_status_helper_no_fp.c",
+             .intent = "a helper's join status tested before every return keeps the frame alive (#121)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_after_status_helper_failure.c",
+             .intent = "a helper reporting a failed join has not kept the frame alive (#121)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_after_failed_join.c",
+             .intent = "a join that failed has not kept the frame alive (#122)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_after_failed_local_join.c",
+             .intent = "a join of a local handle that failed has not kept the frame alive (#122)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_aborts_on_failed_join_no_fp.c",
+             .intent = "returning only past a successful join keeps the frame alive (#122)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_returned_without_join.c",
+             .intent = "returning without a join leaves the thread reading a gone frame (#122)",
+             .dataRace = 1, .missingJoin = 1, .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_on_both_branches_no_fp.c",
+             .intent = "joins on both branches keep the frame alive though neither dominates the "
+                       "return (#122); the missing join is #143, the race #113",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_joined_once_no_fp.c",
+             .intent = "one join before the return keeps the frame alive (#122)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_joined_on_one_branch.c",
+             .intent = "a join on one branch leaves the other returning while the thread runs "
+                       "(#122)",
+             .dataRace = 1, .missingJoin = 1, .threadArgumentEscape = 1},
 
             {.path = "tests/fixtures/concurrency/thread-escape/std_thread_ref_capture_joined_no_fp.cpp",
              .intent = "a by-reference capture is safe when the std::thread is joined before return"},
@@ -1997,6 +2277,32 @@ namespace
              .intent = "a thread that never touches its argument cannot use it after the free"},
             {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_reassigned_then_freed_no_fp.c",
              .intent = "the freed pointer is another allocation than the one the thread was given"},
+            {.path = "tests/fixtures/concurrency/use-after-free/heap_arg_freed_after_failed_join.c",
+             .intent = "a free on the branch where the join failed comes too early (#122)",
+             .threadArgumentFreed = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_freed_after_failed_local_join.c",
+             .intent = "the same with a local handle, which the completion proof covers (#122)",
+             .threadArgumentFreed = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_freed_after_successful_join_no_fp.c",
+             .intent = "a free on the branch where the join succeeded comes after the thread (#122)"},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_joined_on_both_branches_then_freed_no_fp.c",
+             .intent = "joins on both branches precede the free though neither dominates it "
+                       "(#122); the missing join is #143, the race #113",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_joined_once_then_freed_no_fp.c",
+             .intent = "one join precedes the free (#122)"},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_joined_on_one_branch_then_freed.c",
+             .intent = "a join on one branch leaves the other freeing while the thread runs (#122)",
+             .dataRace = 1, .missingJoin = 1, .threadArgumentFreed = 1},
+            {.path = "tests/fixtures/concurrency/use-after-free/"
+                     "heap_arg_freed_before_join_after_branch.c",
+             .intent = "a free before the join, past a branch, comes too early (#122)",
+             .threadArgumentFreed = 1},
             {.path = "tests/fixtures/concurrency/use-after-free/use_after_free_concurrent.c",
              .intent = "freeing through a shared pointer another thread reads races on the pointer",
              .dataRace = 1,
@@ -2018,6 +2324,21 @@ namespace
              .threadLocalEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-local/tls_pointer_reassigned_no_fp.c",
              .intent = "a pointer that also receives heap memory is not known to reach a dead thread-local"},
+            {.path = "tests/fixtures/concurrency/thread-local/"
+                     "tls_read_after_joins_on_both_branches.c",
+             .intent = "joins on both branches end the thread and its thread-local (#122); the "
+                       "missing join is #143, the race #113",
+             .dataRace = 1, .missingJoin = 1, .threadLocalEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_read_after_failed_join_race.c",
+             .intent = "where the join failed the thread and its thread-local may still live "
+                       "(#122)",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/thread-local/tls_read_after_successful_join.c",
+             .intent = "where the join succeeded the thread-local has ended with its thread (#122)",
+             .threadLocalEscape = 1},
+            {.path = "tests/fixtures/concurrency/thread-local/"
+                     "tls_read_before_thread_started_no_fp.c",
+             .intent = "a read before the thread starts is not after its end (#122)"},
 
             // --- imported thread-local fixtures (Nihil, 91e7431; #50) ---
             {.path = "tests/fixtures/concurrency/thread-local/c_tls_dangling_ptr.c",
@@ -2531,6 +2852,7 @@ int main()
     ok = testDetachedStdThreadFixtureHasNoMissingJoin() && ok;
     ok = testDeadlockBasicReportsLockOrderCycle() && ok;
     ok = testRecursiveDeadlockReportsReacquiredLock() && ok;
+    ok = testHelperOrderReportedWhereTaken() && ok;
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;

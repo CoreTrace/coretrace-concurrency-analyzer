@@ -160,7 +160,8 @@ namespace ctrace::concurrency::internal::analysis
     std::vector<LockOrderFact>
     LockOrderCollector::collect(const llvm::Function& function,
                                 const std::set<std::string>& initialHeldLocks,
-                                const LiveEntriesByInstruction& liveEntriesByInstruction) const
+                                const LiveEntriesByInstruction& liveEntriesByInstruction,
+                                const LiveEntriesByInstruction& startedEntriesByInstruction) const
     {
         std::vector<LockOrderFact> facts;
         // The acquisitions each fact stands for: every one at its source location, which a macro
@@ -243,6 +244,12 @@ namespace ctrace::concurrency::internal::analysis
                         {
                             liveEntries = liveIt->second;
                         }
+                        ThreadEntrySet startedEntries;
+                        if (const auto startedIt = startedEntriesByInstruction.find(&instruction);
+                            startedIt != startedEntriesByInstruction.end())
+                        {
+                            startedEntries = startedIt->second;
+                        }
 
                         for (const std::string& acquiredLock : change.orderedAcquired)
                         {
@@ -277,6 +284,7 @@ namespace ctrace::concurrency::internal::analysis
                                     .location = location,
                                     .heldLocks = currentLocks,
                                     .liveEntries = liveEntries,
+                                    .startedEntries = startedEntries,
                                     .secondIsRecursive = recursive,
                                 });
                                 factSites.push_back({&instruction});

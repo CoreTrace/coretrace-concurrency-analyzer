@@ -33,41 +33,46 @@ namespace ctrace::concurrency::internal::analysis
 
         struct JoinSite
         {
-            const llvm::Instruction* instruction = nullptr;
             std::string handleGroupId;
+            /// Where the join has certainly waited for its thread, when its result proves it.
+            std::optional<JoinSuccess> success;
         };
 
-        /// True when every way out of the function passes a join of this handle first, which is
-        /// what keeps the frame alive at least as long as the thread.
-        ///
-        /// A function with no return at all — an infinite loop, or one that always exits the
-        /// process — vacuously satisfies this: its frame never goes away.
-        bool joinPrecedesEveryReturn(const llvm::Function& function,
-                                     const std::string& handleGroupId,
-                                     const std::vector<JoinSite>& joins,
-                                     const llvm::DominatorTree& dominatorTree)
+        /// Where the thread `creation` starts has certainly ended: past each successful join of
+        /// its handle, and past the join-range proof. The thread has ended at a point when every
+        /// path from the creation to it passes one of them (`completedOnEveryPath`), whichever
+        /// join each path takes.
+        std::vector<JoinSuccess> endsOf(const llvm::CallBase& creation,
+                                        const std::vector<JoinSite>& joins,
+                                        const ThreadCompletionMap& completions)
         {
-            for (const llvm::BasicBlock& block : function)
+            std::vector<JoinSuccess> ends;
+            if (const auto completion = completions.find(&creation);
+                completion != completions.end() && completion->second.ended.has_value())
             {
-                const llvm::Instruction* terminator = block.getTerminator();
-                if (!llvm::isa<llvm::ReturnInst>(terminator))
-                    continue;
-
-                if (!dominatorTree.isReachableFromEntry(&block))
-                    continue;
-
-                const bool joined =
-                    std::any_of(joins.begin(), joins.end(),
-                                [&](const JoinSite& join)
-                                {
-                                    return join.handleGroupId == handleGroupId &&
-                                           dominatorTree.dominates(join.instruction, terminator);
-                                });
-                if (!joined)
-                    return false;
+                ends.push_back(*completion->second.ended);
             }
 
-            return true;
+            const std::optional<std::string> handleGroupId =
+                canonicalStorageGroupId(*creation.getArgOperand(kHandleOperandIndex));
+            if (!handleGroupId.has_value())
+                return ends;
+            for (const JoinSite& join : joins)
+            {
+                if (join.handleGroupId == *handleGroupId && join.success.has_value())
+                    ends.push_back(*join.success);
+            }
+            return ends;
+        }
+
+        /// True when the thread `creation` starts has ended at `point`, every instance of it: the
+        /// point follows the creation, and every path between them passes one of `ends`. A point
+        /// before the creation is not after its end, whatever joins precede it.
+        bool endedAt(const llvm::CallBase& creation, const llvm::Instruction& point,
+                     const std::vector<JoinSuccess>& ends)
+        {
+            const bool follows = !completedOnEveryPath(creation, {}, &point);
+            return follows && completedOnEveryPath(creation, ends, &point);
         }
 
         /// A local of `function` whose address is stored into `object`, directly or into one of
@@ -175,34 +180,6 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
             return true;
-        }
-
-        /// True when the thread `creation` starts is joined, every instance of it, before `point`:
-        /// the join-range proof covers it, or a join of the same handle dominates the point.
-        bool joinedBefore(const llvm::CallBase& creation, const llvm::Instruction& point,
-                          const std::vector<JoinSite>& joins,
-                          const ThreadCompletionMap& completions,
-                          const llvm::DominatorTree& dominators)
-        {
-            if (const auto completion = completions.find(&creation);
-                completion != completions.end() && dominators.dominates(completion->second, &point))
-            {
-                return true;
-            }
-
-            const std::optional<std::string> handleGroupId =
-                canonicalStorageGroupId(*creation.getArgOperand(kHandleOperandIndex));
-            if (!handleGroupId.has_value())
-                return false;
-            for (const JoinSite& join : joins)
-            {
-                if (join.handleGroupId == *handleGroupId &&
-                    dominators.dominates(join.instruction, &point))
-                {
-                    return true;
-                }
-            }
-            return false;
         }
 
         /// The one store to a local slot, when the slot is only stored to once and loaded from.
@@ -472,8 +449,8 @@ namespace ctrace::concurrency::internal::analysis
                                 canonicalStorageGroupId(*call->getArgOperand(kHandleOperandIndex)))
                         {
                             joins.push_back(JoinSite{
-                                .instruction = &instruction,
                                 .handleGroupId = std::move(*handleGroupId),
+                                .success = joinSuccessOf(*call, kind),
                             });
                         }
                         continue;
@@ -496,18 +473,17 @@ namespace ctrace::concurrency::internal::analysis
 
             for (const auto& [creation, kind] : creations)
             {
-                const std::optional<std::string> handleGroupId =
-                    canonicalStorageGroupId(*creation->getArgOperand(kHandleOperandIndex));
                 const llvm::Function* entry = resolveFunctionValue(*creation->getArgOperand(
                     kind == CallKind::PThreadCreate ? kEntryOperandIndex
                                                     : kStdThreadCallableOperandIndex));
                 const ResolvedSourceLocations locations = resolveSourceLocations(*creation);
+                const std::vector<JoinSuccess> ends = endsOf(*creation, joins, completions);
 
-                const bool escapes =
-                    !completions.contains(creation) &&
-                    escapingLocal(*creation, kind, function) != nullptr &&
-                    !(handleGroupId.has_value() &&
-                      joinPrecedesEveryReturn(function, *handleGroupId, joins, dominatorTree));
+                // The frame outlives the thread when every way out of the function passes one of
+                // its ends. A function that cannot return from there, looping forever or exiting
+                // the process, never loses its frame.
+                const bool escapes = escapingLocal(*creation, kind, function) != nullptr &&
+                                     !completedOnEveryPath(*creation, ends);
                 if (escapes)
                 {
                     facts.escapes.push_back(ThreadArgumentEscapeFact{
@@ -529,7 +505,7 @@ namespace ctrace::concurrency::internal::analysis
                 for (const llvm::CallBase* release : frees)
                 {
                     if (!dominatorTree.dominates(creation, release) ||
-                        joinedBefore(*creation, *release, joins, completions, dominatorTree) ||
+                        endedAt(*creation, *release, ends) ||
                         !samePointer(argument, *release->getArgOperand(0), *release, dominatorTree))
                     {
                         continue;
@@ -586,8 +562,8 @@ namespace ctrace::concurrency::internal::analysis
                         for (const llvm::CallBase* creation : entryCreations)
                         {
                             everyThreadEnded =
-                                everyThreadEnded && joinedBefore(*creation, instruction, joins,
-                                                                 completions, dominatorTree);
+                                everyThreadEnded && endedAt(*creation, instruction,
+                                                            endsOf(*creation, joins, completions));
                         }
                         if (everyThreadEnded)
                         {
