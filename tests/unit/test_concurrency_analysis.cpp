@@ -2341,8 +2341,9 @@ namespace
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_join_loop_by_pointer_two_slots_a_round_reports_missing_join.c",
-             .intent = "a pointer loop moving two slots a round skips half the threads (#161)",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "a pointer loop moving two slots a round skips half the threads; the "
+                       "thread left unjoined runs when main writes (#113)",
+             .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_handle_created_twice_into_one_slot_reports_missing_join.c",
              .intent = "a thread created over a slot already filled is lost to the join loop (#161)",
@@ -2365,16 +2366,19 @@ namespace
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_pointer_loop_joining_through_other_cursor_reports_missing_join.c",
-             .intent = "a join through another local than the cursor joins no slot of the walk (#161)",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "a join through another local than the cursor joins no slot of the walk; "
+                       "the thread left unjoined runs when main writes (#113)",
+             .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_handle_array_reached_through_escaping_local_reports_missing_join.c",
-             .intent = "the handle array kept in a local whose address escapes may be changed (#161)",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "the handle array kept in a local whose address escapes may be changed; "
+                       "the thread left unjoined runs when main writes (#113)",
+             .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_handle_array_handed_to_thread_through_local_reports_missing_join.c",
-             .intent = "the handle array read back from a local and handed to a thread may be changed (#161)",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "the handle array read back from a local and handed to a thread may be "
+                       "changed; the thread left unjoined runs when main writes (#113)",
+             .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_thread_array_joined_by_range_for_no_fp.cpp",
              .intent = "a range-for joining a std::thread array ends every thread (#161)",
@@ -2454,7 +2458,9 @@ namespace
              .intent = "strtok resumes from hidden state the interrupted scan is still using",
              .unsafeSignalHandler = 1},
             {.path = "tests/fixtures/concurrency/signal-handler/signal_thread_mask.c",
-             .intent = "known gap #54: signal delivery is not modeled; the full join loop completes the workers"},
+             .intent = "main writes admin_state while the workers read it (#113); signal "
+                       "delivery is not modeled (#54)",
+             .dataRace = 1},
 
             // --- thread arguments ----------------------------------------------------------
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_stack_escape.c",
@@ -2528,8 +2534,8 @@ namespace
             {.path = "tests/fixtures/concurrency/thread-escape/"
                      "thread_argument_joined_on_both_branches_no_fp.c",
              .intent = "joins on both branches keep the frame alive though neither dominates the "
-                       "return (#122); the missing join is #143, the race #113",
-             .dataRace = 1, .missingJoin = 1},
+                       "return (#122); the missing join is #143, the race is gone (#113)",
+             .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_joined_once_no_fp.c",
              .intent = "one join before the return keeps the frame alive (#122)"},
             {.path = "tests/fixtures/concurrency/thread-escape/"
@@ -2718,8 +2724,8 @@ namespace
             {.path = "tests/fixtures/concurrency/use-after-free/"
                      "heap_arg_joined_on_both_branches_then_freed_no_fp.c",
              .intent = "joins on both branches precede the free though neither dominates it "
-                       "(#122); the missing join is #143, the race #113",
-             .dataRace = 1, .missingJoin = 1},
+                       "(#122); the missing join is #143, the race is gone (#113)",
+             .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/use-after-free/"
                      "heap_arg_joined_once_then_freed_no_fp.c",
              .intent = "one join precedes the free (#122)"},
@@ -2755,8 +2761,8 @@ namespace
             {.path = "tests/fixtures/concurrency/thread-local/"
                      "tls_read_after_joins_on_both_branches.c",
              .intent = "joins on both branches end the thread and its thread-local (#122); the "
-                       "missing join is #143, the race #113",
-             .dataRace = 1, .missingJoin = 1, .threadLocalEscape = 1},
+                       "missing join is #143, the race is gone (#113)",
+             .missingJoin = 1, .threadLocalEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-local/tls_read_after_failed_join_race.c",
              .intent = "where the join failed the thread and its thread-local may still live "
                        "(#122)",
@@ -2819,12 +2825,14 @@ namespace
              .dataRace = 1,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_incomplete_join_loop.c",
-             .intent = "a shortened join range leaves a worker concurrent with the next phase",
-             .dataRace = 3,
+             .intent = "a shortened join range leaves a worker concurrent with the next phase; "
+                       "main's final read races with the workers left running (#113)",
+             .dataRace = 4,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_conditional_join_loop.c",
-             .intent = "a conditional join does not discharge every array element",
-             .dataRace = 3,
+             .intent = "a conditional join does not discharge every array element; main's final "
+                       "read races with the workers left running (#113)",
+             .dataRace = 4,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_overlapping_helper_context.c",
              .intent = "one sequential context cannot hide another live instance of the same entry",
@@ -2832,12 +2840,14 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/data_race_nested_joined_helpers.c",
              .intent = "entry bindings and completion propagate through nested helpers"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_early_break_join_loop.c",
-             .intent = "an early break prevents full join-range coverage",
-             .dataRace = 3,
+             .intent = "an early break prevents full join-range coverage; main's final read races "
+                       "with the workers left running (#113)",
+             .dataRace = 4,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_replaced_handle_loop.c",
-             .intent = "overwriting one handle invalidates an otherwise matching join range",
-             .dataRace = 3,
+             .intent = "overwriting one handle invalidates an otherwise matching join range; "
+                       "main's final read races with the workers left running (#113)",
+             .dataRace = 4,
              .missingJoin = 1},
 
             {.path = "tests/fixtures/concurrency/data-race/data_race_helper_handle_mutation.c",
