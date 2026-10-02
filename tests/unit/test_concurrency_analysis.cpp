@@ -2325,6 +2325,68 @@ namespace
                      "pthread_count_lowered_each_round_reports_missing_join.c",
              .intent = "a count lowered each round is no count of rounds (#157)",
              .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_over_handles_created_one_by_one_no_missing_join.c",
+             .intent = "a loop over threads created one by one into its slots joins them all (#161)"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_by_pointer_over_handles_no_missing_join.c",
+             .intent = "a loop walking the handles by pointer joins them all (#161)"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_short_of_created_slot_reports_missing_join.c",
+             .intent = "a loop over [0, 1) leaves the handle created into threads[1] unjoined (#161)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_by_pointer_stopping_short_reports_missing_join.c",
+             .intent = "a pointer loop stopping at threads + 1 leaves threads[1] unjoined (#161)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_by_pointer_two_slots_a_round_reports_missing_join.c",
+             .intent = "a pointer loop moving two slots a round skips half the threads (#161)",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_handle_created_twice_into_one_slot_reports_missing_join.c",
+             .intent = "a thread created over a slot already filled is lost to the join loop (#161)",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_down_column_misses_created_slot_reports_missing_join.c",
+             .intent = "a handle between a column's slots is not one the column loop joins (#161)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_past_created_slot_reports_missing_join.c",
+             .intent = "a loop from threads[1] leaves the handle created into threads[0] unjoined (#161)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_pointer_loop_while_equal_joins_nothing_reports_missing_join.c",
+             .intent = "a pointer loop running while equal to its end joins nothing (#161)",
+             .dataRace = 1, .missingJoin = 2},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_pointer_loop_joining_after_moving_reports_missing_join.c",
+             .intent = "a pointer loop joining after it moves joins the next slot, not its own (#161)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_pointer_loop_joining_through_other_cursor_reports_missing_join.c",
+             .intent = "a join through another local than the cursor joins no slot of the walk (#161)",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_handle_array_reached_through_escaping_local_reports_missing_join.c",
+             .intent = "the handle array kept in a local whose address escapes may be changed (#161)",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_handle_array_handed_to_thread_through_local_reports_missing_join.c",
+             .intent = "the handle array read back from a local and handed to a thread may be changed (#161)",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_array_joined_by_range_for_no_fp.cpp",
+             .intent = "a range-for joining a std::thread array ends every thread (#161)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_array_joined_by_index_loop_no_fp.cpp",
+             .intent = "an index loop joining a std::thread array ends every thread (#161)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_array_written_before_range_for_join_race.cpp",
+             .intent = "main's write before the range-for joins races with the threads (#161)",
+             .dataRace = 1, .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/thread-escape/"
                      "thread_argument_join_loop_up_to_count_of_created_handles_no_fp.c",
              .intent = "a loop up to the count of created handles ends every worker (#157)"},

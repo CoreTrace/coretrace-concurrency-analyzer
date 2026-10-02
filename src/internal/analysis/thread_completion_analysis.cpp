@@ -204,6 +204,16 @@ namespace ctrace::concurrency::internal::analysis
         /// Whether every slot `filled` names is one `visited` names.
         bool covers(const SlotRange& visited, const SlotRange& filled)
         {
+            // A single slot (stride 0) is covered when the loop's grid of known bounds passes it.
+            if (filled.stride == 0)
+            {
+                const auto shift = llvm::checkedSub(filled.origin, visited.origin);
+                if (visited.array != filled.array || visited.stride <= 0 || !shift ||
+                    *shift % visited.stride != 0 || !visited.begin.index || !visited.end.index)
+                    return false;
+                const std::int64_t slot = *shift / visited.stride;
+                return *visited.begin.index <= slot && slot < *visited.end.index;
+            }
             // Two loops bounded by one value run alike only when they compare with it alike: a
             // negative `n` stops a signed loop at once and sends an unsigned one far past it. A
             // count, filled by no comparison, holds only indices its spawn stored at.
@@ -235,6 +245,10 @@ namespace ctrace::concurrency::internal::analysis
         {
             const auto a = knownSpan(first);
             const auto b = knownSpan(second);
+            // Handles of one array start apart unless they are the same handle.
+            if (first.stride == 0 || second.stride == 0)
+                return first.array == second.array && a && b &&
+                       (a->second < b->first || b->second < a->first);
             const auto shift = llvm::checkedSub(first.origin, second.origin);
             return first.array == second.array && first.stride > 0 &&
                    first.stride == second.stride && shift && *shift % first.stride == 0 && a && b &&
@@ -303,6 +317,24 @@ namespace ctrace::concurrency::internal::analysis
             return reaching;
         }
 
+        /// A local only ever loaded from and stored into: whatever it holds, nothing but its own
+        /// loads hands on.
+        bool isPointerLocal(const llvm::Value& value)
+        {
+            if (!llvm::isa<llvm::AllocaInst>(value))
+                return false;
+            for (const llvm::User* user : value.users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store != nullptr ? store->getPointerOperand() != &value
+                                     : !llvm::isa<llvm::LoadInst>(user) &&
+                                           !llvm::isa<llvm::DbgInfoIntrinsic>(user) &&
+                                           !llvm::isa<llvm::LifetimeIntrinsic>(user))
+                    return false;
+            }
+            return true;
+        }
+
         /// Nothing but `create` and the joins touches the handle array from `create` on. Another
         /// spawn may store into it only where `fills` shows it never meets `create`'s slots.
         bool arrayStorageUnchanged(const llvm::CallBase& create, const llvm::CallBase& join,
@@ -312,34 +344,49 @@ namespace ctrace::concurrency::internal::analysis
             const llvm::Value* base = llvm::getUnderlyingObject(create.getArgOperand(0));
             if (!llvm::isa<llvm::AllocaInst>(base))
                 return false;
-            std::vector<const llvm::Value*> pointers{base};
+            // The array's address may be kept in locals only loaded from (a range-for's cursor,
+            // an aggregate initializer's cleanup cursor). A pointer read back from one is followed
+            // too, but may only be read through, compared, or handed to a join or a destructor:
+            // the second walk below does not see through those locals.
+            std::vector<std::pair<const llvm::Value*, bool>> pointers{{base, false}};
             llvm::SmallPtrSet<const llvm::Value*, 16> seen;
             while (!pointers.empty())
             {
-                const auto* pointer = pointers.back();
+                const auto [pointer, kept] = pointers.back();
                 pointers.pop_back();
                 if (!seen.insert(pointer).second)
                     continue;
                 for (const auto* user : pointer->users())
                 {
                     if (llvm::isa<llvm::GetElementPtrInst>(user) ||
-                        llvm::isa<llvm::BitCastInst>(user))
-                        pointers.push_back(user);
+                        llvm::isa<llvm::BitCastInst>(user) || llvm::isa<llvm::PHINode>(user) ||
+                        llvm::isa<llvm::SelectInst>(user))
+                        pointers.emplace_back(user, kept);
                     else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
                     {
                         if (store->getValueOperand() == pointer)
+                        {
+                            if (!isPointerLocal(*store->getPointerOperand()))
+                                return false;
+                            for (const auto* reader : store->getPointerOperand()->users())
+                                if (llvm::isa<llvm::LoadInst>(reader))
+                                    pointers.emplace_back(reader, true);
+                        }
+                        else if (kept)
                             return false;
                     }
                     else if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user))
                     {
                         const auto kind = classifier.classify(*call);
-                        if (call != &join && kind != CallKind::PThreadCreate &&
-                            kind != CallKind::PThreadJoin && kind != CallKind::StdThreadCtor &&
-                            kind != CallKind::StdThreadJoin && kind != CallKind::StdThreadDtor &&
-                            !llvm::isa<llvm::IntrinsicInst>(call))
+                        const bool reads = call == &join || kind == CallKind::PThreadJoin ||
+                                           kind == CallKind::StdThreadJoin ||
+                                           kind == CallKind::StdThreadDtor ||
+                                           llvm::isa<llvm::IntrinsicInst>(call);
+                        if (!reads && (kept || (kind != CallKind::PThreadCreate &&
+                                                kind != CallKind::StdThreadCtor)))
                             return false;
                     }
-                    else if (!llvm::isa<llvm::LoadInst>(user))
+                    else if (!llvm::isa<llvm::LoadInst>(user) && !llvm::isa<llvm::ICmpInst>(user))
                         return false;
                 }
             }
@@ -358,7 +405,8 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         if (llvm::getUnderlyingObject(store->getPointerOperand()) == base ||
                             (store->getValueOperand()->getType()->isPointerTy() &&
-                             llvm::getUnderlyingObject(store->getValueOperand()) == base))
+                             llvm::getUnderlyingObject(store->getValueOperand()) == base &&
+                             !isPointerLocal(*store->getPointerOperand())))
                             return false;
                     }
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
@@ -895,9 +943,21 @@ namespace ctrace::concurrency::internal::analysis
                                              const llvm::DominatorTree& dominators)
         {
             const llvm::Loop* loop = loops.getLoopFor(create.getParent());
-            if (loop == nullptr)
-                return std::nullopt;
             const llvm::DataLayout& layout = create.getModule()->getDataLayout();
+            // A creation outside any loop runs at most once, and fills the one slot its constant
+            // address names.
+            if (loop == nullptr)
+            {
+                const std::optional<SlotAddress> address =
+                    slotAddress(create.getArgOperand(0), layout);
+                if (!address || address->index != nullptr)
+                    return std::nullopt;
+                return SlotRange{.array = address->object,
+                                 .origin = address->offset,
+                                 .stride = 0,
+                                 .begin = {.index = 0},
+                                 .end = {.index = 1}};
+            }
             // A spawn loop whose bound may change fills a range no join loop can be matched with.
             if (const std::optional<CountedLoop> count = countedLoop(*loop, dominators);
                 count && !llvm::isa<llvm::LoadInst>(count->end))
@@ -907,6 +967,129 @@ namespace ctrace::concurrency::internal::analysis
             return slotsUpToCount(create, kind, *loop, loops, dominators, layout);
         }
 
+        /// The value a load reads from a local written once, followed through such locals: the
+        /// pointer a range-for keeps in its element reference, or the iteration pointer itself.
+        const llvm::Value* throughSingleStoreLocals(const llvm::Value* value)
+        {
+            llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+            while (seen.insert(value).second)
+            {
+                const auto* load = llvm::dyn_cast<llvm::LoadInst>(value);
+                if (load == nullptr || !llvm::isa<llvm::AllocaInst>(load->getPointerOperand()))
+                    return value;
+                const llvm::StoreInst* store = uniqueStore(load->getPointerOperand());
+                if (store == nullptr)
+                    return value;
+                value = store->getValueOperand();
+            }
+            return value;
+        }
+
+        /// `slotAddress` of `pointer`, its object followed through locals written once: a
+        /// range-for keeps the array's address in such a local before taking its elements.
+        std::optional<SlotAddress> slotAddressThroughLocals(const llvm::Value* pointer,
+                                                            const llvm::DataLayout& layout)
+        {
+            std::optional<SlotAddress> address =
+                slotAddress(throughSingleStoreLocals(pointer), layout);
+            for (unsigned step = 0; address && step < 4; ++step)
+            {
+                const llvm::Value* object = throughSingleStoreLocals(address->object);
+                if (object == address->object)
+                    return address;
+                const std::optional<SlotAddress> inner = slotAddress(object, layout);
+                const auto offset =
+                    inner ? llvm::checkedAdd(inner->offset, address->offset) : std::nullopt;
+                if (!inner || !offset || (inner->index != nullptr && address->index != nullptr))
+                    return std::nullopt;
+                address = SlotAddress{.object = inner->object,
+                                      .offset = *offset,
+                                      .index = address->index ? address->index : inner->index,
+                                      .scale = address->index ? address->scale : inner->scale};
+            }
+            return address;
+        }
+
+        /// The slots a loop visits by moving a pointer over a handle array, as a range-for over an
+        /// array does: `p != end`, `p` a local set once before the loop to an element of the
+        /// array and moved by one element at the end of every round, `end` an element of the same
+        /// array past it. `element` must be the pointer the round reads, before it moves.
+        std::optional<SlotRange> pointerSlots(const llvm::Value* element, const llvm::Loop& loop,
+                                              const llvm::DominatorTree& dominators,
+                                              const llvm::DataLayout& layout)
+        {
+            const auto* branch =
+                llvm::dyn_cast<llvm::BranchInst>(loop.getHeader()->getTerminator());
+            const auto* latch = loop.getLoopLatch();
+            if (branch == nullptr || !branch->isConditional() || latch == nullptr ||
+                !loop.contains(branch->getSuccessor(0)) || loop.contains(branch->getSuccessor(1)))
+                return std::nullopt;
+            const auto* compare = llvm::dyn_cast<llvm::ICmpInst>(branch->getCondition());
+            if (compare == nullptr || compare->getPredicate() != llvm::CmpInst::ICMP_NE)
+                return std::nullopt;
+            const auto* current = llvm::dyn_cast<llvm::LoadInst>(compare->getOperand(0));
+            if (current == nullptr || !llvm::isa<llvm::AllocaInst>(current->getPointerOperand()))
+                return std::nullopt;
+            const llvm::Value* slot = current->getPointerOperand();
+            const llvm::StoreInst* initial = nullptr;
+            const llvm::StoreInst* advance = nullptr;
+            for (const llvm::User* user : slot->users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store == nullptr)
+                {
+                    if (!llvm::isa<llvm::LoadInst>(user) &&
+                        !llvm::isa<llvm::DbgInfoIntrinsic>(user))
+                        return std::nullopt;
+                    continue;
+                }
+                if (store->getPointerOperand() != slot)
+                    return std::nullopt;
+                auto*& target = loop.contains(store) ? advance : initial;
+                if (target != nullptr)
+                    return std::nullopt;
+                target = store;
+            }
+            // The advance need not run every round: every round joins the cursor's element, and
+            // the loop ends only once the cursor has moved over every element in turn.
+            if (initial == nullptr || advance == nullptr ||
+                !dominators.dominates(initial, loop.getHeader()->getTerminator()))
+                return std::nullopt;
+            // One element further each round.
+            const auto* step = llvm::dyn_cast<llvm::GetElementPtrInst>(advance->getValueOperand());
+            const auto* moved = step != nullptr
+                                    ? llvm::dyn_cast<llvm::LoadInst>(step->getPointerOperand())
+                                    : nullptr;
+            const auto* one = step != nullptr && step->getNumIndices() == 1
+                                  ? llvm::dyn_cast<llvm::ConstantInt>(step->getOperand(1))
+                                  : nullptr;
+            if (moved == nullptr || moved->getPointerOperand() != slot || one == nullptr ||
+                !one->isOne())
+                return std::nullopt;
+            const std::int64_t stride =
+                static_cast<std::int64_t>(layout.getTypeAllocSize(step->getSourceElementType()));
+            const std::optional<SlotAddress> first =
+                slotAddressThroughLocals(initial->getValueOperand(), layout);
+            const std::optional<SlotAddress> last =
+                slotAddressThroughLocals(compare->getOperand(1), layout);
+            if (stride <= 0 || !first || !last || first->index != nullptr ||
+                last->index != nullptr || first->object != last->object)
+                return std::nullopt;
+            const auto span = llvm::checkedSub(last->offset, first->offset);
+            if (!span || *span < 0 || *span % stride != 0)
+                return std::nullopt;
+            // The round must read the element before the pointer moves.
+            const auto* read = llvm::dyn_cast<llvm::LoadInst>(throughSingleStoreLocals(element));
+            if (read == nullptr || read->getPointerOperand() != slot ||
+                !dominators.dominates(read, advance))
+                return std::nullopt;
+            return SlotRange{.array = first->object,
+                             .origin = first->offset,
+                             .stride = stride,
+                             .begin = {.index = 0},
+                             .end = {.index = *span / stride}};
+        }
+
         std::optional<ThreadCompletion>
         loopCompletion(const llvm::CallBase& create, const JoinSite& join, const SpawnFills& fills,
                        const llvm::LoopInfo& loops, const llvm::DominatorTree& dominators,
@@ -914,36 +1097,47 @@ namespace ctrace::concurrency::internal::analysis
         {
             const llvm::Loop* first = loops.getLoopFor(create.getParent());
             const llvm::Loop* second = loops.getLoopFor(join.call->getParent());
-            if (first == nullptr || second == nullptr || first == second ||
-                first->getLoopLatch() == nullptr || second->getLoopLatch() == nullptr ||
-                !dominators.dominates(&create, first->getLoopLatch()->getTerminator()) ||
+            const auto filled = fills.find(&create);
+            // A creation outside any loop fills one slot. That it comes before the join loop is
+            // `completionCoversReturns`'s to check: every path from it must leave that loop.
+            const bool once = first == nullptr && filled != fills.end() &&
+                              filled->second.stride == 0 && second != nullptr;
+            if ((first == nullptr && !once) || second == nullptr || first == second ||
+                (first != nullptr && first->getLoopLatch() == nullptr) ||
+                second->getLoopLatch() == nullptr ||
+                (first != nullptr &&
+                 !dominators.dominates(&create, first->getLoopLatch()->getTerminator())) ||
                 !dominators.dominates(join.call, second->getLoopLatch()->getTerminator()) ||
-                !noEarlyNormalExit(*first) || !noEarlyNormalExit(*second))
+                (first != nullptr && !noEarlyNormalExit(*first)) || !noEarlyNormalExit(*second))
                 return std::nullopt;
-            const auto a = countedLoop(*first, dominators);
+            const auto a = first != nullptr ? countedLoop(*first, dominators) : std::nullopt;
             const auto b = countedLoop(*second, dominators);
             // The join loop joins every thread the spawn started when it visits every slot the
             // spawn filled, and no other spawn stores over them in between.
-            const auto filled = fills.find(&create);
-            const std::optional<SlotRange> visited =
-                b ? countedSlots(handleAddress(join.handle(), true), *b, loops, dominators,
-                                 create.getModule()->getDataLayout())
-                  : std::nullopt;
+            const llvm::DataLayout& layout = create.getModule()->getDataLayout();
+            const llvm::Value* joined = handleAddress(join.handle(), join.byValue);
+            std::optional<SlotRange> visited =
+                b && joined ? countedSlots(joined, *b, loops, dominators, layout) : std::nullopt;
+            if (!visited && joined)
+                visited = pointerSlots(joined, *second, dominators, layout);
             const bool indexed =
                 filled != fills.end() && visited && covers(*visited, filled->second) &&
                 arrayStorageUnchanged(create, *join.call, &fills, dominators, classifier);
             if (!indexed && !(a && vectorJoinRange(create, join, *first, *second, *a, dominators)))
                 return std::nullopt;
             const auto* firstBranch =
-                llvm::dyn_cast<llvm::BranchInst>(first->getHeader()->getTerminator());
+                first != nullptr
+                    ? llvm::dyn_cast<llvm::BranchInst>(first->getHeader()->getTerminator())
+                    : nullptr;
             const auto* secondBranch =
                 llvm::dyn_cast<llvm::BranchInst>(second->getHeader()->getTerminator());
             const llvm::BasicBlock* firstExit =
                 firstBranch ? firstBranch->getSuccessor(1) : nullptr;
             const llvm::BasicBlock* secondExit =
                 secondBranch ? secondBranch->getSuccessor(1) : nullptr;
-            if (firstExit == nullptr || secondExit == nullptr ||
-                !dominators.dominates(firstExit, second->getHeader()))
+            if (secondExit == nullptr ||
+                (!once &&
+                 (firstExit == nullptr || !dominators.dominates(firstExit, second->getHeader()))))
                 return std::nullopt;
             const llvm::Instruction& barrier = *secondExit->getFirstNonPHIOrDbgOrLifetime();
             if (!completionCoversReturns(create, barrier))
@@ -953,7 +1147,8 @@ namespace ctrace::concurrency::internal::analysis
             ThreadCompletion completion;
             if (join.success.has_value() &&
                 join.success->covers(*second->getLoopLatch()->getTerminator(), dominators))
-                completion.ended = JoinSuccess{.after = &barrier};
+                completion.ended =
+                    JoinSuccess{.branch = second->getHeader(), .successor = secondExit};
             return completion;
         }
 
