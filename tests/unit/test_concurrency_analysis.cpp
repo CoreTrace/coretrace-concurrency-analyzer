@@ -3366,6 +3366,31 @@ namespace
              .intent = "a test computed anew each round does not tie the rounds",
              .dataRace = 1,
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_called_before_and_beside_thread_no_fp.c",
+             .intent = "a helper's access is seen with the threads running at each of its calls"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_called_beside_thread_on_its_data_race.c",
+             .intent = "a helper called beside the thread on the thread's data races with it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_chain_called_before_and_beside_thread_race.c",
+             .intent = "through a chain of calls, only the call beside the thread races with it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_owning_objects_built_in_loop_no_fp.cpp",
+             .intent = "a constructor builds an object no earlier thread of its class holds",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_owning_object_written_after_start_race.cpp",
+             .intent = "a constructor races with the thread it started on its object",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_started_twice_on_object_by_method_race.cpp",
+             .intent = "a method started twice on one object races with its first thread",
+             .dataRace = 1,
+             .requiresCxx20 = true},
 
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
