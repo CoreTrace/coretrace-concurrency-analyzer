@@ -2262,6 +2262,77 @@ namespace
              .intent = "another spawn handing the handle array to its threads leaves it unproven (#151)",
              .dataRace = 1, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_up_to_count_of_created_handles_no_missing_join.c",
+             .intent = "a loop up to the count of created handles joins every one (#157)"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_up_to_count_raised_at_each_store_no_missing_join.c",
+             .intent = "a count raised before each next store fills [0, count) (#157)"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_up_to_count_of_rounds_no_missing_join.c",
+             .intent = "a count raised once a round ends at the number of rounds (#157)"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_of_stored_handles_joined_over_constant_range_no_missing_join.c",
+             .intent = "handles stored at threads[started++] for four rounds fill [0, 4) (#157)"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_short_of_count_of_created_handles_reports_missing_join.c",
+             .intent = "a join loop stopping short of the count leaves handles unjoined (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_lowered_before_join_loop_reports_missing_join.c",
+             .intent = "a count lowered before the join loop leaves handles unjoined (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_of_created_handles_stored_by_round_reports_missing_join.c",
+             .intent = "handles stored by round but counted by success are not all below the count (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_raised_on_failed_creation_reports_missing_join.c",
+             .intent = "a count raised on a failed creation names a slot no thread holds (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_raised_on_some_successes_reports_missing_join.c",
+             .intent = "a count raised on some successes only leaves handles past it (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_raised_on_some_rounds_reports_missing_join.c",
+             .intent = "a count raised on some rounds only stops short of the threads (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_from_one_joined_over_constant_range_reports_missing_join.c",
+             .intent = "a count from 1 fills [1, 4), which a loop over [0, 3) does not cover (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_of_rounds_cut_by_break_reports_missing_join.c",
+             .intent = "a break before the raise leaves the last thread uncounted (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_reset_inside_spawn_loop_reports_missing_join.c",
+             .intent = "a count reset inside the spawn loop lets handles be stored over (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_spawn_loop_bound_lowered_inside_reports_missing_join.c",
+             .intent = "a spawn loop whose bound changes fills no range a join loop can match (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_of_rounds_of_breaking_loop_reports_missing_join.c",
+             .intent = "a count of the rounds of a loop that may break is not its trip count (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_of_rounds_of_nested_loop_reports_missing_join.c",
+             .intent = "a count raised in a nested loop is not the inner loop's trip count (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_count_lowered_each_round_reports_missing_join.c",
+             .intent = "a count lowered each round is no count of rounds (#157)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_join_loop_up_to_count_of_created_handles_no_fp.c",
+             .intent = "a loop up to the count of created handles ends every worker (#157)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_join_loop_up_to_count_ignoring_failure.c",
+             .intent = "the same loop going on past a failed join ends none (#157)",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_join_loop_past_first_spawn_slot_reports_missing_join.c",
              .intent = "a join loop over [1, 4) leaves the first slot of [0, 2) unjoined (#151)",
              .missingJoin = 1},

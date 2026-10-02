@@ -205,12 +205,14 @@ namespace ctrace::concurrency::internal::analysis
         bool covers(const SlotRange& visited, const SlotRange& filled)
         {
             // Two loops bounded by one value run alike only when they compare with it alike: a
-            // negative `n` stops a signed loop at once and sends an unsigned one far past it.
+            // negative `n` stops a signed loop at once and sends an unsigned one far past it. A
+            // count, filled by no comparison, holds only indices its spawn stored at.
             const bool known =
                 visited.begin.index && visited.end.index && filled.begin.index && filled.end.index;
+            const bool alike = known || visited.predicate == filled.predicate ||
+                               filled.predicate == llvm::CmpInst::BAD_ICMP_PREDICATE;
             return visited.array == filled.array && visited.origin == filled.origin &&
-                   visited.stride == filled.stride &&
-                   (known || visited.predicate == filled.predicate) &&
+                   visited.stride == filled.stride && alike &&
                    atMost(visited.begin, filled.begin) && atMost(filled.end, visited.end);
         }
 
@@ -573,6 +575,19 @@ namespace ctrace::concurrency::internal::analysis
             return constructed && increments == 1;
         }
 
+        /// Whether `store` writes back into `slot` the value read from it plus one.
+        bool raisesByOne(const llvm::StoreInst& store, const llvm::Value& slot)
+        {
+            const auto* add = llvm::dyn_cast<llvm::BinaryOperator>(store.getValueOperand());
+            if (add == nullptr || add->getOpcode() != llvm::Instruction::Add ||
+                store.getPointerOperand() != &slot)
+                return false;
+            const auto* old = llvm::dyn_cast<llvm::LoadInst>(add->getOperand(0));
+            const auto* step = llvm::dyn_cast<llvm::ConstantInt>(add->getOperand(1));
+            return old != nullptr && old->getPointerOperand() == &slot && step != nullptr &&
+                   step->isOne();
+        }
+
         std::optional<CountedLoop> countedLoop(const llvm::Loop& loop,
                                                const llvm::DominatorTree& dominators)
         {
@@ -609,20 +624,17 @@ namespace ctrace::concurrency::internal::analysis
             }
             if (initial == nullptr || increment == nullptr ||
                 !dominators.dominates(initial, loop.getHeader()->getTerminator()) ||
-                !dominators.dominates(increment, latch->getTerminator()))
-                return std::nullopt;
-            const auto* add = llvm::dyn_cast<llvm::BinaryOperator>(increment->getValueOperand());
-            if (add == nullptr || add->getOpcode() != llvm::Instruction::Add)
-                return std::nullopt;
-            const auto* old = llvm::dyn_cast<llvm::LoadInst>(add->getOperand(0));
-            const auto* step = llvm::dyn_cast<llvm::ConstantInt>(add->getOperand(1));
-            if (old == nullptr || old->getPointerOperand() != slot || step == nullptr ||
-                !step->isOne())
+                !dominators.dominates(increment, latch->getTerminator()) ||
+                !raisesByOne(*increment, *slot))
                 return std::nullopt;
             const llvm::Value* begin = invariantValue(initial->getValueOperand());
             const llvm::Value* end = invariantValue(compare->getOperand(1));
-            // Reject mutable bounds, including memory changed indirectly inside either loop.
-            if (begin == nullptr || end == nullptr || llvm::isa<llvm::LoadInst>(end))
+            // Reject mutable bounds, including memory changed indirectly inside either loop. A
+            // local written more than once passes: only a count whose writes all precede the loop
+            // can match it (`countedSlots`).
+            const auto* read = llvm::dyn_cast_or_null<llvm::LoadInst>(end);
+            if (begin == nullptr || end == nullptr ||
+                (read != nullptr && !llvm::isa<llvm::AllocaInst>(read->getPointerOperand())))
                 return std::nullopt;
             return CountedLoop{slot, begin, end, compare->getPredicate(), increment};
         }
@@ -690,10 +702,66 @@ namespace ctrace::concurrency::internal::analysis
             return {.value = value};
         }
 
+        /// The value a local counting rounds ends with: set once to a constant before a counted
+        /// loop of constant bounds, and raised by one exactly once in each of that loop's rounds,
+        /// which no early exit cuts short. Nothing else writes it, so past the loop it holds its
+        /// first value plus the number of rounds.
+        std::optional<std::int64_t> countAfterRounds(const llvm::AllocaInst& local,
+                                                     const llvm::LoopInfo& loops,
+                                                     const llvm::DominatorTree& dominators)
+        {
+            const llvm::StoreInst* initial = nullptr;
+            const llvm::StoreInst* raise = nullptr;
+            for (const llvm::User* user : local.users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store == nullptr)
+                {
+                    if (!llvm::isa<llvm::LoadInst>(user) &&
+                        !llvm::isa<llvm::DbgInfoIntrinsic>(user))
+                        return std::nullopt;
+                    continue;
+                }
+                if (store->getPointerOperand() != &local)
+                    return std::nullopt;
+                auto*& target = loops.getLoopFor(store->getParent()) == nullptr ? initial : raise;
+                if (target != nullptr)
+                    return std::nullopt;
+                target = store;
+            }
+            if (initial == nullptr || raise == nullptr || !raisesByOne(*raise, local))
+                return std::nullopt;
+            const llvm::Loop* loop = loops.getLoopFor(raise->getParent());
+            const std::optional<CountedLoop> rounds = countedLoop(*loop, dominators);
+            const SlotBound first = slotBound(initial->getValueOperand());
+            if (loop->getParentLoop() != nullptr || !rounds || !noEarlyNormalExit(*loop) ||
+                !dominators.dominates(initial, loop->getHeader()) ||
+                !dominators.dominates(raise, loop->getLoopLatch()->getTerminator()) || !first.index)
+                return std::nullopt;
+            const SlotBound begin = slotBound(rounds->begin);
+            const SlotBound end = slotBound(rounds->end);
+            if (!begin.index || !end.index)
+                return std::nullopt;
+            return llvm::checkedAdd(*first.index,
+                                    std::max<std::int64_t>(*end.index - *begin.index, 0));
+        }
+
+        /// A bound read from a local written more than once: the value a count of that local ends
+        /// with. It is known when the local counts rounds, and names the local otherwise.
+        SlotBound countBound(const llvm::AllocaInst& local, const llvm::LoopInfo& loops,
+                             const llvm::DominatorTree& dominators)
+        {
+            if (const std::optional<std::int64_t> final =
+                    countAfterRounds(local, loops, dominators))
+                return {.index = *final};
+            return {.value = &local};
+        }
+
         /// The slots `pointer` names over the rounds of a counted loop: its only varying index
         /// must be the counter, read in the round before the counter is raised. Read after,
         /// it names the next round's slot, one past the range.
         std::optional<SlotRange> countedSlots(const llvm::Value* pointer, const CountedLoop& count,
+                                              const llvm::LoopInfo& loops,
                                               const llvm::DominatorTree& dominators,
                                               const llvm::DataLayout& layout)
         {
@@ -705,26 +773,138 @@ namespace ctrace::concurrency::internal::analysis
             if (read == nullptr || read->getPointerOperand() != count.induction ||
                 !dominators.dominates(read, count.increment))
                 return std::nullopt;
+            const auto* readEnd = llvm::dyn_cast<llvm::LoadInst>(count.end);
+            const auto* local = readEnd != nullptr
+                                    ? llvm::dyn_cast<llvm::AllocaInst>(readEnd->getPointerOperand())
+                                    : nullptr;
             return SlotRange{.array = address->object,
                              .origin = address->offset,
                              .stride = address->scale,
                              .begin = slotBound(count.begin),
-                             .end = slotBound(count.end),
+                             .end = local != nullptr ? countBound(*local, loops, dominators)
+                                                     : slotBound(count.end),
                              .predicate = count.predicate};
         }
 
+        /// Whether every path from `from` to the end of `loop`'s round passes one of `raises`. A
+        /// path leaving the loop elsewhere only unwinds (`noEarlyNormalExit`).
+        bool raisedOnEveryPath(const JoinSuccess& from, const llvm::Loop& loop,
+                               const llvm::SmallPtrSetImpl<const llvm::Instruction*>& raises)
+        {
+            // The first block is entered past `from`'s call, or at the successor of its branch.
+            const llvm::Instruction* start = from.after;
+            const llvm::BasicBlock* first = from.successor;
+            if (const auto* invoke = llvm::dyn_cast_or_null<llvm::InvokeInst>(start))
+            {
+                first = invoke->getNormalDest();
+                start = nullptr;
+            }
+            else if (start != nullptr)
+                first = start->getParent();
+            std::vector<std::pair<const llvm::BasicBlock*, const llvm::Instruction*>> pending{
+                {first, start}};
+            llvm::SmallPtrSet<const llvm::BasicBlock*, 16> visited;
+            while (!pending.empty())
+            {
+                const auto [block, after] = pending.back();
+                pending.pop_back();
+                if (!loop.contains(block) || (after == nullptr && !visited.insert(block).second))
+                    continue;
+                bool raised = false;
+                for (const llvm::Instruction& instruction : *block)
+                    raised = raised || ((after == nullptr || after->comesBefore(&instruction)) &&
+                                        raises.contains(&instruction));
+                if (raised)
+                    continue;
+                if (block == loop.getLoopLatch())
+                    return false;
+                for (const llvm::BasicBlock* successor : llvm::successors(block))
+                    pending.emplace_back(successor, nullptr);
+            }
+            return true;
+        }
+
+        /// The slots a spawn fills when a local counts the handles stored so far (#157): the spawn
+        /// stores at `array[count]`, and the count, set once before the loop and raised by one in
+        /// it, is raised past that slot before the next round wherever the spawn succeeded. Each
+        /// thread started then keeps its own slot below the count's final value; a failed spawn's
+        /// slot is used again.
+        std::optional<SlotRange> slotsUpToCount(const llvm::CallBase& create, CallKind kind,
+                                                const llvm::Loop& loop, const llvm::LoopInfo& loops,
+                                                const llvm::DominatorTree& dominators,
+                                                const llvm::DataLayout& layout)
+        {
+            const std::optional<SlotAddress> address = slotAddress(create.getArgOperand(0), layout);
+            if (!address || address->index == nullptr || address->scale <= 0)
+                return std::nullopt;
+            const auto* read = llvm::dyn_cast<llvm::LoadInst>(stripIntegerCasts(address->index));
+            const auto* count = read != nullptr
+                                    ? llvm::dyn_cast<llvm::AllocaInst>(read->getPointerOperand())
+                                    : nullptr;
+            if (count == nullptr)
+                return std::nullopt;
+            const llvm::StoreInst* initial = nullptr;
+            llvm::SmallPtrSet<const llvm::Instruction*, 4> raises;
+            for (const llvm::User* user : count->users())
+            {
+                const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                if (store == nullptr)
+                {
+                    if (!llvm::isa<llvm::LoadInst>(user) &&
+                        !llvm::isa<llvm::DbgInfoIntrinsic>(user))
+                        return std::nullopt;
+                }
+                else if (store->getPointerOperand() != count || (!loop.contains(store) && initial))
+                    return std::nullopt;
+                else if (!loop.contains(store))
+                    initial = store;
+                else if (raisesByOne(*store, *count))
+                    raises.insert(store);
+                else
+                    return std::nullopt;
+            }
+            const llvm::Value* begin =
+                initial != nullptr ? invariantValue(initial->getValueOperand()) : nullptr;
+            if (begin == nullptr || llvm::isa<llvm::LoadInst>(begin) || raises.empty() ||
+                !dominators.dominates(initial, loop.getHeader()))
+                return std::nullopt;
+
+            // The count leaves the slot behind before the spawn, or on every path from its
+            // success. `pthread_create` reports success as `pthread_join` does, and a
+            // `std::thread` constructor throws as `join` does.
+            bool leftBehind = false;
+            for (const llvm::Instruction* raise : raises)
+                leftBehind = leftBehind || (dominators.dominates(read, raise) &&
+                                            dominators.dominates(raise, &create));
+            const std::optional<JoinSuccess> success =
+                joinSuccessOf(create, kind == CallKind::StdThreadCtor ? CallKind::StdThreadJoin
+                                                                      : CallKind::PThreadJoin);
+            if (!leftBehind &&
+                !raisedOnEveryPath(success.value_or(JoinSuccess{.after = &create}), loop, raises))
+                return std::nullopt;
+            return SlotRange{.array = address->object,
+                             .origin = address->offset,
+                             .stride = address->scale,
+                             .begin = slotBound(begin),
+                             .end = countBound(*count, loops, dominators)};
+        }
+
         /// The slots `create` stores its handle into over the run, when its address names them.
-        std::optional<SlotRange> slotsFilled(const llvm::CallBase& create,
+        std::optional<SlotRange> slotsFilled(const llvm::CallBase& create, CallKind kind,
                                              const llvm::LoopInfo& loops,
                                              const llvm::DominatorTree& dominators)
         {
             const llvm::Loop* loop = loops.getLoopFor(create.getParent());
-            const std::optional<CountedLoop> count =
-                loop != nullptr ? countedLoop(*loop, dominators) : std::nullopt;
-            if (!count)
+            if (loop == nullptr)
                 return std::nullopt;
-            return countedSlots(create.getArgOperand(0), *count, dominators,
-                                create.getModule()->getDataLayout());
+            const llvm::DataLayout& layout = create.getModule()->getDataLayout();
+            // A spawn loop whose bound may change fills a range no join loop can be matched with.
+            if (const std::optional<CountedLoop> count = countedLoop(*loop, dominators);
+                count && !llvm::isa<llvm::LoadInst>(count->end))
+                if (std::optional<SlotRange> slots =
+                        countedSlots(create.getArgOperand(0), *count, loops, dominators, layout))
+                    return slots;
+            return slotsUpToCount(create, kind, *loop, loops, dominators, layout);
         }
 
         std::optional<ThreadCompletion>
@@ -746,7 +926,7 @@ namespace ctrace::concurrency::internal::analysis
             // spawn filled, and no other spawn stores over them in between.
             const auto filled = fills.find(&create);
             const std::optional<SlotRange> visited =
-                b ? countedSlots(handleAddress(join.handle(), true), *b, dominators,
+                b ? countedSlots(handleAddress(join.handle(), true), *b, loops, dominators,
                                  create.getModule()->getDataLayout())
                   : std::nullopt;
             const bool indexed =
@@ -1035,7 +1215,8 @@ namespace ctrace::concurrency::internal::analysis
             SpawnFills fills;
             for (const auto* create : creates)
                 if (!create->arg_empty())
-                    if (std::optional<SlotRange> filled = slotsFilled(*create, loops, dominators))
+                    if (std::optional<SlotRange> filled =
+                            slotsFilled(*create, classifier.classify(*create), loops, dominators))
                         fills.emplace(create, *filled);
             for (const auto* create : creates)
                 for (const JoinSite& join : joins)
