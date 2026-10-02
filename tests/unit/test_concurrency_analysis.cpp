@@ -1072,8 +1072,9 @@ namespace
              .intent = "alias-resolved global access is reported with low confidence",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/race_condition_check_then_use.c",
-             .intent = "check-then-use on shared state, with an unjoined handle",
-             .dataRace = 2, .missingJoin = 1},
+             .intent = "check-then-use on shared state; one join loop joins both spawn ranges "
+                       "(#151)",
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/cpp_data_race_class.cpp",
              .intent = "member function of a global object races",
              .dataRace = 1},
@@ -2224,6 +2225,60 @@ namespace
             {.path = "tests/fixtures/concurrency-cxx20/cpp_jthread_auto_join_no_missing_join.cpp",
              .intent = "std::jthread joins in its destructor",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_over_consecutive_spawn_loops_no_missing_join.c",
+             .intent = "one join loop over [0, 4) joins the spawn loops over [0, 2) and [2, 4) "
+                       "(#151)"},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_short_of_last_spawn_loop_reports_missing_join.c",
+             .intent = "a join loop over [0, 3) leaves the last slot of [2, 4) unjoined (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_over_other_row_reports_missing_join.c",
+             .intent = "a join loop over row 0 joins none of row 1, a constant offset away (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_down_column_reports_missing_join.c",
+             .intent = "a join loop down a column misses the row the spawn loop filled (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_unsigned_spawn_loop_signed_join_loop_reports_missing_join.c",
+             .intent = "an unsigned spawn loop and a signed join loop to the same bound may part (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_spawn_loop_slot_from_other_local_reports_missing_join.c",
+             .intent = "handles stored at a slot another local picks overwrite each other (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_spawn_loop_with_second_index_reports_missing_join.c",
+             .intent = "a second varying index in the slot leaves the join loop's slots unproven (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_from_huge_unsigned_start_reports_missing_join.c",
+             .intent = "an unsigned join loop starting past its bound joins nothing (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_other_spawn_hands_handle_array_to_its_thread_reports_missing_join.c",
+             .intent = "another spawn handing the handle array to its threads leaves it unproven (#151)",
+             .dataRace = 1, .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_past_first_spawn_slot_reports_missing_join.c",
+             .intent = "a join loop over [1, 4) leaves the first slot of [0, 2) unjoined (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_join_loop_over_consecutive_spawn_loops_breaking_early.c",
+             .intent = "a join loop over the union that may break early joins none of it (#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_overlapping_spawn_loops_report_missing_join.c",
+             .intent = "a second spawn loop over [1, 3) loses the first one's thread in slot 1 "
+                       "(#151)",
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "pthread_spawn_loop_raising_counter_first_reports_missing_join.c",
+             .intent = "a counter raised before the spawn reads it fills the slots one further "
+                       "on (#151)",
+             .missingJoin = 1},
 
             // --- imported missing-join fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join_scope_exit.cpp",
@@ -2288,6 +2343,14 @@ namespace
             {.path = "tests/fixtures/concurrency/thread-escape/"
                      "thread_argument_joined_by_helper_loop_no_fp.c",
              .intent = "a join loop through a helper over the whole creation range (#89)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_join_loop_over_consecutive_spawn_loops_no_fp.c",
+             .intent = "a join loop over the union of two spawn ranges ends every worker (#151)"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_join_loop_over_consecutive_spawn_loops_ignoring_failure.c",
+             .intent = "the same loop going on past a failed join joins every worker but ends "
+                       "none (#151)",
+             .threadArgumentEscape = 2},
             {.path = "tests/fixtures/concurrency/thread-escape/"
                      "thread_argument_helper_joins_one_branch.c",
              .intent = "a helper joining on one branch only cannot stand for a join (#89)",
