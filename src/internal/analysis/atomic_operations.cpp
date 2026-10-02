@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "atomic_operations.hpp"
 
+#include "ir_utils.hpp"
+
 #include <llvm/ADT/StringRef.h>
-#include <llvm/Demangle/Demangle.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 
-#include <cstdlib>
 #include <string>
 
 namespace ctrace::concurrency::internal::analysis
@@ -60,36 +60,6 @@ namespace ctrace::concurrency::internal::analysis
             default:
                 return std::nullopt;
             }
-        }
-
-        struct DemangledName
-        {
-            std::string context;
-            std::string base;
-        };
-
-        std::optional<DemangledName> demangleFunction(llvm::StringRef mangled)
-        {
-            // The demangler keeps pointers into its input, so the input must outlive it.
-            const std::string input = mangled.str();
-            llvm::ItaniumPartialDemangler demangler;
-            if (demangler.partialDemangle(input.c_str()) || !demangler.isFunction())
-                return std::nullopt;
-
-            std::size_t size = 0;
-            char* context = demangler.getFunctionDeclContextName(nullptr, &size);
-            char* base = demangler.getFunctionBaseName(nullptr, &size);
-            std::optional<DemangledName> name;
-            if (context != nullptr && base != nullptr)
-            {
-                // libc++ tags its members with the ABI version (`store[abi:ne200100]`).
-                std::string baseName = base;
-                baseName = baseName.substr(0, baseName.find("[abi:"));
-                name = DemangledName{.context = context, .base = std::move(baseName)};
-            }
-            std::free(context);
-            std::free(base);
-            return name;
         }
 
         /// `std::atomic<T>` and the bases both libraries derive it from. `atomic_ref` is left out:
