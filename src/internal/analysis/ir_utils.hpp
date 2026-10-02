@@ -188,6 +188,17 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] const llvm::Function* resolveFunctionValue(const llvm::Value& value);
     [[nodiscard]] std::string functionId(const llvm::Function& function);
     [[nodiscard]] std::string functionDisplayName(const llvm::Function& function);
+
+    /// A function's name read from its mangled one: the scope it is declared in and its own name,
+    /// without template arguments, parameters, return type or libc++'s ABI tags.
+    struct DemangledName
+    {
+        std::string context;
+        std::string base;
+    };
+
+    /// Nothing when `mangled` names no function.
+    [[nodiscard]] std::optional<DemangledName> demangleFunction(std::string_view mangled);
     [[nodiscard]] ResolvedSourceLocations
     resolveSourceLocations(const llvm::Instruction& instruction);
     [[nodiscard]] SourceLocation makeSourceLocation(const llvm::Instruction& instruction);

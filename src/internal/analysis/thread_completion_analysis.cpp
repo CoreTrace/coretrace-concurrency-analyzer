@@ -5,7 +5,10 @@
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
 
+#include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/MapVector.h>
+#include <llvm/ADT/STLExtras.h>
+#include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -191,7 +194,8 @@ namespace ctrace::concurrency::internal::analysis
             llvm::CmpInst::Predicate predicate = llvm::CmpInst::BAD_ICMP_PREDICATE;
         };
 
-        /// The slots each spawn of a function fills, where its handle address names them.
+        /// The slots each spawn of a function fills, where its handle address names them, by the
+        /// call storing the handle: the creation, or the move of a thread started into a local.
         using SpawnFills = std::unordered_map<const llvm::CallBase*, SlotRange>;
 
         bool atMost(const SlotBound& lower, const SlotBound& upper)
@@ -255,13 +259,13 @@ namespace ctrace::concurrency::internal::analysis
                    (a->second < b->first || b->second < a->first);
         }
 
-        /// Whether `other` stores its handle only into slots `create` never fills.
-        bool fillsApart(const llvm::CallBase& create, const llvm::CallBase& other,
+        /// Whether `other` stores its handle only into slots `writer` never fills.
+        bool fillsApart(const llvm::CallBase& writer, const llvm::CallBase& other,
                         const SpawnFills* fills)
         {
             if (fills == nullptr)
                 return false;
-            const auto mine = fills->find(&create);
+            const auto mine = fills->find(&writer);
             const auto theirs = fills->find(&other);
             return mine != fills->end() && theirs != fills->end() &&
                    disjoint(mine->second, theirs->second);
@@ -335,13 +339,45 @@ namespace ctrace::concurrency::internal::analysis
             return true;
         }
 
-        /// Nothing but `create` and the joins touches the handle array from `create` on. Another
-        /// spawn may store into it only where `fills` shows it never meets `create`'s slots.
-        bool arrayStorageUnchanged(const llvm::CallBase& create, const llvm::CallBase& join,
+        /// Whether a demangled scope is the standard class `name`, whatever its template
+        /// arguments, in `std` or in an inline namespace of it such as libc++'s `std::__1`.
+        bool isStdClass(std::string_view scope, std::string_view name)
+        {
+            if (!scope.starts_with("std::"))
+                return false;
+            scope.remove_prefix(std::string_view("std::").size());
+            if (scope.starts_with("__"))
+            {
+                const std::size_t inner = scope.find("::");
+                if (inner == std::string_view::npos)
+                    return false;
+                scope.remove_prefix(inner + 2);
+            }
+            return scope.starts_with(name) &&
+                   (scope.size() == name.size() || scope[name.size()] == '<');
+        }
+
+        /// Whether `call` builds an empty `std::thread`: its default constructor, the only one
+        /// taking nothing but the object. It starts no thread and keeps no pointer to the object.
+        bool buildsEmptyThread(const llvm::CallBase& call)
+        {
+            const llvm::Function* callee = call.getCalledFunction();
+            if (callee == nullptr || call.arg_size() != 1 || !callee->getName().contains("thread"))
+                return false;
+            const std::optional<DemangledName> name = demangleFunction(callee->getName());
+            return name.has_value() && name->base == "thread" &&
+                   isStdClass(name->context, "thread");
+        }
+
+        /// Nothing but `writer` and the joins touches the handle array from `writer` on, `writer`
+        /// storing a handle into it: a creation, or the move of a thread a creation started into
+        /// a local. Another spawn may store into it only where `fills` shows it never meets
+        /// `writer`'s slots.
+        bool arrayStorageUnchanged(const llvm::CallBase& writer, const llvm::CallBase& join,
                                    const SpawnFills* fills, const llvm::DominatorTree& dominators,
                                    const ConcurrencySymbolClassifier& classifier)
         {
-            const llvm::Value* base = llvm::getUnderlyingObject(create.getArgOperand(0));
+            const llvm::Value* base = llvm::getUnderlyingObject(writer.getArgOperand(0));
             if (!llvm::isa<llvm::AllocaInst>(base))
                 return false;
             // The array's address may be kept in locals only loaded from (a range-for's cursor,
@@ -382,8 +418,10 @@ namespace ctrace::concurrency::internal::analysis
                                            kind == CallKind::StdThreadJoin ||
                                            kind == CallKind::StdThreadDtor ||
                                            llvm::isa<llvm::IntrinsicInst>(call);
-                        if (!reads && (kept || (kind != CallKind::PThreadCreate &&
-                                                kind != CallKind::StdThreadCtor)))
+                        const bool stores =
+                            kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor ||
+                            buildsEmptyThread(*call) || (fills != nullptr && fills->contains(call));
+                        if (!reads && (kept || !stores))
                             return false;
                     }
                     else if (!llvm::isa<llvm::LoadInst>(user) && !llvm::isa<llvm::ICmpInst>(user))
@@ -391,15 +429,15 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
             // A std::thread destroyed on the unwind path of its join is on no normal return.
-            const auto reaching = blocksReachingNormalReturn(*create.getFunction());
-            for (const auto& block : *create.getFunction())
+            const auto reaching = blocksReachingNormalReturn(*writer.getFunction());
+            for (const auto& block : *writer.getFunction())
             {
                 if (!reaching.contains(&block))
                     continue;
                 for (const auto& instruction : block)
                 {
-                    if (&instruction == &create || &instruction == &join ||
-                        dominators.dominates(&instruction, &create))
+                    if (&instruction == &writer || &instruction == &join ||
+                        dominators.dominates(&instruction, &writer))
                         continue;
                     if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
                     {
@@ -419,7 +457,7 @@ namespace ctrace::concurrency::internal::analysis
                         for (const auto& argument : call->args())
                             if (argument->getType()->isPointerTy() &&
                                 llvm::getUnderlyingObject(argument.get()) == base &&
-                                !(argument.getOperandNo() == 0 && fillsApart(create, *call, fills)))
+                                !(argument.getOperandNo() == 0 && fillsApart(writer, *call, fills)))
                                 return false;
                     }
                 }
@@ -444,11 +482,18 @@ namespace ctrace::concurrency::internal::analysis
             return name;
         }
 
+        /// Whether `call` calls the member `method` of `std::vector`, read from the callee's scope
+        /// and name alone: a member returning `void`, such as `push_back`, or a member template,
+        /// such as `emplace_back` before C++17, has a demangled name starting with its return type.
         bool vectorMethod(const llvm::CallBase& call, std::string_view method)
         {
-            const std::string name = calledName(call);
-            return name.starts_with("std::") && name.find("::vector<") != std::string::npos &&
-                   name.find(">::" + std::string(method) + "(") != std::string::npos;
+            const llvm::Function* callee = call.getCalledFunction();
+            // Only a mangled name holding the class's own name can be one of its members; the
+            // check spares demangling every other callee.
+            if (callee == nullptr || !callee->getName().contains("vector"))
+                return false;
+            const std::optional<DemangledName> name = demangleFunction(callee->getName());
+            return name.has_value() && name->base == method && isStdClass(name->context, "vector");
         }
 
         bool iteratorMethod(const llvm::CallBase& call, std::string_view method)
@@ -486,14 +531,24 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
-        const llvm::Value* vectorRangeSource(const llvm::Value* iterator, const llvm::Loop& loop,
-                                             std::string_view method,
-                                             const llvm::DominatorTree& dominators)
+        /// Where a loop reads one end of the vector range it traverses: the store setting its
+        /// iterator from the vector's `begin()` or `end()`, once and before the loop, that read,
+        /// and the vector.
+        struct RangeEnd
+        {
+            const llvm::StoreInst* store = nullptr;
+            const llvm::CallBase* read = nullptr;
+            const llvm::Value* container = nullptr;
+        };
+
+        std::optional<RangeEnd> vectorRangeEnd(const llvm::Value* iterator, const llvm::Loop& loop,
+                                               std::string_view method,
+                                               const llvm::DominatorTree& dominators)
         {
             iterator = object(iterator);
             if (!iterator)
-                return nullptr;
-            const llvm::Value* result = nullptr;
+                return std::nullopt;
+            std::optional<RangeEnd> result;
             for (const auto& block : *loop.getHeader()->getParent())
                 for (const auto& instruction : block)
                     if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
@@ -507,9 +562,11 @@ namespace ctrace::concurrency::internal::analysis
                         if (!call || call->arg_empty() || !vectorMethod(*call, method) ||
                             !dominators.dominates(store, loop.getHeader()->getTerminator()) ||
                             result)
-                            return nullptr;
-                        result = object(call->getArgOperand(0));
+                            return std::nullopt;
+                        result = RangeEnd{store, call, object(call->getArgOperand(0))};
                     }
+            if (!result || !result->container)
+                return std::nullopt;
             return result;
         }
 
@@ -530,33 +587,27 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
-        bool vectorJoinRange(const llvm::CallBase& create, const JoinSite& join,
-                             const llvm::Loop& first, const llvm::Loop& second,
-                             const CountedLoop& count, const llvm::DominatorTree& dominators)
+        /// The two ends of the vector range `loop` reads to join each element, when it traverses
+        /// the whole range: an iterator from `begin()` to `end()`, both read before the first
+        /// round, advanced by one `++` a round, and serving only the join, through `*`, and the
+        /// loop's test.
+        std::optional<std::pair<RangeEnd, RangeEnd>>
+        wholeRangeJoin(const JoinSite& join, const llvm::Loop& loop,
+                       const llvm::DominatorTree& dominators)
         {
-            const auto* access = llvm::dyn_cast<llvm::CallBase>(create.getArgOperand(0));
-            const auto* zero = llvm::dyn_cast<llvm::ConstantInt>(count.begin);
-            if (!access || access->arg_size() != 2 || !vectorMethod(*access, "operator[]") ||
-                !zero || !zero->isZero())
-                return false;
-            const auto* index =
-                llvm::dyn_cast<llvm::LoadInst>(stripIntegerCasts(access->getArgOperand(1)));
-            if (!index || index->getPointerOperand() != count.induction)
-                return false;
-            const llvm::Value* container = object(access->getArgOperand(0));
-            if (!llvm::isa_and_nonnull<llvm::AllocaInst>(container))
-                return false;
             const auto* dereference = joinedDereference(join);
             if (!dereference || dereference->arg_size() != 1 || !iteratorMethod(*dereference, "*"))
-                return false;
+                return std::nullopt;
             const llvm::Value* iterator = object(dereference->getArgOperand(0));
-            if (vectorRangeSource(iterator, second, "begin", dominators) != container)
-                return false;
+            const std::optional<RangeEnd> begin =
+                vectorRangeEnd(iterator, loop, "begin", dominators);
+            if (!begin)
+                return std::nullopt;
             const auto* branch =
-                llvm::dyn_cast<llvm::BranchInst>(second.getHeader()->getTerminator());
-            if (!branch || !branch->isConditional() || !second.contains(branch->getSuccessor(0)) ||
-                second.contains(branch->getSuccessor(1)))
-                return false;
+                llvm::dyn_cast<llvm::BranchInst>(loop.getHeader()->getTerminator());
+            if (!branch || !branch->isConditional() || !loop.contains(branch->getSuccessor(0)) ||
+                loop.contains(branch->getSuccessor(1)))
+                return std::nullopt;
             const llvm::Value* condition = branch->getCondition();
             bool inverted = false;
             if (const auto* negate = llvm::dyn_cast<llvm::BinaryOperator>(condition))
@@ -570,11 +621,58 @@ namespace ctrace::concurrency::internal::analysis
             const auto* compare = llvm::dyn_cast<llvm::CallBase>(condition);
             if (!compare || compare->arg_size() != 2 ||
                 !iteratorMethod(*compare, inverted ? "==" : "!=") ||
-                object(compare->getArgOperand(0)) != iterator ||
-                vectorRangeSource(compare->getArgOperand(1), second, "end", dominators) !=
-                    container)
-                return false;
+                object(compare->getArgOperand(0)) != iterator)
+                return std::nullopt;
+            const std::optional<RangeEnd> end =
+                vectorRangeEnd(compare->getArgOperand(1), loop, "end", dominators);
+            if (!end || end->container != begin->container)
+                return std::nullopt;
             unsigned increments = 0;
+            for (const auto& block : *loop.getHeader()->getParent())
+                for (const auto& instruction : block)
+                {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (!call || call->arg_empty() || object(call->getArgOperand(0)) != iterator)
+                        continue;
+                    if (iteratorMethod(*call, "++") && loop.contains(call) &&
+                        dominators.dominates(call, loop.getLoopLatch()->getTerminator()))
+                        ++increments;
+                    else if (!iteratorMethod(*call, "*") && !iteratorMethod(*call, "==") &&
+                             !iteratorMethod(*call, "!="))
+                        return std::nullopt;
+                }
+            if (increments != 1)
+                return std::nullopt;
+            return std::pair{*begin, *end};
+        }
+
+        /// Whether `access` reads the element of `container` at the index `count` runs over.
+        bool accessesInductionElement(const llvm::CallBase& access, const llvm::Value* container,
+                                      const CountedLoop& count)
+        {
+            if (access.arg_size() != 2 || !vectorMethod(access, "operator[]") ||
+                object(access.getArgOperand(0)) != container)
+                return false;
+            const auto* index =
+                llvm::dyn_cast<llvm::LoadInst>(stripIntegerCasts(access.getArgOperand(1)));
+            return index && index->getPointerOperand() == count.induction;
+        }
+
+        bool vectorJoinRange(const llvm::CallBase& create, const JoinSite& join,
+                             const llvm::Loop& first, const llvm::Loop& second,
+                             const CountedLoop& count, const llvm::DominatorTree& dominators)
+        {
+            const auto* access = llvm::dyn_cast<llvm::CallBase>(create.getArgOperand(0));
+            const auto* zero = llvm::dyn_cast<llvm::ConstantInt>(count.begin);
+            if (!access || access->arg_empty() || !zero || !zero->isZero())
+                return false;
+            const llvm::Value* container = object(access->getArgOperand(0));
+            if (!llvm::isa_and_nonnull<llvm::AllocaInst>(container) ||
+                !accessesInductionElement(*access, container, count))
+                return false;
+            const auto range = wholeRangeJoin(join, second, dominators);
+            if (!range || range->first.container != container)
+                return false;
             bool constructed = false;
             for (const auto& block : *create.getFunction())
                 for (const auto& instruction : block)
@@ -595,15 +693,6 @@ namespace ctrace::concurrency::internal::analysis
                         for (unsigned index = 1; index < call->arg_size(); ++index)
                             if (object(call->getArgOperand(index)) == container)
                                 return false;
-                        if (object(call->getArgOperand(0)) == iterator)
-                        {
-                            if (iteratorMethod(*call, "++") && second.contains(call) &&
-                                dominators.dominates(call, second.getLoopLatch()->getTerminator()))
-                                ++increments;
-                            else if (!iteratorMethod(*call, "*") && !iteratorMethod(*call, "==") &&
-                                     !iteratorMethod(*call, "!="))
-                                return false;
-                        }
                         if (object(call->getArgOperand(0)) != container)
                             continue;
                         if (vectorMethod(*call, "vector") && call->arg_size() >= 2 &&
@@ -620,7 +709,7 @@ namespace ctrace::concurrency::internal::analysis
                             return false;
                     }
                 }
-            return constructed && increments == 1;
+            return constructed;
         }
 
         /// Whether `store` writes back into `slot` the value read from it plus one.
@@ -876,13 +965,14 @@ namespace ctrace::concurrency::internal::analysis
         /// stores at `array[count]`, and the count, set once before the loop and raised by one in
         /// it, is raised past that slot before the next round wherever the spawn succeeded. Each
         /// thread started then keeps its own slot below the count's final value; a failed spawn's
-        /// slot is used again.
-        std::optional<SlotRange> slotsUpToCount(const llvm::CallBase& create, CallKind kind,
+        /// slot is used again. `writer` stores the handle: `create`, or the move that takes it.
+        std::optional<SlotRange> slotsUpToCount(const llvm::CallBase& create,
+                                                const llvm::CallBase& writer, CallKind kind,
                                                 const llvm::Loop& loop, const llvm::LoopInfo& loops,
                                                 const llvm::DominatorTree& dominators,
                                                 const llvm::DataLayout& layout)
         {
-            const std::optional<SlotAddress> address = slotAddress(create.getArgOperand(0), layout);
+            const std::optional<SlotAddress> address = slotAddress(writer.getArgOperand(0), layout);
             if (!address || address->index == nullptr || address->scale <= 0)
                 return std::nullopt;
             const auto* read = llvm::dyn_cast<llvm::LoadInst>(stripIntegerCasts(address->index));
@@ -917,13 +1007,13 @@ namespace ctrace::concurrency::internal::analysis
                 !dominators.dominates(initial, loop.getHeader()))
                 return std::nullopt;
 
-            // The count leaves the slot behind before the spawn, or on every path from its
-            // success. `pthread_create` reports success as `pthread_join` does, and a
+            // The count leaves the slot behind before the handle is stored, or on every path from
+            // the spawn's success. `pthread_create` reports success as `pthread_join` does, and a
             // `std::thread` constructor throws as `join` does.
             bool leftBehind = false;
             for (const llvm::Instruction* raise : raises)
                 leftBehind = leftBehind || (dominators.dominates(read, raise) &&
-                                            dominators.dominates(raise, &create));
+                                            dominators.dominates(raise, &writer));
             const std::optional<JoinSuccess> success =
                 joinSuccessOf(create, kind == CallKind::StdThreadCtor ? CallKind::StdThreadJoin
                                                                       : CallKind::PThreadJoin);
@@ -937,8 +1027,10 @@ namespace ctrace::concurrency::internal::analysis
                              .end = countBound(*count, loops, dominators)};
         }
 
-        /// The slots `create` stores its handle into over the run, when its address names them.
-        std::optional<SlotRange> slotsFilled(const llvm::CallBase& create, CallKind kind,
+        /// The slots `writer` stores the handle of the thread `create` starts into over the run,
+        /// when its address names them.
+        std::optional<SlotRange> slotsFilled(const llvm::CallBase& create,
+                                             const llvm::CallBase& writer, CallKind kind,
                                              const llvm::LoopInfo& loops,
                                              const llvm::DominatorTree& dominators)
         {
@@ -949,7 +1041,7 @@ namespace ctrace::concurrency::internal::analysis
             if (loop == nullptr)
             {
                 const std::optional<SlotAddress> address =
-                    slotAddress(create.getArgOperand(0), layout);
+                    slotAddress(writer.getArgOperand(0), layout);
                 if (!address || address->index != nullptr)
                     return std::nullopt;
                 return SlotRange{.array = address->object,
@@ -962,9 +1054,9 @@ namespace ctrace::concurrency::internal::analysis
             if (const std::optional<CountedLoop> count = countedLoop(*loop, dominators);
                 count && !llvm::isa<llvm::LoadInst>(count->end))
                 if (std::optional<SlotRange> slots =
-                        countedSlots(create.getArgOperand(0), *count, loops, dominators, layout))
+                        countedSlots(writer.getArgOperand(0), *count, loops, dominators, layout))
                     return slots;
-            return slotsUpToCount(create, kind, *loop, loops, dominators, layout);
+            return slotsUpToCount(create, writer, kind, *loop, loops, dominators, layout);
         }
 
         /// The value a load reads from a local written once, followed through such locals: the
@@ -1091,13 +1183,14 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         std::optional<ThreadCompletion>
-        loopCompletion(const llvm::CallBase& create, const JoinSite& join, const SpawnFills& fills,
-                       const llvm::LoopInfo& loops, const llvm::DominatorTree& dominators,
+        loopCompletion(const llvm::CallBase& create, const llvm::CallBase& writer,
+                       const JoinSite& join, const SpawnFills& fills, const llvm::LoopInfo& loops,
+                       const llvm::DominatorTree& dominators,
                        const ConcurrencySymbolClassifier& classifier)
         {
             const llvm::Loop* first = loops.getLoopFor(create.getParent());
             const llvm::Loop* second = loops.getLoopFor(join.call->getParent());
-            const auto filled = fills.find(&create);
+            const auto filled = fills.find(&writer);
             // A creation outside any loop fills one slot. That it comes before the join loop is
             // `completionCoversReturns`'s to check: every path from it must leave that loop.
             const bool once = first == nullptr && filled != fills.end() &&
@@ -1122,7 +1215,7 @@ namespace ctrace::concurrency::internal::analysis
                 visited = pointerSlots(joined, *second, dominators, layout);
             const bool indexed =
                 filled != fills.end() && visited && covers(*visited, filled->second) &&
-                arrayStorageUnchanged(create, *join.call, &fills, dominators, classifier);
+                arrayStorageUnchanged(writer, *join.call, &fills, dominators, classifier);
             if (!indexed && !(a && vectorJoinRange(create, join, *first, *second, *a, dominators)))
                 return std::nullopt;
             const auto* firstBranch =
@@ -1150,6 +1243,282 @@ namespace ctrace::concurrency::internal::analysis
                 completion.ended =
                     JoinSuccess{.branch = second->getHeader(), .successor = secondExit};
             return completion;
+        }
+
+        /// Whether `later` may run after `earlier` on some path.
+        bool mayFollow(const llvm::Instruction& earlier, const llvm::Instruction& later)
+        {
+            if (earlier.getParent() == later.getParent() && earlier.comesBefore(&later))
+                return true;
+            llvm::SmallPtrSet<const llvm::BasicBlock*, 32> visited;
+            std::vector<const llvm::BasicBlock*> pending(llvm::succ_begin(earlier.getParent()),
+                                                         llvm::succ_end(earlier.getParent()));
+            while (!pending.empty())
+            {
+                const llvm::BasicBlock* block = pending.back();
+                pending.pop_back();
+                if (block == later.getParent())
+                    return true;
+                if (!visited.insert(block).second)
+                    continue;
+                for (const auto* successor : llvm::successors(block))
+                    pending.push_back(successor);
+            }
+            return false;
+        }
+
+        /// Whether every path from `start` to `target` goes past `through` first. Along an invoke's
+        /// unwind edge, `through` has not gone past: the call did not complete.
+        bool passesThrough(const llvm::Instruction& start, const llvm::Instruction& through,
+                           const llvm::Instruction& target)
+        {
+            // A block to walk, and the instruction past which to walk it: none for a whole block.
+            std::vector<std::pair<const llvm::BasicBlock*, const llvm::Instruction*>> pending{
+                {start.getParent(), &start}};
+            llvm::SmallPtrSet<const llvm::BasicBlock*, 32> visited;
+            while (!pending.empty())
+            {
+                const auto [block, from] = pending.back();
+                pending.pop_back();
+                if (from == nullptr && !visited.insert(block).second)
+                    continue;
+                auto ahead = [&](const llvm::Instruction& instruction)
+                {
+                    return instruction.getParent() == block &&
+                           (from == nullptr || from->comesBefore(&instruction));
+                };
+                const bool reachesThrough = ahead(through);
+                if (ahead(target) && (!reachesThrough || target.comesBefore(&through)))
+                    return false;
+                if (reachesThrough)
+                {
+                    if (const auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(&through))
+                        pending.emplace_back(invoke->getUnwindDest(), nullptr);
+                    continue;
+                }
+                for (const auto* successor : llvm::successors(block))
+                    pending.emplace_back(successor, nullptr);
+            }
+            return true;
+        }
+
+        /// A user of a value, or of one of its copies, with the copy it uses.
+        struct CopyUse
+        {
+            const llvm::User* user = nullptr;
+            const llvm::Value* copy = nullptr;
+        };
+
+        /// The users of `value` and of its copies: the loads of the locals it is stored in, locals
+        /// that store alone writes and nothing but loads reads. A store anywhere else is a use,
+        /// where the value leaves this function's hands.
+        std::vector<CopyUse> usersThroughLocals(const llvm::Value& value)
+        {
+            std::vector<CopyUse> uses;
+            std::vector<const llvm::Value*> copies{&value};
+            llvm::SmallPtrSet<const llvm::Value*, 16> seen;
+            while (!copies.empty())
+            {
+                const llvm::Value* copy = copies.back();
+                copies.pop_back();
+                if (!seen.insert(copy).second)
+                    continue;
+                for (const llvm::User* user : copy->users())
+                {
+                    const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                    if (store == nullptr)
+                    {
+                        uses.push_back(CopyUse{user, copy});
+                        continue;
+                    }
+                    const llvm::Value* slot = store->getPointerOperand();
+                    if (store->getValueOperand() != copy || !llvm::isa<llvm::AllocaInst>(slot) ||
+                        uniqueStore(slot) != store)
+                    {
+                        uses.push_back(CopyUse{user, copy});
+                        continue;
+                    }
+                    for (const llvm::User* reader : slot->users())
+                        if (llvm::isa<llvm::LoadInst>(reader))
+                            copies.push_back(reader);
+                }
+            }
+            return uses;
+        }
+
+        /// Whether the local vector `container` is only built, reserved, appended to and destroyed,
+        /// and read by `reads` alone: nothing may take a thread out of it, nor join, detach or
+        /// move one. It is used as `this` only. Any use `later` accepts is left free: it can only
+        /// run once every thread the proof covers has been joined.
+        bool onlyAppendedAndReadBy(const llvm::Value& container,
+                                   llvm::ArrayRef<const llvm::Instruction*> reads,
+                                   llvm::function_ref<bool(const llvm::Instruction&)> later)
+        {
+            for (const CopyUse& use : usersThroughLocals(container))
+            {
+                const auto* instruction = llvm::dyn_cast<llvm::Instruction>(use.user);
+                if (instruction != nullptr && later(*instruction))
+                    continue;
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(use.user);
+                if (call == nullptr)
+                    return false;
+                if (llvm::isa<llvm::IntrinsicInst>(call))
+                    continue;
+                for (unsigned index = 1; index < call->arg_size(); ++index)
+                    if (call->getArgOperand(index) == use.copy)
+                        return false;
+                if (!vectorMethod(*call, "vector") && !vectorMethod(*call, "reserve") &&
+                    !vectorMethod(*call, "push_back") && !vectorMethod(*call, "emplace_back") &&
+                    !vectorMethod(*call, "~vector") && !llvm::is_contained(reads, call))
+                    return false;
+            }
+            return true;
+        }
+
+        /// Whether the element `element` reads serves `uses` alone, through the locals it is kept
+        /// in: nothing else takes its thread.
+        bool servesOnly(const llvm::Value& element, llvm::ArrayRef<const llvm::Instruction*> uses)
+        {
+            for (const CopyUse& use : usersThroughLocals(element))
+            {
+                if (!llvm::is_contained(uses, use.user))
+                    return false;
+            }
+            return true;
+        }
+
+        /// How a loop reads the vector whose elements it joins: the vector, the loop's calls
+        /// reading it, and the last of them before the first round, by which every thread to be
+        /// joined must be in the vector.
+        struct VectorTraversal
+        {
+            const llvm::Value* container = nullptr;
+            std::vector<const llvm::Instruction*> reads;
+            const llvm::Instruction* lastRead = nullptr;
+        };
+
+        /// How `loop` traverses the whole vector `join` takes its elements from: an iterator from
+        /// `begin()` to `end()`, as `wholeRangeJoin` checks it, or an index from 0 below the
+        /// vector's `size()`, read before the loop or at each test, one more each round.
+        std::optional<VectorTraversal> wholeVectorJoin(const JoinSite& join, const llvm::Loop& loop,
+                                                       const llvm::DominatorTree& dominators)
+        {
+            if (const auto range = wholeRangeJoin(join, loop, dominators))
+                return VectorTraversal{.container = range->first.container,
+                                       .reads = {range->first.read, range->second.read},
+                                       .lastRead = range->second.store};
+            const std::optional<CountedLoop> count = countedLoop(loop, dominators);
+            const auto* zero = count ? llvm::dyn_cast<llvm::ConstantInt>(count->begin) : nullptr;
+            const auto* size = count ? llvm::dyn_cast<llvm::CallBase>(count->end) : nullptr;
+            const llvm::CallBase* element = joinedDereference(join);
+            if (!zero || !zero->isZero() || !size || size->arg_size() != 1 ||
+                !vectorMethod(*size, "size") || !element ||
+                !accessesInductionElement(*element, object(size->getArgOperand(0)), *count))
+                return std::nullopt;
+            return VectorTraversal{.container = object(size->getArgOperand(0)),
+                                   .reads = {size, element},
+                                   .lastRead = size};
+        }
+
+        /// Where the thread `create` started has been joined, `insertion` having moved it into a
+        /// vector, as `join` proves: in a loop, it takes each element of the whole vector and
+        /// joins it, each round going on only past its join's success. Where every path has left
+        /// the loop through its test's exit edge, every thread the vector held when the loop last
+        /// read it before starting has been joined. Nothing but that loop reads the vector, and
+        /// each element it takes serves the join alone: no thread left the vector unjoined. Every
+        /// path from `create` to that last read goes past `insertion`, which may not run once the
+        /// read is made: the thread is among those joined.
+        std::optional<JoinSuccess> insertedThreadsCompletion(const llvm::CallBase& create,
+                                                             const llvm::CallBase& insertion,
+                                                             const JoinSite& join,
+                                                             const llvm::LoopInfo& loops,
+                                                             const llvm::DominatorTree& dominators)
+        {
+            const llvm::Value* container = object(insertion.getArgOperand(0));
+            const llvm::Loop* loop = loops.getLoopFor(join.call->getParent());
+            if (!llvm::isa_and_nonnull<llvm::AllocaInst>(container) || loop == nullptr ||
+                loop->getLoopLatch() == nullptr || !join.success.has_value() ||
+                !join.success->covers(*loop->getLoopLatch()->getTerminator(), dominators))
+                return std::nullopt;
+            const std::optional<VectorTraversal> traversal =
+                wholeVectorJoin(join, *loop, dominators);
+            const llvm::CallBase* element = joinedDereference(join);
+            if (!traversal || traversal->container != container || element == nullptr ||
+                !servesOnly(*element, {join.call}))
+                return std::nullopt;
+
+            // The edge the loop's test exits by: a break entering its block too, having skipped
+            // rounds, leaves that block uncovered. A use of the vector past it finds every thread
+            // joined; were the loop to run again, it would join only what `insertion`, which cannot
+            // follow the loop's read, did not add.
+            const JoinSuccess exit{
+                .branch = loop->getHeader(),
+                .successor = llvm::cast<llvm::BranchInst>(loop->getHeader()->getTerminator())
+                                 ->getSuccessor(1),
+            };
+            auto pastExit = [&](const llvm::Instruction& use)
+            { return exit.covers(use, dominators); };
+            if (mayFollow(*traversal->lastRead, insertion) ||
+                !passesThrough(create, insertion, *traversal->lastRead) ||
+                !onlyAppendedAndReadBy(*container, traversal->reads, pastExit))
+                return std::nullopt;
+            return exit;
+        }
+
+        /// The call moving the thread `create` starts out of a local, when `create` starts it into
+        /// a local only to be moved: a temporary, or a local handed over with `std::move`, which
+        /// clang folds away. The call takes the local as its second operand, the value it moves.
+        /// Nothing else may use the local but its own destruction: the local still holds the thread
+        /// `create` started when the call moves it out, and is empty afterwards.
+        const llvm::CallBase* moveTaking(const llvm::CallBase& create,
+                                         const ConcurrencySymbolClassifier& classifier)
+        {
+            const auto* local = llvm::dyn_cast<llvm::AllocaInst>(object(create.getArgOperand(0)));
+            if (local == nullptr)
+                return nullptr;
+            const llvm::CallBase* move = nullptr;
+            for (const llvm::Use& use : local->uses())
+            {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(use.getUser());
+                if (call == nullptr)
+                    return nullptr;
+                if (use.getOperandNo() == 0 &&
+                    (call == &create || classifier.classify(*call) == CallKind::StdThreadDtor))
+                    continue;
+                if (const auto* intrinsic = llvm::dyn_cast<llvm::IntrinsicInst>(call);
+                    intrinsic != nullptr && (intrinsic->isLifetimeStartOrEnd() ||
+                                             llvm::isa<llvm::DbgInfoIntrinsic>(intrinsic)))
+                    continue;
+                if (move != nullptr || use.getOperandNo() != 1)
+                    return nullptr;
+                move = call;
+            }
+            return move;
+        }
+
+        /// The `push_back` or `emplace_back` moving the thread `create` starts into a vector.
+        const llvm::CallBase* insertionTaking(const llvm::CallBase& create,
+                                              const ConcurrencySymbolClassifier& classifier)
+        {
+            const llvm::CallBase* move = moveTaking(create, classifier);
+            return move != nullptr &&
+                           (vectorMethod(*move, "push_back") || vectorMethod(*move, "emplace_back"))
+                       ? move
+                       : nullptr;
+        }
+
+        /// The call storing the handle of the thread `create` starts: `create`, or the
+        /// `std::thread` move taking it from the local `create` starts it into, as the assignment
+        /// in `threads[i] = std::thread(worker)` does. The move runs once after every start that
+        /// reaches a normal return: a thread left in the local is destroyed there while joinable,
+        /// which ends the program.
+        const llvm::CallBase& handleWriter(const llvm::CallBase& create,
+                                           const ConcurrencySymbolClassifier& classifier)
+        {
+            const llvm::CallBase* move = moveTaking(create, classifier);
+            return move != nullptr && classifier.classify(*move) == CallKind::StdThreadMove
+                       ? *move
+                       : create;
         }
 
         std::vector<JoinSite> joinSites(const llvm::Function& function,
@@ -1409,17 +1778,41 @@ namespace ctrace::concurrency::internal::analysis
             const auto& loops = analyses.getLoopInfo(function);
             SpawnFills fills;
             for (const auto* create : creates)
-                if (!create->arg_empty())
-                    if (std::optional<SlotRange> filled =
-                            slotsFilled(*create, classifier.classify(*create), loops, dominators))
-                        fills.emplace(create, *filled);
+            {
+                if (create->arg_empty())
+                    continue;
+                const llvm::CallBase& writer = handleWriter(*create, classifier);
+                if (std::optional<SlotRange> filled = slotsFilled(
+                        *create, writer, classifier.classify(*create), loops, dominators))
+                    fills.emplace(&writer, *filled);
+            }
+            // A thread moved into a vector is joined through the vector: the local it was started
+            // into is empty past the move, and no join below names it.
+            for (const auto* create : creates)
+            {
+                const llvm::CallBase* insertion =
+                    create->arg_empty() ? nullptr : insertionTaking(*create, classifier);
+                if (insertion == nullptr)
+                    continue;
+                for (const JoinSite& join : joins)
+                {
+                    const std::optional<JoinSuccess> ended =
+                        insertedThreadsCompletion(*create, *insertion, join, loops, dominators);
+                    if (ended && completionCoversReturns(*create, *ended))
+                    {
+                        result.emplace(create, ThreadCompletion{.ended = ended});
+                        break;
+                    }
+                }
+            }
             for (const auto* create : creates)
                 for (const JoinSite& join : joins)
                 {
                     if (create->arg_empty())
                         continue;
                     if (const std::optional<ThreadCompletion> completion =
-                            loopCompletion(*create, join, fills, loops, dominators, classifier))
+                            loopCompletion(*create, handleWriter(*create, classifier), join, fills,
+                                           loops, dominators, classifier))
                     {
                         result.emplace(create, *completion);
                         break;

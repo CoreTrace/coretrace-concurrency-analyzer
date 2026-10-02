@@ -2,6 +2,7 @@
 #include "ir_utils.hpp"
 
 #include <llvm/Analysis/ValueTracking.h>
+#include <llvm/Demangle/Demangle.h>
 
 #include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/MemoryLocation.h>
@@ -23,6 +24,7 @@
 #include <llvm/Support/raw_ostream.h>
 
 #include <charconv>
+#include <cstdlib>
 #include <filesystem>
 #include <string_view>
 #include <system_error>
@@ -1460,6 +1462,30 @@ namespace ctrace::concurrency::internal::analysis
     std::string functionId(const llvm::Function& function)
     {
         return normalizeValueName(function.getName());
+    }
+
+    std::optional<DemangledName> demangleFunction(std::string_view mangled)
+    {
+        // The demangler keeps pointers into its input, so the input must outlive it.
+        const std::string input(mangled);
+        llvm::ItaniumPartialDemangler demangler;
+        if (demangler.partialDemangle(input.c_str()) || !demangler.isFunction())
+            return std::nullopt;
+
+        std::size_t size = 0;
+        char* context = demangler.getFunctionDeclContextName(nullptr, &size);
+        char* base = demangler.getFunctionBaseName(nullptr, &size);
+        std::optional<DemangledName> name;
+        if (context != nullptr && base != nullptr)
+        {
+            // libc++ tags its members with the ABI version (`store[abi:ne200100]`).
+            std::string baseName = base;
+            baseName = baseName.substr(0, baseName.find("[abi:"));
+            name = DemangledName{.context = context, .base = std::move(baseName)};
+        }
+        std::free(context);
+        std::free(base);
+        return name;
     }
 
     std::string functionDisplayName(const llvm::Function& function)

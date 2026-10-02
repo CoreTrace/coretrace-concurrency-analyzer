@@ -2847,6 +2847,174 @@ namespace
              .intent = "wildcard storage-group indices do not prove the same handle was joined",
              .dataRace = 1},
 
+            // --- a std::thread moved into a vector and joined through it (#162) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_joined_no_fp.cpp",
+             .intent = "the loop joining a vector ends the thread push_back moved into it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_temporary_joined_no_fp.cpp",
+             .intent = "the loop joining a vector ends the thread emplace_back moved into it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_local_moved_in_joined_no_fp.cpp",
+             .intent = "a local moved into the vector with std::move is ended by its loop",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_index_joined_no_fp.cpp",
+             .intent = "an index loop below the size ends the threads moved into the vector",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_phases_no_fp.cpp",
+             .intent = "a phase whose thread is joined through its vector precedes the next",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_written_before_join_race.cpp",
+             .intent = "the thread moved into the vector runs until the loop joins it",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_partly_joined_race.cpp",
+             .intent = "an index loop from 1 does not end the thread moved in at 0",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_detached_race.cpp",
+             .intent = "a loop detaching the vector's threads ends none of them",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_join_failure_caught_race.cpp",
+             .intent = "a join whose exception the round catches ends nothing past the loop",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_out_again_race.cpp",
+             .intent = "a thread moved out of the vector again escapes its join loop",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_swapped_out_race.cpp",
+             .intent = "a thread swapped out of the vector escapes its join loop",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_other_vector_joined_race.cpp",
+             .intent = "a loop joining another vector ends none of this one's threads",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_on_one_path_race.cpp",
+             .intent = "a thread moved into the vector on one path only is not ended by it",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_moved_in_loop_joined_race.cpp",
+             .intent = "threads moved into the vector in a loop race with each other only",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_swapped_before_insertion_race.cpp",
+             .intent = "a local whose thread was swapped out moves another thread in",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_insertion_failure_caught_race.cpp",
+             .intent = "a push_back whose exception is caught may move nothing in",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_after_join_loop_race.cpp",
+             .intent = "a thread moved in after the join loop is not ended by it",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_swapped_in_join_loop_race.cpp",
+             .intent = "an element swapped before its join is not the thread moved in",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_into_derived_container_race.cpp",
+             .intent = "a push_back of the program's own, hiding std::vector's, inserts nothing",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_into_vector_of_other_namespace_race.cpp",
+             .intent = "a vector outside std, whose push_back detaches, inserts nothing",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_joined_below_other_bound_race.cpp",
+             .intent = "an index loop below a bound other than the size may stop short",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_joined_below_helper_bound_race.cpp",
+             .intent = "an index loop below a helper's count other than the size may stop short",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_aliased_parameter_race.cpp",
+             .intent = "a vector the function does not own may lose its threads",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_exchanged_by_helper_race.cpp",
+             .intent = "a helper swapping the local's thread out before push_back hides the writer",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_moved_in_join_loop_break_race.cpp",
+             .intent = "a join loop that may break ends nothing past it",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_swapped_out_by_block_laid_out_after_insertion_race.cpp",
+             .intent = "a swap laid out after push_back but run before it is a second taker",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            // --- a std::thread move-assigned into an array slot and joined through it (#162) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_move_assigned_joined_no_fp.cpp",
+             .intent = "the range-for joining an array ends the thread move-assigned into its slot",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_move_assigned_in_loop_joined_no_fp.cpp",
+             .intent = "a range-for ends each thread a loop move-assigned into its own slot",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_move_assigned_up_to_bound_joined_no_fp.cpp",
+             .intent = "a loop below a bound ends each thread a loop below it move-assigned",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_move_assigned_at_count_joined_no_fp.cpp",
+             .intent = "a loop up to the count ends the threads move-assigned at that count",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_two_slots_move_assigned_no_fp.cpp",
+             .intent = "threads move-assigned into two slots are both ended by the range-for",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_move_assigned_written_before_join_race.cpp",
+             .intent = "the thread move-assigned into the array runs until the loop joins it",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_move_assigned_slot_not_joined_race.cpp",
+             .intent = "a loop joining slot 0 alone does not end the thread moved into slot 1",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_move_assigned_swapped_out_race.cpp",
+             .intent = "a thread swapped out of the array escapes its join loop",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_kept_by_helper_before_move_race.cpp",
+             .intent = "an array whose address a helper keeps may lose its thread later",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
              .intent = "kept to exercise the compile failure path",
