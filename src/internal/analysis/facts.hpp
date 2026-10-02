@@ -74,9 +74,18 @@ namespace ctrace::concurrency::internal::analysis
         std::int64_t byteOffset = 0;
         /// Extent in bytes; zero means unknown, and therefore covers the whole object.
         std::uint64_t byteSize = 0;
+        /// The offset is unknown but relative to the thread making the access: the bytes lie in
+        /// the element the only spawn handing out this object's elements gave that thread, or,
+        /// for the thread that spawns, in the element the spawn of the current round is about to
+        /// hand over. Two accesses that run at the same time are made by different threads, so
+        /// two such regions never overlap.
+        bool threadOwnedElement = false;
 
         [[nodiscard]] bool mayOverlap(const MemoryRegion& other) const noexcept
         {
+            if (threadOwnedElement && other.threadOwnedElement)
+                return false;
+
             if (!hasKnownOffset || !other.hasKnownOffset)
                 return true;
 
@@ -110,7 +119,7 @@ namespace ctrace::concurrency::internal::analysis
         [[nodiscard]] std::string suffix() const
         {
             if (!hasKnownOffset)
-                return "[*]";
+                return threadOwnedElement ? "[own]" : "[*]";
 
             return byteOffset == 0 ? std::string() : "+" + std::to_string(byteOffset);
         }

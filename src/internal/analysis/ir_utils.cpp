@@ -1078,6 +1078,84 @@ namespace ctrace::concurrency::internal::analysis
         return std::nullopt;
     }
 
+    std::optional<VariablyIndexedPointer> variablyIndexedPointer(const llvm::Value& pointer,
+                                                                 const llvm::DataLayout& layout)
+    {
+        VariablyIndexedPointer result;
+        bool indexSeen = false;
+        const llvm::Value* current = pointer.stripPointerCasts();
+        // The walk starts from the last indexing step: until the variable index is met, every
+        // offset moves the pointer inside its element; once it is met, every offset moves the
+        // element's start.
+        while (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(current))
+        {
+            std::int64_t beforeIndex = 0;
+            std::int64_t afterIndex = 0;
+            bool indexHere = false;
+            for (auto step = llvm::gep_type_begin(gep); step != llvm::gep_type_end(gep); ++step)
+            {
+                std::int64_t offset = 0;
+                if (llvm::StructType* structType = step.getStructTypeOrNull())
+                {
+                    const auto* field = llvm::cast<llvm::ConstantInt>(step.getOperand());
+                    offset =
+                        static_cast<std::int64_t>(layout.getStructLayout(structType)
+                                                      ->getElementOffset(field->getZExtValue()));
+                }
+                else
+                {
+                    const llvm::TypeSize stride = step.getSequentialElementStride(layout);
+                    if (stride.isScalable())
+                        return std::nullopt;
+
+                    const auto* constant = llvm::dyn_cast<llvm::ConstantInt>(step.getOperand());
+                    if (constant == nullptr)
+                    {
+                        if (indexSeen)
+                            return std::nullopt;
+
+                        const llvm::Value* index = step.getOperand();
+                        while (const auto* extension = llvm::dyn_cast<llvm::CastInst>(index))
+                        {
+                            if (extension->getOpcode() != llvm::Instruction::SExt &&
+                                extension->getOpcode() != llvm::Instruction::ZExt)
+                                break;
+                            index = extension->getOperand(0);
+                        }
+                        result.index = index;
+                        result.elementSize = stride.getFixedValue();
+                        indexSeen = indexHere = true;
+                        continue;
+                    }
+                    offset = constant->getSExtValue() *
+                             static_cast<std::int64_t>(stride.getFixedValue());
+                }
+                (indexHere ? afterIndex : beforeIndex) += offset;
+            }
+
+            if (indexHere)
+            {
+                result.position += afterIndex;
+                result.elementStart += beforeIndex;
+            }
+            else if (indexSeen)
+            {
+                result.elementStart += beforeIndex;
+            }
+            else
+            {
+                result.position += beforeIndex;
+            }
+            current = gep->getPointerOperand()->stripPointerCasts();
+        }
+
+        if (!indexSeen)
+            return std::nullopt;
+
+        result.base = current;
+        return result;
+    }
+
     std::optional<RootBinding> resolveTrackedRoot(const llvm::Value& value,
                                                   const llvm::DataLayout* layout,
                                                   std::uint64_t byteSize,

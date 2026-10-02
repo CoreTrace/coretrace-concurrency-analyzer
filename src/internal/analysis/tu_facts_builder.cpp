@@ -72,6 +72,51 @@ namespace ctrace::concurrency::internal::analysis
             std::string suffix;
         };
 
+        /// Whether an access the spawning function makes to `symbol`, over `byteSize` bytes
+        /// starting `offset` bytes past `pointer`, stays in an element no running thread of a
+        /// spawn loop holds: the element the current round is about to hand over, or the one of
+        /// the thread the current round of its join loop has certainly joined.
+        bool reachesElementNoThreadHolds(const llvm::Instruction& access,
+                                         const llvm::Value& pointer, std::int64_t offset,
+                                         std::uint64_t byteSize, const std::string& symbol,
+                                         const SharedObjectBindings& bindings,
+                                         const ThreadCompletionMap& completions,
+                                         LlvmFunctionAnalysisProvider& analyses)
+        {
+            const llvm::DataLayout& layout = access.getModule()->getDataLayout();
+            for (const auto& [entryFunctionId, binding] : bindings)
+            {
+                if (!binding.elementPerThread.has_value() || binding.object.symbol != symbol)
+                    continue;
+                const ElementPerThread& elements = *binding.elementPerThread;
+                if (reachesElementBeforeHandOver(elements, access, pointer, offset, byteSize,
+                                                 layout))
+                    return true;
+                const auto completion = completions.find(elements.spawn);
+                if (completion != completions.end() && completion->second.roundJoin.has_value() &&
+                    reachesElementOfJoinedThread(elements, *completion->second.roundJoin, access,
+                                                 pointer, offset, byteSize, layout,
+                                                 analyses.getDominatorTree(*access.getFunction())))
+                    return true;
+            }
+            return false;
+        }
+
+        bool loadOrStoreReachesElementNoThreadHolds(const PendingAccess& access,
+                                                    const SharedObjectBindings& bindings,
+                                                    const ThreadCompletionMap& completions,
+                                                    LlvmFunctionAnalysisProvider& analyses)
+        {
+            const llvm::Value* pointer = llvm::getLoadStorePointerOperand(access.instruction);
+            if (pointer == nullptr)
+                return false;
+            const llvm::DataLayout& layout = access.instruction->getModule()->getDataLayout();
+            const std::uint64_t byteSize =
+                layout.getTypeStoreSize(llvm::getLoadStoreType(access.instruction)).getFixedValue();
+            return reachesElementNoThreadHolds(*access.instruction, *pointer, 0, byteSize,
+                                               access.root.symbol, bindings, completions, analyses);
+        }
+
         std::string rootBindingKey(const RootBinding& binding)
         {
             std::string index;
@@ -1024,8 +1069,23 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_set<std::string> localObjectIds;
         if (selection.lockState())
         {
-            sharedObjectBindings = SharedObjectBindingCollector(classifier, analyses)
-                                       .collect(module, directCallSites, programDefined);
+            sharedObjectBindings =
+                SharedObjectBindingCollector(classifier, analyses)
+                    .collect(module, directCallSites, programDefined, &spawnFacts.entryConcurrency);
+
+            // A thread entry another unit also starts may receive the same element there.
+            if (crossTU)
+            {
+                for (const llvm::Function& function : module)
+                {
+                    const auto bindingIt = sharedObjectBindings.find(functionId(function));
+                    if (bindingIt != sharedObjectBindings.end() &&
+                        program->spawnCount(programSymbol(function)) > 1)
+                    {
+                        bindingIt->second.elementPerThread.reset();
+                    }
+                }
+            }
             sharedObjectIds =
                 sharedObjectNames(sharedObjectBindings, SharedObjectKind::BehindPointer);
             localObjectIds = sharedObjectNames(sharedObjectBindings, SharedObjectKind::Local);
@@ -1639,6 +1699,11 @@ namespace ctrace::concurrency::internal::analysis
             if (pendingAccess.root.kind == RootBindingKind::Global &&
                 !pendingAccess.root.index.has_value())
             {
+                if (loadOrStoreReachesElementNoThreadHolds(pendingAccess, sharedObjectBindings,
+                                                           completions, analyses))
+                {
+                    pendingAccess.root.region.threadOwnedElement = true;
+                }
                 pendingAccess.fact.symbol = pendingAccess.root.symbol;
                 pendingAccess.fact.region = pendingAccess.root.region;
                 // The root may name an object a thread holds rather than a global, and the two
@@ -1691,6 +1756,20 @@ namespace ctrace::concurrency::internal::analysis
                         concrete.sharedObject = namesObjectSharedWithThread(
                             concrete.symbol, sharedObjectIds, localObjectIds);
                         concrete.region = root->region;
+                        // The callee reaches the element its argument points into: where the
+                        // call stays in an element no running thread holds, so does the access.
+                        const MemoryRegion& place = access.fact.region;
+                        if (access.root.kind != RootBindingKind::Global &&
+                            !access.root.index.has_value() && place.hasKnownOffset &&
+                            access.root.argumentIndex < callBinding.call->arg_size() &&
+                            reachesElementNoThreadHolds(
+                                *callBinding.call,
+                                *callBinding.call->getArgOperand(access.root.argumentIndex),
+                                place.byteOffset, place.byteSize, root->symbol,
+                                sharedObjectBindings, completions, analyses))
+                        {
+                            concrete.region.threadOwnedElement = true;
+                        }
                         concrete.heldLocks =
                             mergeHeldLocks(locksAtCallSite(concrete.heldLocks, callBinding),
                                            callBinding.callsiteHeldLocks);
@@ -1761,6 +1840,8 @@ namespace ctrace::concurrency::internal::analysis
                     // may have pointed into the object, exactly as for a call argument.
                     fact.region = access.root.region.rebasedOn(binding.object.region,
                                                                binding.object.designated);
+                    // Every access through it stays in the element the thread was handed.
+                    fact.region.threadOwnedElement = binding.elementPerThread.has_value();
                     fact.heldLocks = locksOnSharedObject(fact.heldLocks, binding);
                     // A global keeps its own name in the report; other objects have none to show.
                     fact.sharedObject = binding.kind != SharedObjectKind::Global;

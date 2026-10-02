@@ -5,14 +5,22 @@
 #include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
+#include "parameter_footprints.hpp"
+#include "thread_completion_analysis.hpp"
 
 #include <llvm/Analysis/LoopInfo.h>
+#include <llvm/ADT/SmallPtrSet.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/CFG.h>
+#include <llvm/IR/Constants.h>
 #include <llvm/IR/Dominators.h>
+#include <llvm/IR/IntrinsicInst.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/InstrTypes.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/Module.h>
+#include <llvm/IR/Operator.h>
+#include <llvm/Support/CheckedArithmetic.h>
 
 #include <cstdio>
 #include <map>
@@ -47,6 +55,9 @@ namespace ctrace::concurrency::internal::analysis
             ObjectIdentity object;
             unsigned argumentIndex = 0;
             bool insideLoop = false;
+            /// The pointer the spawn hands over, as the entry receives it.
+            const llvm::Value* handed = nullptr;
+            const llvm::Function* entry = nullptr;
         };
 
         ObjectIdentity namedIdentity(RootBinding object, SharedObjectKind kind)
@@ -172,6 +183,233 @@ namespace ctrace::concurrency::internal::analysis
                                  SharedObjectKind::BehindPointer);
         }
 
+        constexpr std::string_view kProgramEntryFunction = "main";
+
+        /// No path leaves the loop and comes back to it: a second pass would hand the same
+        /// elements out again while the first pass's threads may still run.
+        bool runsOnce(const llvm::Loop& loop)
+        {
+            llvm::SmallVector<llvm::BasicBlock*, 4> exits;
+            loop.getExitBlocks(exits);
+            llvm::SmallPtrSet<const llvm::BasicBlock*, 32> visited;
+            std::vector<const llvm::BasicBlock*> pending(exits.begin(), exits.end());
+            while (!pending.empty())
+            {
+                const llvm::BasicBlock* block = pending.back();
+                pending.pop_back();
+                if (loop.contains(block))
+                    return false;
+                if (!visited.insert(block).second)
+                    continue;
+                for (const llvm::BasicBlock* successor : llvm::successors(block))
+                    pending.push_back(successor);
+            }
+            return true;
+        }
+
+        /// Whether `later` can run after `earlier` in the same round of `loop`, before the back
+        /// edge starts the next one.
+        bool followsInRound(const llvm::Instruction& earlier, const llvm::Instruction& later,
+                            const llvm::Loop& loop)
+        {
+            if (earlier.getParent() == later.getParent() && earlier.comesBefore(&later))
+                return true;
+
+            llvm::SmallPtrSet<const llvm::BasicBlock*, 32> visited;
+            std::vector<const llvm::BasicBlock*> pending(llvm::succ_begin(earlier.getParent()),
+                                                         llvm::succ_end(earlier.getParent()));
+            while (!pending.empty())
+            {
+                const llvm::BasicBlock* block = pending.back();
+                pending.pop_back();
+                if (!loop.contains(block) || block == loop.getHeader() ||
+                    !visited.insert(block).second)
+                    continue;
+                if (block == later.getParent())
+                    return true;
+                for (const llvm::BasicBlock* successor : llvm::successors(block))
+                    pending.push_back(successor);
+            }
+            return false;
+        }
+
+        /// Whether `function` keeps the pointer it receives as `argumentIndex` to itself: every
+        /// access through it is placed, and it is never stored where another thread could read
+        /// it, nor handed to code the unit does not define.
+        bool keepsPointer(const ParameterFootprint& footprint)
+        {
+            return !footprint.all.readsWholeObject && !footprint.all.writesWholeObject;
+        }
+
+        /// Whether the bytes a footprint places stay inside the element the pointer sits in at
+        /// `position`. Whether it also reaches bytes it does not place, or lets the pointer go,
+        /// is settled with the object's address: the spawn handing it over is one of its uses.
+        bool placedInsideElement(const ParameterFootprint& footprint, std::int64_t position,
+                                 std::uint64_t elementSize)
+        {
+            for (const auto* ranges : {&footprint.all.reads, &footprint.all.writes})
+            {
+                for (const ParameterFootprint::Range& range : *ranges)
+                {
+                    if (position + range.begin < 0 ||
+                        position + range.end > static_cast<std::int64_t>(elementSize))
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        /// The thread entry a spawn hands `argument` to, when `argument` is the object operand
+        /// of that spawn: the `void*` of `pthread_create`, or the forwarding slot of a
+        /// `std::thread`.
+        const llvm::Function* entryReceiving(const llvm::CallBase& call, unsigned argument,
+                                             const ConcurrencySymbolClassifier& classifier)
+        {
+            switch (classifier.classify(call))
+            {
+            case CallKind::PThreadCreate:
+                return argument == kPThreadArgumentOperandIndex
+                           ? resolveFunctionValue(*call.getArgOperand(kPThreadEntryOperandIndex))
+                           : nullptr;
+            case CallKind::StdThreadCtor:
+            case CallKind::StdJThreadCtor:
+                return argument == kStdThreadObjectOperandIndex
+                           ? resolveFunctionValue(
+                                 *call.getArgOperand(kStdThreadCallableOperandIndex))
+                           : nullptr;
+            default:
+                return nullptr;
+            }
+        }
+
+        /// Every pointer into `base` stays where the access paths name it: read or written
+        /// through, indexed, copied into a local variable, or handed to a function or a thread
+        /// entry of the unit that keeps it. Stored anywhere else, or handed to code the unit does
+        /// not define, it lets some thread reach an element without naming the object, and no
+        /// pair would show that access.
+        bool addressStaysNamed(const llvm::Value& base,
+                               const ConcurrencySymbolClassifier& classifier,
+                               ParameterFootprints& footprints)
+        {
+            const auto handedToKeeper = [&](const llvm::CallBase& call, unsigned argument)
+            {
+                if (llvm::isa<llvm::DbgInfoIntrinsic>(call) || llvm::isa<llvm::MemIntrinsic>(call))
+                    return true;
+                if (const llvm::Function* entry = entryReceiving(call, argument, classifier))
+                    return !entry->isDeclaration() && keepsPointer(footprints.of(*entry, 0));
+                const llvm::Function* callee = classifier.directCallee(call);
+                return classifier.classify(call) == CallKind::Unknown && callee != nullptr &&
+                       !callee->isDeclaration() && keepsPointer(footprints.of(*callee, argument));
+            };
+
+            llvm::SmallPtrSet<const llvm::Value*, 32> seen;
+            std::vector<const llvm::Value*> pending{&base};
+            while (!pending.empty())
+            {
+                const llvm::Value* pointer = pending.back();
+                pending.pop_back();
+                if (!seen.insert(pointer).second)
+                    continue;
+
+                for (const llvm::Use& use : pointer->uses())
+                {
+                    const llvm::User* user = use.getUser();
+                    if (llvm::isa<llvm::GEPOperator>(user) || llvm::isa<llvm::BitCastInst>(user) ||
+                        llvm::isa<llvm::AddrSpaceCastInst>(user) ||
+                        llvm::isa<llvm::PHINode>(user) || llvm::isa<llvm::SelectInst>(user))
+                    {
+                        pending.push_back(user);
+                        continue;
+                    }
+
+                    if (llvm::isa<llvm::LoadInst>(user) || llvm::isa<llvm::ICmpInst>(user))
+                        continue;
+
+                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+                    {
+                        if (store->getPointerOperand() == pointer)
+                            continue;
+                        // A copy in a local variable is followed through its reads; the slot a
+                        // `std::thread` forwards its argument through is handed to the spawn.
+                        const auto* variable = llvm::dyn_cast<llvm::AllocaInst>(
+                            store->getPointerOperand()->stripPointerCasts());
+                        if (variable == nullptr)
+                            return false;
+                        for (const llvm::Use& variableUse : variable->uses())
+                        {
+                            const llvm::User* reader = variableUse.getUser();
+                            if (const auto* read = llvm::dyn_cast<llvm::LoadInst>(reader))
+                                pending.push_back(read);
+                            else if (const auto* call = llvm::dyn_cast<llvm::CallBase>(reader))
+                            {
+                                if (!call->isArgOperand(&variableUse) ||
+                                    !handedToKeeper(*call, call->getArgOperandNo(&variableUse)))
+                                    return false;
+                            }
+                            else if (!llvm::isa<llvm::StoreInst>(reader))
+                                return false;
+                        }
+                        continue;
+                    }
+
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+                    if (call == nullptr || !call->isArgOperand(&use) ||
+                        !handedToKeeper(*call, call->getArgOperandNo(&use)))
+                        return false;
+                }
+            }
+            return true;
+        }
+
+        /// The spawn hands each thread the element its loop counter picks, in a loop that runs
+        /// once in the program's entry. Whether another spawn hands out the same elements is
+        /// settled once every spawn is known.
+        std::optional<ElementPerThread>
+        elementPerThreadAt(const llvm::CallBase& spawn, const llvm::Value& object,
+                           const llvm::Function& entry, const llvm::LoopInfo& loops,
+                           const llvm::DominatorTree& dominators, const llvm::DataLayout& layout,
+                           const ConcurrencySymbolClassifier& classifier, bool entryCalledDirectly)
+        {
+            if (spawn.getFunction()->getName() != llvm::StringRef(kProgramEntryFunction) ||
+                entryCalledDirectly)
+                return std::nullopt;
+
+            const llvm::Loop* loop = loops.getLoopFor(spawn.getParent());
+            if (loop == nullptr || !runsOnce(*loop))
+                return std::nullopt;
+
+            std::optional<VariablyIndexedPointer> handed = variablyIndexedPointer(object, layout);
+            // A variable or a global is the same object in every round. A pointer read from
+            // memory may move between rounds, and would need its variable followed.
+            if (!handed.has_value() || (!llvm::isa<llvm::AllocaInst>(handed->base) &&
+                                        !llvm::isa<llvm::GlobalVariable>(handed->base)))
+                return std::nullopt;
+
+            const auto* read = llvm::dyn_cast<llvm::LoadInst>(handed->index);
+            if (read == nullptr)
+                return std::nullopt;
+
+            const std::optional<LoopCounter> counter = loopCounter(*loop, dominators);
+            if (!counter.has_value() || counter->variable != read->getPointerOperand())
+                return std::nullopt;
+
+            // The thread reaches nothing but its element, and no pointer to an element goes
+            // where another thread could use it unnamed.
+            ParameterFootprints footprints(classifier, layout);
+            if (!placedInsideElement(footprints.of(entry, 0), handed->position,
+                                     handed->elementSize) ||
+                !addressStaysNamed(*handed->base, classifier, footprints))
+                return std::nullopt;
+
+            return ElementPerThread{
+                .spawn = &spawn,
+                .loop = loop,
+                .counter = counter->variable,
+                .increment = counter->increment,
+                .handed = *handed,
+            };
+        }
+
         std::optional<SpawnedObject> spawnedObjectAt(const llvm::CallBase& call, CallKind kind,
                                                      bool insideLoop,
                                                      const llvm::DataLayout& layout,
@@ -223,6 +461,8 @@ namespace ctrace::concurrency::internal::analysis
                 // of a pthread routine, and the `this` of a member function.
                 .argumentIndex = 0,
                 .insideLoop = insideLoop,
+                .handed = object,
+                .entry = entry,
             };
         }
     } // namespace
@@ -245,10 +485,72 @@ namespace ctrace::concurrency::internal::analysis
         return names;
     }
 
-    SharedObjectBindings
-    SharedObjectBindingCollector::collect(const llvm::Module& module,
-                                          const std::vector<DirectCallSite>& directCallSites,
-                                          const ProgramDefinedGlobals* programDefined) const
+    namespace
+    {
+        /// The load of `counter` indexing the element `pointer` points into, when that element is
+        /// one of those the spawn hands out and the `byteSize` bytes starting `offset` bytes past
+        /// `pointer` stay inside it.
+        const llvm::LoadInst* elementIndexRead(const ElementPerThread& elements,
+                                               const llvm::Value& pointer, std::int64_t offset,
+                                               std::uint64_t byteSize, const llvm::Value& counter,
+                                               const llvm::DataLayout& layout)
+        {
+            const std::optional<VariablyIndexedPointer> reached =
+                variablyIndexedPointer(pointer, layout);
+            if (!reached.has_value() || reached->elementSize != elements.handed.elementSize ||
+                reached->elementStart != elements.handed.elementStart ||
+                reached->base != elements.handed.base)
+                return nullptr;
+
+            const auto* read = llvm::dyn_cast<llvm::LoadInst>(reached->index);
+            const std::optional<std::int64_t> start = llvm::checkedAdd(reached->position, offset);
+            if (read == nullptr || read->getPointerOperand() != &counter || !start.has_value() ||
+                *start < 0 || byteSize == 0 || byteSize > elements.handed.elementSize ||
+                static_cast<std::uint64_t>(*start) > elements.handed.elementSize - byteSize)
+                return nullptr;
+            return read;
+        }
+    } // namespace
+
+    bool reachesElementBeforeHandOver(const ElementPerThread& elements,
+                                      const llvm::Instruction& access, const llvm::Value& pointer,
+                                      std::int64_t offset, std::uint64_t byteSize,
+                                      const llvm::DataLayout& layout)
+    {
+        if (!elements.loop->contains(&access) ||
+            followsInRound(*elements.spawn, access, *elements.loop))
+            return false;
+
+        // The spawn must read the counter before this round's increment, as the access does
+        // ahead of the spawn: the element is then the one this round hands over, and not the
+        // one an earlier round handed to a thread that may still run.
+        const auto* handedRead = llvm::cast<llvm::LoadInst>(elements.handed.index);
+        return elementIndexRead(elements, pointer, offset, byteSize, *elements.counter, layout) !=
+                   nullptr &&
+               !followsInRound(*elements.increment, *handedRead, *elements.loop);
+    }
+
+    bool reachesElementOfJoinedThread(const ElementPerThread& elements, const RoundJoin& joins,
+                                      const llvm::Instruction& access, const llvm::Value& pointer,
+                                      std::int64_t offset, std::uint64_t byteSize,
+                                      const llvm::DataLayout& layout,
+                                      const llvm::DominatorTree& dominators)
+    {
+        const std::optional<LoopCounter> counter = loopCounter(*joins.loop, dominators);
+        if (!counter.has_value() || !joins.loop->contains(&access) ||
+            !joins.success.covers(access, dominators))
+            return false;
+
+        // Read before the increment, the counter still names the round whose thread was joined.
+        const llvm::LoadInst* read =
+            elementIndexRead(elements, pointer, offset, byteSize, *counter->variable, layout);
+        return read != nullptr && !followsInRound(*counter->increment, *read, *joins.loop);
+    }
+
+    SharedObjectBindings SharedObjectBindingCollector::collect(
+        const llvm::Module& module, const std::vector<DirectCallSite>& directCallSites,
+        const ProgramDefinedGlobals* programDefined,
+        const std::unordered_map<std::string, EntryConcurrencyInfo>* spawnSites) const
     {
         const llvm::DataLayout& layout = module.getDataLayout();
         // Every identity seen, by key: the key is what spawns are compared on, the binding is
@@ -258,6 +560,19 @@ namespace ctrace::concurrency::internal::analysis
         // shared just as much as the same entry started twice on it.
         std::map<std::pair<std::string, std::string>, std::set<const llvm::Instruction*>> sites;
         std::map<std::pair<std::string, std::string>, bool> loopedSite;
+        // Keyed by spawn: whether it gives each of its threads an element of its own.
+        std::map<const llvm::Instruction*, ElementPerThread> elementsBySite;
+        // Every spawn handing out an object, whichever entry receives it.
+        std::map<std::string, std::set<const llvm::Instruction*>> sitesByObject;
+
+        bool entryCalledDirectly = false;
+        for (const DirectCallSite& site : directCallSites)
+        {
+            const auto* callee = site.call != nullptr ? site.call->getCalledFunction() : nullptr;
+            entryCalledDirectly =
+                entryCalledDirectly ||
+                (callee != nullptr && callee->getName() == llvm::StringRef(kProgramEntryFunction));
+        }
 
         for (const llvm::Function& function : module)
         {
@@ -288,7 +603,14 @@ namespace ctrace::concurrency::internal::analysis
                         bindingsByKey.emplace(spawned->object.key, *spawned->object.binding);
                     const auto key = std::pair{spawned->entryFunctionId, spawned->object.key};
                     sites[key].insert(&instruction);
+                    sitesByObject[spawned->object.key].insert(&instruction);
                     loopedSite[key] = loopedSite[key] || spawned->insideLoop;
+                    if (std::optional<ElementPerThread> elements = elementPerThreadAt(
+                            *call, *spawned->handed, *spawned->entry, loopInfo, dominatorTree,
+                            layout, classifier_, entryCalledDirectly))
+                    {
+                        elementsBySite.emplace(&instruction, *elements);
+                    }
                 }
             }
         }
@@ -345,6 +667,14 @@ namespace ctrace::concurrency::internal::analysis
         for (const auto& [key, instructions] : sites)
             objectsByEntry[key.first].insert(key.second);
 
+        const auto spawnedOnce = [&](const std::string& entryFunctionId)
+        {
+            if (spawnSites == nullptr)
+                return false;
+            const auto it = spawnSites->find(entryFunctionId);
+            return it != spawnSites->end() && it->second.staticSpawnCount == 1;
+        };
+
         SharedObjectBindings bindings;
         for (const auto& [entryFunctionId, objects] : objectsByEntry)
         {
@@ -385,6 +715,20 @@ namespace ctrace::concurrency::internal::analysis
 
             SharedObjectBinding binding = bindingIt->second;
             binding.argumentIndex = 0;
+
+            // Each thread has an element of its own only when this is the one spawn of the
+            // entry and the one spawn handing out the object's elements: two spawns may hand
+            // the same element to two threads.
+            const auto objectSitesIt = sitesByObject.find(*candidates.begin());
+            if (objectSitesIt != sitesByObject.end() && objectSitesIt->second.size() == 1 &&
+                spawnedOnce(entryFunctionId))
+            {
+                if (const auto elementsIt = elementsBySite.find(*objectSitesIt->second.begin());
+                    elementsIt != elementsBySite.end())
+                {
+                    binding.elementPerThread = elementsIt->second;
+                }
+            }
             bindings.emplace(entryFunctionId, std::move(binding));
         }
 

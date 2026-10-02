@@ -596,6 +596,11 @@ namespace ctrace::concurrency::internal::analysis
                 if (!isSelfConcurrent(entries, facts))
                     continue;
 
+                // A write to the element its own thread was handed never meets itself in another
+                // instance of that thread.
+                if (!access->region.mayOverlap(access->region))
+                    continue;
+
                 if (shareRecognizedLock(*access, *access))
                     continue;
 
