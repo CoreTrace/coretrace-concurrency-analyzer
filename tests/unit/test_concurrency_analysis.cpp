@@ -932,6 +932,9 @@ namespace
         /// pinning one of them would fail the other. What must not regress is that the race is
         /// still found at all.
         bool countsAreMinimums = false;
+        /// The open issue tracking a false missing join this fixture shows. Its missing-join count
+        /// is then left unchecked rather than pinned; every other rule still is.
+        std::string_view missingJoinTrackedBy;
     };
 
     // clang-format off
@@ -3090,10 +3093,20 @@ namespace
              .dataRace = 1,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_nested_rounds_joined_race.c",
+             .intent = "the nested rounds, joined; its join loop is missed",
+             .dataRace = 1,
+             .missingJoinTrackedBy = "#173"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_helper_called_twice_race.c",
              .intent = "a helper holding the spawn loop is called twice",
              .dataRace = 1,
              .missingJoin = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_helper_called_twice_joined_race.c",
+             .intent = "the helper called twice, joined; its join loop is missed",
+             .dataRace = 1,
+             .missingJoinTrackedBy = "#173"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_counter_rewound_race.c",
              .intent = "the counter is rewound in the loop",
@@ -3129,6 +3142,11 @@ namespace
              .intent = "a counter whose step is zero hands out one element twice",
              .dataRace = 1,
              .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_zero_step_joined_race.c",
+             .intent = "step zero, joined; its join loop is missed",
+             .dataRace = 1,
+             .missingJoinTrackedBy = "#173"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_two_entries_race.c",
              .intent = "two entries are handed the same element each round",
@@ -3192,10 +3210,20 @@ namespace
              .dataRace = 1,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_write_after_break_joined_race.c",
+             .intent = "the write after a break, joined; its join loop is missed",
+             .dataRace = 1,
+             .missingJoinTrackedBy = "#173"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_spawn_after_increment_race.c",
              .intent = "a spawn after the increment hands out the next element",
              .dataRace = 1,
              .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_spawn_after_increment_joined_race.c",
+             .intent = "a spawn after the increment, joined; its join loop is missed",
+             .dataRace = 1,
+             .missingJoinTrackedBy = "#173"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_shifted_base_race.c",
              .intent = "main writes through the same array shifted by one element",
@@ -3214,10 +3242,20 @@ namespace
              .dataRace = 1,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_decreasing_wide_write_joined_race.c",
+             .intent = "the decreasing wide write, joined; its join loop is missed",
+             .dataRace = 1,
+             .missingJoinTrackedBy = "#173"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_decreasing_shifted_pointer_race.c",
              .intent = "with a decreasing counter, main writes the next element",
              .dataRace = 1,
              .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_decreasing_shifted_pointer_joined_race.c",
+             .intent = "the decreasing shifted pointer, joined; its join loop is missed",
+             .dataRace = 1,
+             .missingJoinTrackedBy = "#173"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_reads_next_round_race.c",
              .intent = "a thread reads the element main writes in the next round",
@@ -3443,6 +3481,9 @@ namespace
         bool ok = true;
         for (const RuleColumn& column : columns)
         {
+            if (column.rule == RuleId::MissingJoin && !expectation.missingJoinTrackedBy.empty())
+                continue;
+
             const std::size_t actual = countDiagnosticsForRule(*report, column.rule);
             const bool satisfied = expectation.countsAreMinimums ? actual >= column.expected
                                                                  : actual == column.expected;
