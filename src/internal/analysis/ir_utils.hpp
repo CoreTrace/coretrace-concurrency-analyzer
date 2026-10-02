@@ -216,6 +216,8 @@ namespace ctrace::concurrency::internal::analysis
     {
         std::string context;
         std::string base;
+        /// The function constructs an object of its class, handed as its first parameter.
+        bool constructor = false;
     };
 
     /// Nothing when `mangled` names no function.

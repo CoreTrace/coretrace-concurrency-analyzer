@@ -564,6 +564,10 @@ namespace ctrace::concurrency::internal::analysis
         std::map<const llvm::Instruction*, ElementPerThread> elementsBySite;
         // Every spawn handing out an object, whichever entry receives it.
         std::map<std::string, std::set<const llvm::Instruction*>> sitesByObject;
+        // By entry: the classes whose constructors start it on the object they construct, and
+        // whether a spawn starts it otherwise.
+        std::map<std::string, std::set<std::string>> constructedClasses;
+        std::set<std::string> startedOtherwise;
 
         bool entryCalledDirectly = false;
         for (const DirectCallSite& site : directCallSites)
@@ -605,6 +609,19 @@ namespace ctrace::concurrency::internal::analysis
                     sites[key].insert(&instruction);
                     sitesByObject[spawned->object.key].insert(&instruction);
                     loopedSite[key] = loopedSite[key] || spawned->insideLoop;
+                    // A constructor handing its own object to the spawn starts the thread on an
+                    // object whose lifetime begins with that constructor call.
+                    if (const std::optional<DemangledName> name =
+                            demangleFunction(function.getName());
+                        name.has_value() && name->constructor &&
+                        spawned->object.key == "arg:" + functionId(function) + ":0")
+                    {
+                        constructedClasses[spawned->entryFunctionId].insert(name->context);
+                    }
+                    else
+                    {
+                        startedOtherwise.insert(spawned->entryFunctionId);
+                    }
                     if (std::optional<ElementPerThread> elements = elementPerThreadAt(
                             *call, *spawned->handed, *spawned->entry, loopInfo, dominatorTree,
                             layout, classifier_, entryCalledDirectly))
@@ -715,6 +732,10 @@ namespace ctrace::concurrency::internal::analysis
 
             SharedObjectBinding binding = bindingIt->second;
             binding.argumentIndex = 0;
+            if (const auto classes = constructedClasses.find(entryFunctionId);
+                classes != constructedClasses.end() && classes->second.size() == 1 &&
+                !startedOtherwise.contains(entryFunctionId))
+                binding.constructedClass = *classes->second.begin();
 
             // Each thread has an element of its own only when this is the one spawn of the
             // entry and the one spawn handing out the object's elements: two spawns may hand

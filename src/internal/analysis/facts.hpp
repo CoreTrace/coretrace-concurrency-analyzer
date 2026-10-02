@@ -64,6 +64,20 @@ namespace ctrace::concurrency::internal::analysis
         Argument,
     };
 
+    /// Where an access with an unknown offset lies among the elements a spawn loop hands its
+    /// threads, one element each (#108).
+    enum class ElementOwner
+    {
+        None,
+        /// In the element the accessing thread, an instance of the entry, was handed.
+        AccessingThread,
+        /// In the element the spawning thread's current round is about to hand over: the thread
+        /// that will own it is not started yet.
+        NotYetHandedOver,
+        /// In the element of the thread the current round of a join loop has joined with success.
+        JoinedThisRound,
+    };
+
     /// Byte range touched inside a root object. Field sensitivity is expressed as an offset and a
     /// size rather than a chain of indices, because the lowering elides the index of the first
     /// element: `g[0]` and `g.first` reach the IR as a plain pointer to `g`.
@@ -74,16 +88,20 @@ namespace ctrace::concurrency::internal::analysis
         std::int64_t byteOffset = 0;
         /// Extent in bytes; zero means unknown, and therefore covers the whole object.
         std::uint64_t byteSize = 0;
-        /// The offset is unknown but relative to the thread making the access: the bytes lie in
-        /// the element the only spawn handing out this object's elements gave that thread, or,
-        /// for the thread that spawns, in the element the spawn of the current round is about to
-        /// hand over. Two accesses that run at the same time are made by different threads, so
-        /// two such regions never overlap.
-        bool threadOwnedElement = false;
+        /// The offset is unknown, but the element is known relative to the threads of the one
+        /// spawn handing out this object's elements, whose entry is `elementEntry`. The region
+        /// still names the object's memory: the owner of an element and the thread that spawns
+        /// reach the same bytes.
+        ElementOwner elementOwner = ElementOwner::None;
+        std::string elementEntry;
 
         [[nodiscard]] bool mayOverlap(const MemoryRegion& other) const noexcept
         {
-            if (threadOwnedElement && other.threadOwnedElement)
+            // Two accesses running at once in threads of the entry are made by two instances,
+            // which hold two distinct elements.
+            if (elementOwner == ElementOwner::AccessingThread &&
+                other.elementOwner == ElementOwner::AccessingThread &&
+                elementEntry == other.elementEntry)
                 return false;
 
             if (!hasKnownOffset || !other.hasKnownOffset)
@@ -116,10 +134,41 @@ namespace ctrace::concurrency::internal::analysis
             return composed;
         }
 
+        /// Whether, of an access by a thread of the entry to its own element and one by the
+        /// spawning thread, neither can run while the other reaches the same element: the
+        /// spawning thread's element belongs to a thread not started yet, or joined with success,
+        /// and the threads still running hold other elements.
+        [[nodiscard]] bool orderedWithElementOwner(const MemoryRegion& other) const noexcept
+        {
+            auto spawning = [](ElementOwner owner)
+            {
+                return owner == ElementOwner::NotYetHandedOver ||
+                       owner == ElementOwner::JoinedThisRound;
+            };
+            return elementEntry == other.elementEntry &&
+                   ((elementOwner == ElementOwner::AccessingThread &&
+                     spawning(other.elementOwner)) ||
+                    (other.elementOwner == ElementOwner::AccessingThread &&
+                     spawning(elementOwner)));
+        }
+
         [[nodiscard]] std::string suffix() const
         {
             if (!hasKnownOffset)
-                return threadOwnedElement ? "[own]" : "[*]";
+            {
+                switch (elementOwner)
+                {
+                case ElementOwner::AccessingThread:
+                    return "[own]";
+                case ElementOwner::NotYetHandedOver:
+                    return "[next]";
+                case ElementOwner::JoinedThisRound:
+                    return "[joined]";
+                case ElementOwner::None:
+                    break;
+                }
+                return "[*]";
+            }
 
             return byteOffset == 0 ? std::string() : "+" + std::to_string(byteOffset);
         }
@@ -201,6 +250,10 @@ namespace ctrace::concurrency::internal::analysis
         bool inRootTask = false;
         /// Spawned entries already running when a root-task access executes.
         ThreadEntrySet liveEntries;
+        /// The part of `liveEntries` started in the frame of `functionId`, by the function or by
+        /// what it calls, rather than brought in by its callers: they run beside the access at
+        /// every call to the function.
+        ThreadEntrySet startedEntries;
         /// The symbol is the object a spawn hands its thread, which only that thread's run of the
         /// entry reaches: a direct call of the entry reaches what the call passes. A copy of this
         /// access at a call site keeps the flag, and the object it names.

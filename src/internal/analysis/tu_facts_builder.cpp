@@ -64,6 +64,12 @@ namespace ctrace::concurrency::internal::analysis
             SourceLocation callsiteLocation;
             std::set<std::string> callsiteHeldLocks;
             bool callerInRootTask = false;
+            /// The threads running at the call, and the part of them the caller started.
+            ThreadEntrySet liveAtCall;
+            ThreadEntrySet startedAtCall;
+            /// For a constructor call, the entries its class's constructors start on the object
+            /// they construct: those running at the call hold objects built earlier.
+            ThreadEntrySet entriesOnConstructedObject;
         };
 
         struct LifecycleArgumentBinding
@@ -72,16 +78,15 @@ namespace ctrace::concurrency::internal::analysis
             std::string suffix;
         };
 
-        /// Whether an access the spawning function makes to `symbol`, over `byteSize` bytes
-        /// starting `offset` bytes past `pointer`, stays in an element no running thread of a
-        /// spawn loop holds: the element the current round is about to hand over, or the one of
-        /// the thread the current round of its join loop has certainly joined.
-        bool reachesElementNoThreadHolds(const llvm::Instruction& access,
-                                         const llvm::Value& pointer, std::int64_t offset,
-                                         std::uint64_t byteSize, const std::string& symbol,
-                                         const SharedObjectBindings& bindings,
-                                         const ThreadCompletionMap& completions,
-                                         LlvmFunctionAnalysisProvider& analyses)
+        /// Where an access the spawning function makes to `symbol`, over `byteSize` bytes starting
+        /// `offset` bytes past `pointer`, lies among the elements of a spawn loop, with the entry
+        /// it hands them to: in the element the current round is about to hand over, or in the one
+        /// of the thread the current round of its join loop has certainly joined. Nothing when
+        /// neither is proven.
+        std::optional<std::pair<ElementOwner, std::string>> reachesElementNoThreadHolds(
+            const llvm::Instruction& access, const llvm::Value& pointer, std::int64_t offset,
+            std::uint64_t byteSize, const std::string& symbol, const SharedObjectBindings& bindings,
+            const ThreadCompletionMap& completions, LlvmFunctionAnalysisProvider& analyses)
         {
             const llvm::DataLayout& layout = access.getModule()->getDataLayout();
             for (const auto& [entryFunctionId, binding] : bindings)
@@ -91,25 +96,24 @@ namespace ctrace::concurrency::internal::analysis
                 const ElementPerThread& elements = *binding.elementPerThread;
                 if (reachesElementBeforeHandOver(elements, access, pointer, offset, byteSize,
                                                  layout))
-                    return true;
+                    return std::pair{ElementOwner::NotYetHandedOver, entryFunctionId};
                 const auto completion = completions.find(elements.spawn);
                 if (completion != completions.end() && completion->second.roundJoin.has_value() &&
                     reachesElementOfJoinedThread(elements, *completion->second.roundJoin, access,
                                                  pointer, offset, byteSize, layout,
                                                  analyses.getDominatorTree(*access.getFunction())))
-                    return true;
+                    return std::pair{ElementOwner::JoinedThisRound, entryFunctionId};
             }
-            return false;
+            return std::nullopt;
         }
 
-        bool loadOrStoreReachesElementNoThreadHolds(const PendingAccess& access,
-                                                    const SharedObjectBindings& bindings,
-                                                    const ThreadCompletionMap& completions,
-                                                    LlvmFunctionAnalysisProvider& analyses)
+        std::optional<std::pair<ElementOwner, std::string>> loadOrStoreReachesElementNoThreadHolds(
+            const PendingAccess& access, const SharedObjectBindings& bindings,
+            const ThreadCompletionMap& completions, LlvmFunctionAnalysisProvider& analyses)
         {
             const llvm::Value* pointer = llvm::getLoadStorePointerOperand(access.instruction);
             if (pointer == nullptr)
-                return false;
+                return std::nullopt;
             const llvm::DataLayout& layout = access.instruction->getModule()->getDataLayout();
             const std::uint64_t byteSize =
                 layout.getTypeStoreSize(llvm::getLoadStoreType(access.instruction)).getFixedValue();
@@ -177,12 +181,25 @@ namespace ctrace::concurrency::internal::analysis
             return !sameSourceLocation(access.userLocation, access.loweredLocation);
         }
 
-        bool addConcreteAccess(std::vector<AccessFact>& accesses,
-                               std::unordered_set<std::string>& accessKeys, AccessFact fact)
+        /// Merges the threads of `from` into `into`, the same access reached another way: it runs
+        /// beside the threads of either. Whether any was new.
+        bool mergeThreads(AccessFact& into, const AccessFact& from)
         {
-            const std::string key = accessFactKey(fact);
-            if (!accessKeys.insert(key).second)
-                return false;
+            const std::size_t known = into.liveEntries.size() + into.startedEntries.size();
+            into.liveEntries.insert(from.liveEntries.begin(), from.liveEntries.end());
+            into.startedEntries.insert(from.startedEntries.begin(), from.startedEntries.end());
+            return into.liveEntries.size() + into.startedEntries.size() != known;
+        }
+
+        /// Adds `fact`, or merges its threads into the same access already known. Whether
+        /// anything changed.
+        bool addConcreteAccess(std::vector<AccessFact>& accesses,
+                               std::unordered_map<std::string, std::size_t>& accessKeys,
+                               AccessFact fact)
+        {
+            const auto [known, inserted] = accessKeys.emplace(accessFactKey(fact), accesses.size());
+            if (!inserted)
+                return mergeThreads(accesses[known->second], fact);
 
             accesses.push_back(std::move(fact));
             return true;
@@ -258,14 +275,17 @@ namespace ctrace::concurrency::internal::analysis
 
         bool addParameterizedAccess(
             std::unordered_map<std::string, std::vector<ParameterizedAccess>>& summariesByFunction,
-            std::unordered_map<std::string, std::unordered_set<std::string>>& summaryKeysByFunction,
+            std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>>&
+                summaryKeysByFunction,
             const std::string& functionId, ParameterizedAccess access)
         {
-            const std::string key = parameterizedAccessKey(access);
-            if (!summaryKeysByFunction[functionId].insert(key).second)
-                return false;
+            std::vector<ParameterizedAccess>& summary = summariesByFunction[functionId];
+            const auto [known, inserted] = summaryKeysByFunction[functionId].emplace(
+                parameterizedAccessKey(access), summary.size());
+            if (!inserted)
+                return mergeThreads(summary[known->second].fact, access.fact);
 
-            summariesByFunction[functionId].push_back(std::move(access));
+            summary.push_back(std::move(access));
             return true;
         }
 
@@ -631,6 +651,29 @@ namespace ctrace::concurrency::internal::analysis
             bool callerInRootTask = false;
         };
 
+        /// The threads of a callee's fact as one call sees them. At a point of the callee run the
+        /// threads running at any call to it that it has not ended by then, and those it started
+        /// below: through this call, only the ones running at this call, and those started below.
+        /// Of those, the ones started in the caller's frame are this call's and its own starts.
+        std::pair<ThreadEntrySet, ThreadEntrySet>
+        threadsThroughCall(const ThreadEntrySet& liveEntries, const ThreadEntrySet& startedEntries,
+                           const ThreadEntrySet& liveAtCall, const ThreadEntrySet& startedAtCall)
+        {
+            ThreadEntrySet live;
+            ThreadEntrySet started;
+            for (const std::string& entry : liveEntries)
+            {
+                const bool startedBelow = startedEntries.contains(entry);
+                if (!startedBelow && !liveAtCall.contains(entry))
+                    continue;
+
+                live.insert(entry);
+                if (startedBelow || startedAtCall.contains(entry))
+                    started.insert(entry);
+            }
+            return {std::move(live), std::move(started)};
+        }
+
         /// The orders `order`, left open by the callee, stands for at `call`: orders of the
         /// caller, taken at the call, between the locks the call passes and holds.
         std::vector<LockOrderFact> instantiateAtCall(const LockOrderFact& order,
@@ -673,21 +716,8 @@ namespace ctrace::concurrency::internal::analysis
                 firsts.push_back(std::move(*first));
             }
 
-            // The callee's threads at the acquisition are those running at any call to it that it
-            // has not ended by then, and those it started below. Through this call, only the ones
-            // running at this call, and those started below it, run beside the acquisition.
-            ThreadEntrySet liveEntries;
-            ThreadEntrySet startedEntries;
-            for (const std::string& entry : order.liveEntries)
-            {
-                const bool startedBelow = order.startedEntries.contains(entry);
-                if (!startedBelow && !call.liveAtCall.contains(entry))
-                    continue;
-
-                liveEntries.insert(entry);
-                if (startedBelow || call.startedAtCall.contains(entry))
-                    startedEntries.insert(entry);
-            }
+            const auto [liveEntries, startedEntries] = threadsThroughCall(
+                order.liveEntries, order.startedEntries, call.liveAtCall, call.startedAtCall);
 
             std::vector<LockOrderFact> instances;
             for (std::string& first : firsts)
@@ -795,6 +825,25 @@ namespace ctrace::concurrency::internal::analysis
             return false;
         }
 
+        /// The threads running at `call` that may reach what `access` reaches through it: an
+        /// access to the object a constructor builds is out of reach of the threads its class
+        /// started on objects built before.
+        std::pair<ThreadEntrySet, ThreadEntrySet>
+        threadsAtCallFor(const ParameterizedAccess& access, const DirectCallBinding& call)
+        {
+            if (access.root.kind == RootBindingKind::Global || access.root.argumentIndex != 0 ||
+                call.entriesOnConstructedObject.empty())
+                return {call.liveAtCall, call.startedAtCall};
+            ThreadEntrySet live = call.liveAtCall;
+            ThreadEntrySet started = call.startedAtCall;
+            for (const std::string& entry : call.entriesOnConstructedObject)
+            {
+                live.erase(entry);
+                started.erase(entry);
+            }
+            return {std::move(live), std::move(started)};
+        }
+
         /// The object a callee's access reaches, and the place in it, as the caller of `call` sees
         /// them. A pointer parameter becomes the object the call hands over, and an index
         /// parameter what the call passes: a constant settles the place, the caller's own
@@ -883,7 +932,9 @@ namespace ctrace::concurrency::internal::analysis
             const TaskConcurrencyResult& taskConcurrency,
             const ProgramDefinedGlobals* programDefined,
             const std::unordered_set<std::string>& sharedObjectIds,
-            const std::unordered_set<std::string>& localObjectIds, const llvm::DataLayout& layout)
+            const std::unordered_set<std::string>& localObjectIds,
+            const std::unordered_map<std::string, ThreadEntrySet>& entriesByConstructedClass,
+            const llvm::DataLayout& layout)
         {
             std::vector<DirectCallBinding> bindings;
             const std::unordered_set<const llvm::CallBase*> cycleCalls = callsClosingCycles(sites);
@@ -900,6 +951,24 @@ namespace ctrace::concurrency::internal::analysis
                 binding.callsiteLocation = site.userLocation;
                 binding.callerInRootTask =
                     taskConcurrency.rootTaskFunctions.contains(site.callerFunctionId);
+                if (const auto live = taskConcurrency.liveEntriesAtInstruction.find(site.call);
+                    live != taskConcurrency.liveEntriesAtInstruction.end())
+                    binding.liveAtCall = live->second;
+                if (const auto started =
+                        taskConcurrency.startedEntriesAtInstruction.find(site.call);
+                    started != taskConcurrency.startedEntriesAtInstruction.end())
+                    binding.startedAtCall = started->second;
+                if (const llvm::Function* callee = site.call->getCalledFunction())
+                {
+                    if (const std::optional<DemangledName> name =
+                            demangleFunction(callee->getName());
+                        name.has_value() && name->constructor)
+                    {
+                        if (const auto entries = entriesByConstructedClass.find(name->context);
+                            entries != entriesByConstructedClass.end())
+                            binding.entriesOnConstructedObject = entries->second;
+                    }
+                }
                 if (const auto heldLocksIt = heldLocksByCall.find(site.call);
                     heldLocksIt != heldLocksByCall.end())
                 {
@@ -1462,9 +1531,10 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         std::vector<AccessFact> concreteAccesses;
-        std::unordered_set<std::string> concreteAccessKeys;
+        std::unordered_map<std::string, std::size_t> concreteAccessKeys;
         std::unordered_map<std::string, std::vector<ParameterizedAccess>> summariesByFunction;
-        std::unordered_map<std::string, std::unordered_set<std::string>> summaryKeysByFunction;
+        std::unordered_map<std::string, std::unordered_map<std::string, std::size_t>>
+            summaryKeysByFunction;
 
         LockPropagationResult lockPropagation;
         if (selection.lockState())
@@ -1693,16 +1763,23 @@ namespace ctrace::concurrency::internal::analysis
             {
                 pendingAccess.fact.liveEntries = liveIt->second;
             }
+            if (const auto startedIt =
+                    taskConcurrency.startedEntriesAtInstruction.find(pendingAccess.instruction);
+                startedIt != taskConcurrency.startedEntriesAtInstruction.end())
+            {
+                pendingAccess.fact.startedEntries = startedIt->second;
+            }
             pendingAccess.fact.inRootTask =
                 taskConcurrency.rootTaskFunctions.contains(pendingAccess.fact.functionId);
 
             if (pendingAccess.root.kind == RootBindingKind::Global &&
                 !pendingAccess.root.index.has_value())
             {
-                if (loadOrStoreReachesElementNoThreadHolds(pendingAccess, sharedObjectBindings,
-                                                           completions, analyses))
+                if (const auto element = loadOrStoreReachesElementNoThreadHolds(
+                        pendingAccess, sharedObjectBindings, completions, analyses))
                 {
-                    pendingAccess.root.region.threadOwnedElement = true;
+                    pendingAccess.root.region.elementOwner = element->first;
+                    pendingAccess.root.region.elementEntry = element->second;
                 }
                 pendingAccess.fact.symbol = pendingAccess.root.symbol;
                 pendingAccess.fact.region = pendingAccess.root.region;
@@ -1724,9 +1801,16 @@ namespace ctrace::concurrency::internal::analysis
                                     });
         }
 
+        std::unordered_map<std::string, ThreadEntrySet> entriesByConstructedClass;
+        for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
+        {
+            if (!binding.constructedClass.empty())
+                entriesByConstructedClass[binding.constructedClass].insert(entryFunctionId);
+        }
         const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
             directCallSites, lockPropagation.effectiveHeldLocksByCall, taskConcurrency,
-            programDefined, sharedObjectIds, localObjectIds, module.getDataLayout());
+            programDefined, sharedObjectIds, localObjectIds, entriesByConstructedClass,
+            module.getDataLayout());
 
         bool changed = true;
         while (changed)
@@ -1761,22 +1845,29 @@ namespace ctrace::concurrency::internal::analysis
                         const MemoryRegion& place = access.fact.region;
                         if (access.root.kind != RootBindingKind::Global &&
                             !access.root.index.has_value() && place.hasKnownOffset &&
-                            access.root.argumentIndex < callBinding.call->arg_size() &&
-                            reachesElementNoThreadHolds(
-                                *callBinding.call,
-                                *callBinding.call->getArgOperand(access.root.argumentIndex),
-                                place.byteOffset, place.byteSize, root->symbol,
-                                sharedObjectBindings, completions, analyses))
+                            access.root.argumentIndex < callBinding.call->arg_size())
                         {
-                            concrete.region.threadOwnedElement = true;
+                            if (const auto element = reachesElementNoThreadHolds(
+                                    *callBinding.call,
+                                    *callBinding.call->getArgOperand(access.root.argumentIndex),
+                                    place.byteOffset, place.byteSize, root->symbol,
+                                    sharedObjectBindings, completions, analyses))
+                            {
+                                concrete.region.elementOwner = element->first;
+                                concrete.region.elementEntry = element->second;
+                            }
                         }
                         concrete.heldLocks =
                             mergeHeldLocks(locksAtCallSite(concrete.heldLocks, callBinding),
                                            callBinding.callsiteHeldLocks);
                         concrete.inRootTask = callBinding.callerInRootTask;
-                        // The threads running where the callee's access executes already include
-                        // those running at every call to it, less the ones it joined before the
-                        // access: the call site's own set would bring those back.
+                        // The object is the one this call hands over: only the threads running
+                        // beside the access through this call can reach it.
+                        const auto [liveAtCall, startedAtCall] =
+                            threadsAtCallFor(access, callBinding);
+                        std::tie(concrete.liveEntries, concrete.startedEntries) =
+                            threadsThroughCall(concrete.liveEntries, concrete.startedEntries,
+                                               liveAtCall, startedAtCall);
                         concrete.allowCallsiteProjection = true;
                         if (shouldRemapAccessToCallsite(concrete, callBinding.callsiteLocation))
                         {
@@ -1798,6 +1889,12 @@ namespace ctrace::concurrency::internal::analysis
                         locksAtCallSite(propagatedAccess.fact.heldLocks, callBinding),
                         callBinding.callsiteHeldLocks);
                     propagatedAccess.fact.inRootTask = callBinding.callerInRootTask;
+                    const auto [liveAtCall, startedAtCall] = threadsAtCallFor(access, callBinding);
+                    std::tie(propagatedAccess.fact.liveEntries,
+                             propagatedAccess.fact.startedEntries) =
+                        threadsThroughCall(propagatedAccess.fact.liveEntries,
+                                           propagatedAccess.fact.startedEntries, liveAtCall,
+                                           startedAtCall);
                     if (shouldRemapAccessToCallsite(propagatedAccess.fact,
                                                     callBinding.callsiteLocation))
                     {
@@ -1841,7 +1938,11 @@ namespace ctrace::concurrency::internal::analysis
                     fact.region = access.root.region.rebasedOn(binding.object.region,
                                                                binding.object.designated);
                     // Every access through it stays in the element the thread was handed.
-                    fact.region.threadOwnedElement = binding.elementPerThread.has_value();
+                    if (binding.elementPerThread.has_value())
+                    {
+                        fact.region.elementOwner = ElementOwner::AccessingThread;
+                        fact.region.elementEntry = summaryFunctionId;
+                    }
                     fact.heldLocks = locksOnSharedObject(fact.heldLocks, binding);
                     // A global keeps its own name in the report; other objects have none to show.
                     fact.sharedObject = binding.kind != SharedObjectKind::Global;
@@ -1883,6 +1984,9 @@ namespace ctrace::concurrency::internal::analysis
                         mergeHeldLocks(locksAtCallSite(remapped.heldLocks, callBinding),
                                        callBinding.callsiteHeldLocks);
                     remapped.inRootTask = callBinding.callerInRootTask;
+                    std::tie(remapped.liveEntries, remapped.startedEntries) =
+                        threadsThroughCall(remapped.liveEntries, remapped.startedEntries,
+                                           callBinding.liveAtCall, callBinding.startedAtCall);
                     remapped.userLocation = callBinding.callsiteLocation;
                     if (remapped.userLocation.file != remapped.loweredLocation.file)
                         remapped.allowCallsiteProjection = false;

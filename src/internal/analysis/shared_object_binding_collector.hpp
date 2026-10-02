@@ -79,6 +79,9 @@ namespace ctrace::concurrency::internal::analysis
         unsigned argumentIndex = 0;
         /// Set when every thread of the entry receives an element of its own.
         std::optional<ElementPerThread> elementPerThread;
+        /// The class whose constructors start the entry on the object they construct: a thread
+        /// of the entry never holds an object a later constructor call builds. Empty otherwise.
+        std::string constructedClass;
     };
 
     /// Whether `access`, made by the spawning function over `byteSize` bytes starting `offset`

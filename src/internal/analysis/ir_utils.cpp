@@ -1559,7 +1559,9 @@ namespace ctrace::concurrency::internal::analysis
             // libc++ tags its members with the ABI version (`store[abi:ne200100]`).
             std::string baseName = base;
             baseName = baseName.substr(0, baseName.find("[abi:"));
-            name = DemangledName{.context = context, .base = std::move(baseName)};
+            const bool constructor = demangler.isCtorOrDtor() && !baseName.starts_with('~');
+            name = DemangledName{
+                .context = context, .base = std::move(baseName), .constructor = constructor};
         }
         std::free(context);
         std::free(base);

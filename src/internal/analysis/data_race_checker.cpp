@@ -464,6 +464,11 @@ namespace ctrace::concurrency::internal::analysis
                     if (!lhs.region.mayOverlap(rhs.region))
                         continue;
 
+                    // The same element, reached by its owner and by the thread that spawns it,
+                    // before the owner starts or after it was joined.
+                    if (lhs.region.orderedWithElementOwner(rhs.region))
+                        continue;
+
                     if (isRaceFreeAtomicPair(lhs, rhs))
                         continue;
 
