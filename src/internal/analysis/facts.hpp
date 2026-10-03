@@ -339,6 +339,8 @@ namespace ctrace::concurrency::internal::analysis
         /// it; the access facts do not, since the callee's accesses reach the call with the
         /// locks held around them.
         bool restatesCalleeAccesses = false;
+        /// For an effect inferred at a call, the operand of the call it is the effect on.
+        std::optional<unsigned> callOperand;
     };
 
     /// Unordered pair of thread entries proven to never overlap, because one is joined before the

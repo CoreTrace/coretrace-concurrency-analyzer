@@ -926,6 +926,22 @@ namespace ctrace::concurrency::internal::analysis
             return std::nullopt;
         }
 
+        /// The entries started on objects of the class `call` constructs, when it calls a
+        /// constructor: none of their threads started before the call holds the object it builds.
+        const ThreadEntrySet* entriesOnObjectConstructedBy(
+            const llvm::CallBase& call,
+            const std::unordered_map<std::string, ThreadEntrySet>& entriesByConstructedClass)
+        {
+            const llvm::Function* callee = call.getCalledFunction();
+            if (callee == nullptr)
+                return nullptr;
+            const std::optional<DemangledName> name = demangleFunction(callee->getName());
+            if (!name.has_value() || !name->constructor)
+                return nullptr;
+            const auto entries = entriesByConstructedClass.find(name->context);
+            return entries != entriesByConstructedClass.end() ? &entries->second : nullptr;
+        }
+
         std::vector<DirectCallBinding> buildDirectCallBindings(
             const std::vector<DirectCallSite>& sites,
             const std::unordered_map<const llvm::CallBase*, std::set<std::string>>& heldLocksByCall,
@@ -958,17 +974,9 @@ namespace ctrace::concurrency::internal::analysis
                         taskConcurrency.startedEntriesAtInstruction.find(site.call);
                     started != taskConcurrency.startedEntriesAtInstruction.end())
                     binding.startedAtCall = started->second;
-                if (const llvm::Function* callee = site.call->getCalledFunction())
-                {
-                    if (const std::optional<DemangledName> name =
-                            demangleFunction(callee->getName());
-                        name.has_value() && name->constructor)
-                    {
-                        if (const auto entries = entriesByConstructedClass.find(name->context);
-                            entries != entriesByConstructedClass.end())
-                            binding.entriesOnConstructedObject = entries->second;
-                    }
-                }
+                if (const ThreadEntrySet* entries =
+                        entriesOnObjectConstructedBy(*site.call, entriesByConstructedClass))
+                    binding.entriesOnConstructedObject = *entries;
                 if (const auto heldLocksIt = heldLocksByCall.find(site.call);
                     heldLocksIt != heldLocksByCall.end())
                 {
@@ -1733,6 +1741,12 @@ namespace ctrace::concurrency::internal::analysis
             return false;
         };
 
+        std::unordered_map<std::string, ThreadEntrySet> entriesByConstructedClass;
+        for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
+        {
+            if (!binding.constructedClass.empty())
+                entriesByConstructedClass[binding.constructedClass].insert(entryFunctionId);
+        }
         for (PendingAccess& pendingAccess : pendingAccesses)
         {
             if (pendingAccess.restatesCalleeAccesses)
@@ -1769,6 +1783,24 @@ namespace ctrace::concurrency::internal::analysis
             {
                 pendingAccess.fact.startedEntries = startedIt->second;
             }
+            // What a constructor call does to the object it builds is out of reach of the threads
+            // its class started on objects built before, as the constructor's own accesses are.
+            // This effect is the caller's own access at the call: where no other constructor
+            // stands between, as when an ELF target calls the base-object constructor directly,
+            // nothing projected through a constructor call carries it.
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(pendingAccess.instruction);
+                call != nullptr && pendingAccess.callOperand == 0)
+            {
+                if (const ThreadEntrySet* entries =
+                        entriesOnObjectConstructedBy(*call, entriesByConstructedClass))
+                {
+                    for (const std::string& entry : *entries)
+                    {
+                        pendingAccess.fact.liveEntries.erase(entry);
+                        pendingAccess.fact.startedEntries.erase(entry);
+                    }
+                }
+            }
             pendingAccess.fact.inRootTask =
                 taskConcurrency.rootTaskFunctions.contains(pendingAccess.fact.functionId);
 
@@ -1801,12 +1833,6 @@ namespace ctrace::concurrency::internal::analysis
                                     });
         }
 
-        std::unordered_map<std::string, ThreadEntrySet> entriesByConstructedClass;
-        for (const auto& [entryFunctionId, binding] : sharedObjectBindings)
-        {
-            if (!binding.constructedClass.empty())
-                entriesByConstructedClass[binding.constructedClass].insert(entryFunctionId);
-        }
         const std::vector<DirectCallBinding> directCallBindings = buildDirectCallBindings(
             directCallSites, lockPropagation.effectiveHeldLocksByCall, taskConcurrency,
             programDefined, sharedObjectIds, localObjectIds, entriesByConstructedClass,
