@@ -154,6 +154,31 @@ namespace ctrace::concurrency::internal::analysis
                      heldBySpawningThread(elementOwner)));
         }
 
+        /// Places the region in an element of a spawn loop, `owner` saying whose. Only a region
+        /// the loop's counter indexes is placed: its offset is then unknown. A known offset names
+        /// the same bytes in every round, which no round owns, so such a region stays unplaced and
+        /// keeps every pair.
+        void placeInElement(ElementOwner owner, std::string entry)
+        {
+            if (hasKnownOffset)
+                return;
+            elementOwner = owner;
+            elementEntry = std::move(entry);
+        }
+
+        /// Every field telling two regions apart, for the keys that merge accesses. `suffix()`
+        /// names the place only and leaves out the extent. An unknown offset is left out: it
+        /// overlaps every place anyway, and a recursion advancing a pointer would otherwise make
+        /// keys without end.
+        [[nodiscard]] std::string identity() const
+        {
+            std::string key = (hasKnownOffset ? "@" + std::to_string(byteOffset) : "@?") + "+" +
+                              std::to_string(byteSize);
+            if (elementOwner != ElementOwner::None)
+                key += "/" + std::to_string(static_cast<int>(elementOwner)) + ":" + elementEntry;
+            return key;
+        }
+
         [[nodiscard]] std::string suffix() const
         {
             if (!hasKnownOffset)

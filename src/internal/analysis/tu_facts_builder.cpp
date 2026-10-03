@@ -133,23 +133,34 @@ namespace ctrace::concurrency::internal::analysis
             }
 
             if (binding.kind == RootBindingKind::Global)
-                return "global:" + binding.symbol + binding.region.suffix() + index;
+                return "global:" + binding.symbol + binding.region.identity() + index;
 
-            return "argument:" + std::to_string(binding.argumentIndex) + binding.region.suffix() +
+            return "argument:" + std::to_string(binding.argumentIndex) + binding.region.identity() +
                    index;
         }
 
+        /// Accesses with one key are one access reached several ways, and merge: the threads of
+        /// each are kept, and the first one's place of report. Every other field the checkers read
+        /// is in the key, except `boundBySpawn`. A thread's access copied to a direct call of its
+        /// entry (#155) merges with the call's own access to the same object: the race between
+        /// the call and the thread is found on the merged access, and is lost if the two are kept
+        /// apart.
         std::string accessFactKey(const AccessFact& fact)
         {
             std::ostringstream stream;
-            stream << fact.symbol << fact.region.suffix() << "|" << fact.functionId << "|"
+            stream << fact.symbol << fact.region.identity() << "|" << fact.functionId << "|"
                    << toString(fact.kind) << "|" << (fact.isAtomic ? "atomic" : "plain") << "|"
                    << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.file << "|"
                    << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
-                   << fact.loweredLocation.function;
+                   << fact.loweredLocation.function << "|" << fact.coarseCallEffect
+                   << fact.guessedIdentity << fact.sharedObject << fact.inRootTask;
 
             for (const std::string& lock : fact.heldLocks)
                 stream << "|lock:" << lock;
+            for (const std::string& lock : fact.beforeRelease)
+                stream << "|release:" << lock;
+            for (const std::string& lock : fact.afterAcquire)
+                stream << "|acquire:" << lock;
 
             return stream.str();
         }
@@ -208,7 +219,7 @@ namespace ctrace::concurrency::internal::analysis
         std::string projectedAccessPreferenceKey(const AccessFact& fact)
         {
             std::ostringstream stream;
-            stream << fact.symbol << fact.region.suffix() << "|" << toString(fact.kind) << "|"
+            stream << fact.symbol << fact.region.identity() << "|" << toString(fact.kind) << "|"
                    << fact.loweredLocation.file << "|" << toString(fact.aliasProvenance) << "|"
                    << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
                    << fact.loweredLocation.function;
@@ -1810,8 +1821,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (const auto element = loadOrStoreReachesElementNoThreadHolds(
                         pendingAccess, sharedObjectBindings, completions, analyses))
                 {
-                    pendingAccess.root.region.elementOwner = element->first;
-                    pendingAccess.root.region.elementEntry = element->second;
+                    pendingAccess.root.region.placeInElement(element->first, element->second);
                 }
                 pendingAccess.fact.symbol = pendingAccess.root.symbol;
                 pendingAccess.fact.region = pendingAccess.root.region;
@@ -1879,8 +1889,7 @@ namespace ctrace::concurrency::internal::analysis
                                     place.byteOffset, place.byteSize, root->symbol,
                                     sharedObjectBindings, completions, analyses))
                             {
-                                concrete.region.elementOwner = element->first;
-                                concrete.region.elementEntry = element->second;
+                                concrete.region.placeInElement(element->first, element->second);
                             }
                         }
                         concrete.heldLocks =
@@ -1966,8 +1975,8 @@ namespace ctrace::concurrency::internal::analysis
                     // Every access through it stays in the element the thread was handed.
                     if (binding.elementPerThread.has_value())
                     {
-                        fact.region.elementOwner = ElementOwner::AccessingThread;
-                        fact.region.elementEntry = summaryFunctionId;
+                        fact.region.placeInElement(ElementOwner::AccessingThread,
+                                                   summaryFunctionId);
                     }
                     fact.heldLocks = locksOnSharedObject(fact.heldLocks, binding);
                     // A global keeps its own name in the report; other objects have none to show.
