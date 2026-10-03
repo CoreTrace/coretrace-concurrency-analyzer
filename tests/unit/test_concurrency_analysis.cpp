@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -904,6 +905,15 @@ namespace
 
     constexpr std::string_view kCxx20Standard = "-std=c++20";
 
+    /// A false missing join an open issue tracks, by where it is reported.
+    struct TrackedMissingJoin
+    {
+        std::string_view issue;
+        std::string_view function;
+        unsigned line = 0;
+        unsigned column = 0;
+    };
+
     struct FixtureExpectation
     {
         /// Path relative to the project source directory.
@@ -932,6 +942,10 @@ namespace
         /// pinning one of them would fail the other. What must not regress is that the race is
         /// still found at all.
         bool countsAreMinimums = false;
+        /// False missing joins open issues track, each excusing one diagnostic reported where it
+        /// says. The missing-join count still covers every other one, and an entry no longer
+        /// reported fails the row: the issue may be fixed, and the entry must go.
+        std::vector<TrackedMissingJoin> trackedMissingJoins;
     };
 
     // clang-format off
@@ -2341,8 +2355,9 @@ namespace
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_join_loop_by_pointer_two_slots_a_round_reports_missing_join.c",
-             .intent = "a pointer loop moving two slots a round skips half the threads (#161)",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "a pointer loop moving two slots a round skips half the threads; the "
+                       "thread left unjoined runs when main writes (#113)",
+             .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_handle_created_twice_into_one_slot_reports_missing_join.c",
              .intent = "a thread created over a slot already filled is lost to the join loop (#161)",
@@ -2365,16 +2380,19 @@ namespace
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_pointer_loop_joining_through_other_cursor_reports_missing_join.c",
-             .intent = "a join through another local than the cursor joins no slot of the walk (#161)",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "a join through another local than the cursor joins no slot of the walk; "
+                       "the thread left unjoined runs when main writes (#113)",
+             .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_handle_array_reached_through_escaping_local_reports_missing_join.c",
-             .intent = "the handle array kept in a local whose address escapes may be changed (#161)",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "the handle array kept in a local whose address escapes may be changed; "
+                       "the thread left unjoined runs when main writes (#113)",
+             .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_handle_array_handed_to_thread_through_local_reports_missing_join.c",
-             .intent = "the handle array read back from a local and handed to a thread may be changed (#161)",
-             .dataRace = 1, .missingJoin = 1},
+             .intent = "the handle array read back from a local and handed to a thread may be "
+                       "changed; the thread left unjoined runs when main writes (#113)",
+             .dataRace = 2, .missingJoin = 1},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_thread_array_joined_by_range_for_no_fp.cpp",
              .intent = "a range-for joining a std::thread array ends every thread (#161)",
@@ -2454,7 +2472,9 @@ namespace
              .intent = "strtok resumes from hidden state the interrupted scan is still using",
              .unsafeSignalHandler = 1},
             {.path = "tests/fixtures/concurrency/signal-handler/signal_thread_mask.c",
-             .intent = "known gap #54: signal delivery is not modeled; the full join loop completes the workers"},
+             .intent = "main writes admin_state while the workers read it (#113); signal "
+                       "delivery is not modeled (#54)",
+             .dataRace = 1},
 
             // --- thread arguments ----------------------------------------------------------
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_stack_escape.c",
@@ -2528,8 +2548,8 @@ namespace
             {.path = "tests/fixtures/concurrency/thread-escape/"
                      "thread_argument_joined_on_both_branches_no_fp.c",
              .intent = "joins on both branches keep the frame alive though neither dominates the "
-                       "return (#122); the missing join is #143, the race #113",
-             .dataRace = 1, .missingJoin = 1},
+                       "return (#122); the missing join is #143, the race is gone (#113)",
+             .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/thread-escape/thread_argument_joined_once_no_fp.c",
              .intent = "one join before the return keeps the frame alive (#122)"},
             {.path = "tests/fixtures/concurrency/thread-escape/"
@@ -2718,8 +2738,8 @@ namespace
             {.path = "tests/fixtures/concurrency/use-after-free/"
                      "heap_arg_joined_on_both_branches_then_freed_no_fp.c",
              .intent = "joins on both branches precede the free though neither dominates it "
-                       "(#122); the missing join is #143, the race #113",
-             .dataRace = 1, .missingJoin = 1},
+                       "(#122); the missing join is #143, the race is gone (#113)",
+             .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/use-after-free/"
                      "heap_arg_joined_once_then_freed_no_fp.c",
              .intent = "one join precedes the free (#122)"},
@@ -2755,8 +2775,8 @@ namespace
             {.path = "tests/fixtures/concurrency/thread-local/"
                      "tls_read_after_joins_on_both_branches.c",
              .intent = "joins on both branches end the thread and its thread-local (#122); the "
-                       "missing join is #143, the race #113",
-             .dataRace = 1, .missingJoin = 1, .threadLocalEscape = 1},
+                       "missing join is #143, the race is gone (#113)",
+             .missingJoin = 1, .threadLocalEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-local/tls_read_after_failed_join_race.c",
              .intent = "where the join failed the thread and its thread-local may still live "
                        "(#122)",
@@ -2819,12 +2839,14 @@ namespace
              .dataRace = 1,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_incomplete_join_loop.c",
-             .intent = "a shortened join range leaves a worker concurrent with the next phase",
-             .dataRace = 3,
+             .intent = "a shortened join range leaves a worker concurrent with the next phase; "
+                       "main's final read races with the workers left running (#113)",
+             .dataRace = 4,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_conditional_join_loop.c",
-             .intent = "a conditional join does not discharge every array element",
-             .dataRace = 3,
+             .intent = "a conditional join does not discharge every array element; main's final "
+                       "read races with the workers left running (#113)",
+             .dataRace = 4,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_overlapping_helper_context.c",
              .intent = "one sequential context cannot hide another live instance of the same entry",
@@ -2832,12 +2854,14 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/data_race_nested_joined_helpers.c",
              .intent = "entry bindings and completion propagate through nested helpers"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_early_break_join_loop.c",
-             .intent = "an early break prevents full join-range coverage",
-             .dataRace = 3,
+             .intent = "an early break prevents full join-range coverage; main's final read races "
+                       "with the workers left running (#113)",
+             .dataRace = 4,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_replaced_handle_loop.c",
-             .intent = "overwriting one handle invalidates an otherwise matching join range",
-             .dataRace = 3,
+             .intent = "overwriting one handle invalidates an otherwise matching join range; "
+                       "main's final read races with the workers left running (#113)",
+             .dataRace = 4,
              .missingJoin = 1},
 
             {.path = "tests/fixtures/concurrency/data-race/data_race_helper_handle_mutation.c",
@@ -3014,6 +3038,430 @@ namespace
              .intent = "an array whose address a helper keeps may lose its thread later",
              .dataRace = 1,
              .requiresCxx20 = true},
+            // --- each thread of a spawn loop gets an element of its own (#108) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_local_array_no_fp.c",
+             .intent = "each thread writes only the element of a local array it was handed"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_global_array_no_fp.c",
+             .intent = "each thread writes only the element of a global array it was handed"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_read_modify_write_no_fp.c",
+             .intent = "each thread reads and writes only its own element"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_struct_fields_no_fp.c",
+             .intent = "main fills a field of the element before the spawn; the thread uses "
+                       "its own"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_written_by_helper_no_fp.c",
+             .intent = "the thread's helper writes the element the thread was handed"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_while_loop_no_fp.c",
+             .intent = "a while loop raising its counter last hands each thread its own element"},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_per_thread_element_no_fp.cpp",
+             .intent = "each std::thread writes only the element it was handed",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_constant_index_race.c",
+             .intent = "every thread is handed the same element",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_half_index_race.c",
+             .intent = "threads 2k and 2k + 1 are handed the same element",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_main_writes_after_spawn_race.c",
+             .intent = "main writes the element of the thread it just started",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_previous_after_spawn_race.c",
+             .intent = "main writes the previous thread's element after a spawn",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_whole_array_to_other_thread_race.c",
+             .intent = "a thread handed the whole array writes every element",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_alias_pointer_in_main_race.c",
+             .intent = "main writes an element through a pointer it kept",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_union_neighbour_race.c",
+             .intent = "another thread writes a union member overlaying two elements",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_wider_write_race.c",
+             .intent = "a thread writes past its 4-byte element through an 8-byte type",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_two_spawn_loops_race.c",
+             .intent = "two spawn loops hand out the same elements",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_nested_rounds_race.c",
+             .intent = "the spawn loop runs twice, handing every element out twice",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_nested_rounds_joined_race.c",
+             .intent = "the nested rounds, joined; its join loop is missed",
+             .dataRace = 1,
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 19, .column = 13}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_helper_called_twice_race.c",
+             .intent = "a helper holding the spawn loop is called twice",
+             .dataRace = 1,
+             .missingJoin = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_helper_called_twice_joined_race.c",
+             .intent = "the helper called twice, joined; its join loop is missed",
+             .dataRace = 1,
+             .trackedMissingJoins = {{.issue = "#173", .function = "start", .line = 17, .column = 9},
+                                     {.issue = "#173", .function = "start", .line = 17, .column = 9}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_counter_rewound_race.c",
+             .intent = "the counter is rewound in the loop",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_counter_rewound_through_address_race.c",
+             .intent = "a callee rewinds the counter through its address",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_counter_rewound_through_pointer_race.c",
+             .intent = "a pointer to the counter rewinds it in the loop",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_counter_rewound_after_increment_race.c",
+             .intent = "the counter is rewound right after its increment",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_index_from_other_variable_race.c",
+             .intent = "the element is picked by a variable other than the loop's counter",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_counter_every_other_round_race.c",
+             .intent = "the counter advances every other round only",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_counter_recomputed_race.c",
+             .intent = "the counter is recomputed from another count",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_zero_step_race.c",
+             .intent = "a counter whose step is zero hands out one element twice",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_zero_step_joined_race.c",
+             .intent = "step zero, joined; its join loop is missed",
+             .dataRace = 1,
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 19, .column = 9}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_two_entries_race.c",
+             .intent = "two entries are handed the same element each round",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_same_entry_twice_race.c",
+             .intent = "one entry is started twice on the same element each round",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_main_called_again_race.c",
+             .intent = "main calls itself, so its spawn loop runs twice",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_extra_spawn_through_helper_race.c",
+             .intent = "a helper starts the entry on an element the loop hands out",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_base_moved_race.c",
+             .intent = "the base pointer moves inside the loop",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_worker_publishes_race.c",
+             .intent = "a thread publishes its element's address for an observer",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_worker_publishes_locked_race.c",
+             .intent = "a thread publishes its element's address under a lock",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_main_publishes_race.c",
+             .intent = "main publishes the element it hands over",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_indexes_past_element_race.c",
+             .intent = "a thread indexes past its element into the next one",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_helper_stashes_race.c",
+             .intent = "main hands the element to a helper that stashes it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_helper_stashes_before_loop_race.c",
+             .intent = "a helper stashes an element before the loop: no thread runs at the call",
+             .dataRace = 1},
+            // --- the spawning thread's accesses to elements, with liveness by reach (#108) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_main_writes_between_loops_race.c",
+             .intent = "main writes an element between the spawn loop and the join loop",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_previous_before_spawn_race.c",
+             .intent = "main writes the previous thread's element before a spawn",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_main_writes_through_other_index_race.c",
+             .intent = "main writes an element picked by another variable than the counter",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_write_after_break_race.c",
+             .intent = "main writes the element of the thread the loop broke after",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_write_after_break_joined_race.c",
+             .intent = "the write after a break, joined; its join loop is missed",
+             .dataRace = 1,
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 20, .column = 9}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_spawn_after_increment_race.c",
+             .intent = "a spawn after the increment hands out the next element",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_spawn_after_increment_joined_race.c",
+             .intent = "a spawn after the increment, joined; its join loop is missed",
+             .dataRace = 1,
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 22, .column = 9}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_shifted_base_race.c",
+             .intent = "main writes through the same array shifted by one element",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_union_shifted_view_race.c",
+             .intent = "main writes through a union view shifted by one element",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_union_narrower_view_race.c",
+             .intent = "main writes through a narrower union view of the elements",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_decreasing_wide_write_race.c",
+             .intent = "with a decreasing counter, main writes into the next element",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_decreasing_wide_write_joined_race.c",
+             .intent = "the decreasing wide write, joined; its join loop is missed",
+             .dataRace = 1,
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 20, .column = 9}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_decreasing_shifted_pointer_race.c",
+             .intent = "with a decreasing counter, main writes the next element",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_decreasing_shifted_pointer_joined_race.c",
+             .intent = "the decreasing shifted pointer, joined; its join loop is missed",
+             .dataRace = 1,
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 21, .column = 9}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_reads_next_round_race.c",
+             .intent = "a thread reads the element main writes in the next round",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_shared_round_race.c",
+             .intent = "main writes a shared round while the previous reader runs",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_per_thread_element_ids_with_total_race.c",
+             .intent = "the workers race on a total, not on their ids",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_reads_joined_thread_element_no_fp.c",
+             .intent = "the join loop reads the element of the thread it has just joined"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_reads_next_thread_element_race.c",
+             .intent = "the join loop reads the element of the next thread, still running",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_reads_element_of_conditionally_joined_thread_race.c",
+             .intent = "the join loop reads the element of a thread it skipped",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_reads_element_after_failed_join_race.c",
+             .intent = "the join loop reads an element whether or not its join succeeded",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_reads_element_before_join_race.c",
+             .intent = "the join loop reads an element before joining its thread",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_reads_element_after_increment_race.c",
+             .intent = "the join loop reads the next element after raising its counter",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_writes_past_joined_thread_element_race.c",
+             .intent = "the join loop writes past the joined element into a running thread's",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_writes_across_joined_thread_element_race.c",
+             .intent = "the join loop writes across the end of the joined element",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_loop_reads_element_of_handle_counted_apart_race.c",
+             .intent = "handles counted apart from the elements do not tie a slot to an element",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_sets_element_before_spawn_no_fp.c",
+             .intent = "a helper writes the element before the round's spawn hands it over"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_sets_element_after_spawn_race.c",
+             .intent = "a helper writes the element after its thread started",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_sets_previous_element_race.c",
+             .intent = "a helper writes the previous thread's element",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_writes_before_its_element_race.c",
+             .intent = "a helper handed an element also writes the one before it",
+             .dataRace = 1},
+            // --- a thread runs wherever its start reaches without a certain end (#113) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_on_one_branch_by_callee_race.c",
+             .intent = "a callee starting a thread on one branch leaves it running",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_call_on_one_branch_race.c",
+             .intent = "a call made on one branch leaves its thread running",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_early_return_after_spawn_race.c",
+             .intent = "a callee returning early after its spawn leaves the thread running",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_left_running_by_early_return_race.c",
+             .intent = "an early return leaves the thread running; both writes race",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joined_on_one_branch_race.c",
+             .intent = "a thread joined on one branch only still runs after the branches",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joined_on_both_branches_written_before_race.c",
+             .intent = "joined with success on both branches: the write before the if races, "
+                       "the one after does not (L3)",
+             .dataRace = 1,
+             .racingSymbol = "before_value",
+             .trackedMissingJoins = {{.issue = "#143", .function = "main", .line = 24, .column = 5}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_from_previous_round_race.c",
+             .intent = "the previous round's thread runs while main writes",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joined_in_its_own_round_no_fp.c",
+             .intent = "each round joins its thread before main writes again"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_threads_running_inside_join_loop_race.c",
+             .intent = "later threads run between and inside the join loop, not after it",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_into_joined_handle_race.c",
+             .intent = "a thread restarted into a joined handle runs beside main",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joined_by_callee_before_its_write_no_fp.c",
+             .intent = "a callee joins the thread its caller started before writing"},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_started_on_one_branch_race.cpp",
+             .intent = "a thread started on one branch runs until its guarded join",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_started_by_method_on_one_branch_race.cpp",
+             .intent = "a method starting a thread on one branch leaves it running",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_started_in_switch_case_race.cpp",
+             .intent = "a thread started in one case runs until the join of that case",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_started_on_one_branch_then_helper_race.cpp",
+             .intent = "a helper called while the thread may run races with it",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_started_flag_race.cpp",
+             .intent = "a flag set with the start guards the join",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_correlated_start_and_join_race.cpp",
+             .intent = "the same test of argc guards the start and the join",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_correlated_bool_local_race.cpp",
+             .intent = "a bool local stored once guards the start and the join",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_flag_changed_between_start_and_join_race.cpp",
+             .intent = "a flag changed between the two tests does not tie them",
+             .dataRace = 2,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_condition_varying_across_rounds_race.cpp",
+             .intent = "a test computed anew each round does not tie the rounds",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_called_before_and_beside_thread_no_fp.c",
+             .intent = "a helper's access is seen with the threads running at each of its calls"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_called_beside_thread_on_its_data_race.c",
+             .intent = "a helper called beside the thread on the thread's data races with it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_chain_called_before_and_beside_thread_race.c",
+             .intent = "through a chain of calls, only the call beside the thread races with it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_owning_objects_built_in_loop_no_fp.cpp",
+             .intent = "a constructor builds an object no earlier thread of its class holds",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_built_in_place_by_helper_no_fp.cpp",
+             .intent = "a constructor called from a helper builds an object no earlier thread holds",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_built_in_place_by_helper_written_after_start_race.cpp",
+             .intent = "a constructor called from a helper races with the thread it started",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_owning_objects_constructor_writes_global_race.cpp",
+             .intent = "a constructor's write to a global races with earlier rounds' threads",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_owning_object_written_after_start_race.cpp",
+             .intent = "a constructor races with the thread it started on its object",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_started_twice_on_object_by_method_race.cpp",
+             .intent = "a method started twice on one object races with its first thread",
+             .dataRace = 1,
+             .requiresCxx20 = true},
 
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
@@ -3024,6 +3472,41 @@ namespace
         return expectations;
     }
     // clang-format on
+
+    /// How many of the report's missing joins the expectation's tracked entries name, each entry
+    /// taking one diagnostic reported where it says. An entry left without one fails the row.
+    std::size_t matchTrackedMissingJoins(const DiagnosticReport& report,
+                                         const FixtureExpectation& expectation, bool& ok)
+    {
+        std::vector<bool> taken(report.diagnostics.size(), false);
+        std::size_t matched = 0;
+        for (const TrackedMissingJoin& tracked : expectation.trackedMissingJoins)
+        {
+            bool found = false;
+            for (std::size_t index = 0; index < report.diagnostics.size() && !found; ++index)
+            {
+                const Diagnostic& diagnostic = report.diagnostics[index];
+                found = !taken[index] && diagnostic.ruleId == RuleId::MissingJoin &&
+                        diagnostic.location.function == tracked.function &&
+                        diagnostic.location.line == tracked.line &&
+                        diagnostic.location.column == tracked.column;
+                taken[index] = taken[index] || found;
+            }
+            if (found)
+            {
+                ++matched;
+                continue;
+            }
+
+            std::cerr << "[FAIL] " << expectation.path << " (" << expectation.intent
+                      << "): the false missing join " << tracked.issue << " tracks in "
+                      << tracked.function << " at " << tracked.line << ":" << tracked.column
+                      << " is no longer reported; remove its entry if " << tracked.issue
+                      << " fixed it\n";
+            ok = false;
+        }
+        return matched;
+    }
 
     /// Analyzes a fixture once with every rule enabled, then compares each rule's diagnostic
     /// count. Running the rules separately would recompile the fixture three times, and the
@@ -3064,9 +3547,12 @@ namespace
         };
 
         bool ok = true;
+        const std::size_t trackedMissingJoins = matchTrackedMissingJoins(*report, expectation, ok);
         for (const RuleColumn& column : columns)
         {
-            const std::size_t actual = countDiagnosticsForRule(*report, column.rule);
+            const std::size_t actual =
+                countDiagnosticsForRule(*report, column.rule) -
+                (column.rule == RuleId::MissingJoin ? trackedMissingJoins : 0);
             const bool satisfied = expectation.countsAreMinimums ? actual >= column.expected
                                                                  : actual == column.expected;
             if (satisfied)
@@ -3362,6 +3848,61 @@ namespace
         return ok;
     }
 
+    /// A tracked false missing join excuses one diagnostic, reported where the entry says, and
+    /// nothing else: the row still checks every other diagnostic, and fails, asking for the entry
+    /// to go, once the tracked one is no longer reported.
+    bool testTrackedMissingJoinsExcuseOnlyWhatTheyName()
+    {
+        const auto& expectations = fixtureExpectations();
+        const auto row = std::find_if(
+            expectations.begin(), expectations.end(), [](const FixtureExpectation& expectation)
+            { return expectation.path.ends_with("helper_called_twice_joined_race.c"); });
+        if (!assertTrue(row != expectations.end() && row->trackedMissingJoins.size() == 2,
+                        "the helper row should track its two false missing joins"))
+            return false;
+
+        // The failures below are expected: keep their messages out of the test's output, and
+        // read them.
+        auto check = [](const FixtureExpectation& expectation, std::string& messages)
+        {
+            std::ostringstream captured;
+            std::streambuf* const previous = std::cerr.rdbuf(captured.rdbuf());
+            const bool passed = checkFixtureExpectation(expectation);
+            std::cerr.rdbuf(previous);
+            messages = captured.str();
+            return passed;
+        };
+
+        bool ok = true;
+        std::string messages;
+
+        FixtureExpectation oneUntracked = *row;
+        oneUntracked.trackedMissingJoins.pop_back();
+        ok = assertTrue(!check(oneUntracked, messages) &&
+                            messages.find("missing-join expected 0 diagnostic(s), got 1") !=
+                                std::string::npos,
+                        "a missing join no entry names should still be counted: " + messages) &&
+             ok;
+
+        FixtureExpectation stale = *row;
+        stale.trackedMissingJoins.push_back(
+            {.issue = "#173", .function = "start", .line = 17, .column = 9});
+        ok =
+            assertTrue(
+                !check(stale, messages) && messages.find("no longer reported") != std::string::npos,
+                "an entry naming no reported missing join should fail the row: " + messages) &&
+            ok;
+
+        FixtureExpectation otherRule = *row;
+        ++otherRule.dataRace;
+        ok = assertTrue(!check(otherRule, messages) &&
+                            messages.find("data-race expected 2") != std::string::npos,
+                        "the other rules should still be checked: " + messages) &&
+             ok;
+
+        return ok;
+    }
+
     /// Guards against fixtures that exist but are asserted nowhere. Two real defects — the
     /// three-lock cycle and the helper shared between main and a worker — sat in the tree
     /// undetected precisely because their fixtures were never referenced.
@@ -3460,6 +4001,7 @@ int main()
     ok = testAccessCountsDistinguishNotComputedFromZero() && ok;
     ok = testOptimizationRequestDoesNotChangeFindings() && ok;
     ok = testFixtureExpectationTable() && ok;
+    ok = testTrackedMissingJoinsExcuseOnlyWhatTheyName() && ok;
     ok = testEveryConcurrencyFixtureIsCovered() && ok;
 
     if (!ok)

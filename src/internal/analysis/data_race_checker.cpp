@@ -464,6 +464,11 @@ namespace ctrace::concurrency::internal::analysis
                     if (!lhs.region.mayOverlap(rhs.region))
                         continue;
 
+                    // The same element, reached by its owner and by the thread that spawns it,
+                    // before the owner starts or after it was joined.
+                    if (lhs.region.orderedWithElementOwner(rhs.region))
+                        continue;
+
                     if (isRaceFreeAtomicPair(lhs, rhs))
                         continue;
 
@@ -594,6 +599,11 @@ namespace ctrace::concurrency::internal::analysis
 
                 const EntrySet& entries = entriesOf(*access);
                 if (!isSelfConcurrent(entries, facts))
+                    continue;
+
+                // A write to the element its own thread was handed never meets itself in another
+                // instance of that thread.
+                if (!access->region.mayOverlap(access->region))
                     continue;
 
                 if (shareRecognizedLock(*access, *access))

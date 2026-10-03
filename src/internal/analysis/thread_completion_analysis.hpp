@@ -14,7 +14,10 @@ namespace llvm
     class DominatorTree;
     class Function;
     class Instruction;
+    class Loop;
     class Module;
+    class StoreInst;
+    class Value;
 } // namespace llvm
 
 namespace ctrace::concurrency::internal::analysis
@@ -52,11 +55,23 @@ namespace ctrace::concurrency::internal::analysis
     /// questions read it. Whether the program joined each thread: the entry says so, even for a
     /// join that fails, since the join was made. Whether each thread has certainly ended: only
     /// `ended` says so. Absence means unknown, never completion. IR remains immutable.
+    /// A join loop that, in every round, waits for the thread its spawn loop started in the
+    /// round where the spawn loop's counter had the value the join loop's counter has: each loop
+    /// reads its slot at its own counter, in the same array, at the same place and spacing.
+    struct RoundJoin
+    {
+        const llvm::Loop* loop = nullptr;
+        /// Where a round's join has certainly waited: past it, that round's thread has ended.
+        JoinSuccess success;
+    };
+
     struct ThreadCompletion
     {
         /// Where every thread the spawn starts has certainly ended, on every path to a normal
         /// return. Absent when the result of a join leaves its success unproven there.
         std::optional<JoinSuccess> ended;
+        /// Set along with `ended` when the join loop proving it joins each round's thread.
+        std::optional<RoundJoin> roundJoin;
     };
 
     using ThreadCompletionMap = std::unordered_map<const llvm::CallBase*, ThreadCompletion>;
@@ -89,6 +104,18 @@ namespace ctrace::concurrency::internal::analysis
     collectThreadCompletions(const llvm::Module& module,
                              const ConcurrencySymbolClassifier& classifier,
                              LlvmFunctionAnalysisProvider& analyses, const JoiningHelpers& helpers);
+
+    /// The variable counting the rounds of a counted loop (`i` from an invariant start,
+    /// `i < end`, `++i` once per round, address never taken), and the store raising it.
+    struct LoopCounter
+    {
+        const llvm::Value* variable = nullptr;
+        const llvm::StoreInst* increment = nullptr;
+    };
+
+    /// Nothing when `loop` is not a counted loop.
+    [[nodiscard]] std::optional<LoopCounter> loopCounter(const llvm::Loop& loop,
+                                                         const llvm::DominatorTree& dominators);
 
     /// Normal-return contract shared by lifecycle and contained-entry summaries. Exceptional
     /// exits are deliberately not normal returns (the existing lifecycle contract).
