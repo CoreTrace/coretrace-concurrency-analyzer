@@ -11,6 +11,7 @@
 #include <iostream>
 #include <memory>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -904,6 +905,15 @@ namespace
 
     constexpr std::string_view kCxx20Standard = "-std=c++20";
 
+    /// A false missing join an open issue tracks, by where it is reported.
+    struct TrackedMissingJoin
+    {
+        std::string_view issue;
+        std::string_view function;
+        unsigned line = 0;
+        unsigned column = 0;
+    };
+
     struct FixtureExpectation
     {
         /// Path relative to the project source directory.
@@ -932,9 +942,10 @@ namespace
         /// pinning one of them would fail the other. What must not regress is that the race is
         /// still found at all.
         bool countsAreMinimums = false;
-        /// The open issue tracking a false missing join this fixture shows. Its missing-join count
-        /// is then left unchecked rather than pinned; every other rule still is.
-        std::string_view missingJoinTrackedBy;
+        /// False missing joins open issues track, each excusing one diagnostic reported where it
+        /// says. The missing-join count still covers every other one, and an entry no longer
+        /// reported fails the row: the issue may be fixed, and the entry must go.
+        std::vector<TrackedMissingJoin> trackedMissingJoins;
     };
 
     // clang-format off
@@ -3096,7 +3107,7 @@ namespace
                      "data_race_per_thread_element_nested_rounds_joined_race.c",
              .intent = "the nested rounds, joined; its join loop is missed",
              .dataRace = 1,
-             .missingJoinTrackedBy = "#173"},
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 19, .column = 13}}},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_helper_called_twice_race.c",
              .intent = "a helper holding the spawn loop is called twice",
@@ -3106,7 +3117,8 @@ namespace
                      "data_race_per_thread_element_helper_called_twice_joined_race.c",
              .intent = "the helper called twice, joined; its join loop is missed",
              .dataRace = 1,
-             .missingJoinTrackedBy = "#173"},
+             .trackedMissingJoins = {{.issue = "#173", .function = "start", .line = 17, .column = 9},
+                                     {.issue = "#173", .function = "start", .line = 17, .column = 9}}},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_counter_rewound_race.c",
              .intent = "the counter is rewound in the loop",
@@ -3146,7 +3158,7 @@ namespace
                      "data_race_per_thread_element_zero_step_joined_race.c",
              .intent = "step zero, joined; its join loop is missed",
              .dataRace = 1,
-             .missingJoinTrackedBy = "#173"},
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 19, .column = 9}}},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_two_entries_race.c",
              .intent = "two entries are handed the same element each round",
@@ -3213,7 +3225,7 @@ namespace
                      "data_race_per_thread_element_write_after_break_joined_race.c",
              .intent = "the write after a break, joined; its join loop is missed",
              .dataRace = 1,
-             .missingJoinTrackedBy = "#173"},
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 20, .column = 9}}},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_spawn_after_increment_race.c",
              .intent = "a spawn after the increment hands out the next element",
@@ -3223,7 +3235,7 @@ namespace
                      "data_race_per_thread_element_spawn_after_increment_joined_race.c",
              .intent = "a spawn after the increment, joined; its join loop is missed",
              .dataRace = 1,
-             .missingJoinTrackedBy = "#173"},
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 22, .column = 9}}},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_shifted_base_race.c",
              .intent = "main writes through the same array shifted by one element",
@@ -3245,7 +3257,7 @@ namespace
                      "data_race_per_thread_element_decreasing_wide_write_joined_race.c",
              .intent = "the decreasing wide write, joined; its join loop is missed",
              .dataRace = 1,
-             .missingJoinTrackedBy = "#173"},
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 20, .column = 9}}},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_decreasing_shifted_pointer_race.c",
              .intent = "with a decreasing counter, main writes the next element",
@@ -3255,7 +3267,7 @@ namespace
                      "data_race_per_thread_element_decreasing_shifted_pointer_joined_race.c",
              .intent = "the decreasing shifted pointer, joined; its join loop is missed",
              .dataRace = 1,
-             .missingJoinTrackedBy = "#173"},
+             .trackedMissingJoins = {{.issue = "#173", .function = "main", .line = 21, .column = 9}}},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_per_thread_element_reads_next_round_race.c",
              .intent = "a thread reads the element main writes in the next round",
@@ -3440,6 +3452,41 @@ namespace
     }
     // clang-format on
 
+    /// How many of the report's missing joins the expectation's tracked entries name, each entry
+    /// taking one diagnostic reported where it says. An entry left without one fails the row.
+    std::size_t matchTrackedMissingJoins(const DiagnosticReport& report,
+                                         const FixtureExpectation& expectation, bool& ok)
+    {
+        std::vector<bool> taken(report.diagnostics.size(), false);
+        std::size_t matched = 0;
+        for (const TrackedMissingJoin& tracked : expectation.trackedMissingJoins)
+        {
+            bool found = false;
+            for (std::size_t index = 0; index < report.diagnostics.size() && !found; ++index)
+            {
+                const Diagnostic& diagnostic = report.diagnostics[index];
+                found = !taken[index] && diagnostic.ruleId == RuleId::MissingJoin &&
+                        diagnostic.location.function == tracked.function &&
+                        diagnostic.location.line == tracked.line &&
+                        diagnostic.location.column == tracked.column;
+                taken[index] = taken[index] || found;
+            }
+            if (found)
+            {
+                ++matched;
+                continue;
+            }
+
+            std::cerr << "[FAIL] " << expectation.path << " (" << expectation.intent
+                      << "): the false missing join " << tracked.issue << " tracks in "
+                      << tracked.function << " at " << tracked.line << ":" << tracked.column
+                      << " is no longer reported; remove its entry if " << tracked.issue
+                      << " fixed it\n";
+            ok = false;
+        }
+        return matched;
+    }
+
     /// Analyzes a fixture once with every rule enabled, then compares each rule's diagnostic
     /// count. Running the rules separately would recompile the fixture three times, and the
     /// checkers are independent, so one pass gives the same counts.
@@ -3479,12 +3526,12 @@ namespace
         };
 
         bool ok = true;
+        const std::size_t trackedMissingJoins = matchTrackedMissingJoins(*report, expectation, ok);
         for (const RuleColumn& column : columns)
         {
-            if (column.rule == RuleId::MissingJoin && !expectation.missingJoinTrackedBy.empty())
-                continue;
-
-            const std::size_t actual = countDiagnosticsForRule(*report, column.rule);
+            const std::size_t actual =
+                countDiagnosticsForRule(*report, column.rule) -
+                (column.rule == RuleId::MissingJoin ? trackedMissingJoins : 0);
             const bool satisfied = expectation.countsAreMinimums ? actual >= column.expected
                                                                  : actual == column.expected;
             if (satisfied)
@@ -3780,6 +3827,61 @@ namespace
         return ok;
     }
 
+    /// A tracked false missing join excuses one diagnostic, reported where the entry says, and
+    /// nothing else: the row still checks every other diagnostic, and fails, asking for the entry
+    /// to go, once the tracked one is no longer reported.
+    bool testTrackedMissingJoinsExcuseOnlyWhatTheyName()
+    {
+        const auto& expectations = fixtureExpectations();
+        const auto row = std::find_if(
+            expectations.begin(), expectations.end(), [](const FixtureExpectation& expectation)
+            { return expectation.path.ends_with("helper_called_twice_joined_race.c"); });
+        if (!assertTrue(row != expectations.end() && row->trackedMissingJoins.size() == 2,
+                        "the helper row should track its two false missing joins"))
+            return false;
+
+        // The failures below are expected: keep their messages out of the test's output, and
+        // read them.
+        auto check = [](const FixtureExpectation& expectation, std::string& messages)
+        {
+            std::ostringstream captured;
+            std::streambuf* const previous = std::cerr.rdbuf(captured.rdbuf());
+            const bool passed = checkFixtureExpectation(expectation);
+            std::cerr.rdbuf(previous);
+            messages = captured.str();
+            return passed;
+        };
+
+        bool ok = true;
+        std::string messages;
+
+        FixtureExpectation oneUntracked = *row;
+        oneUntracked.trackedMissingJoins.pop_back();
+        ok = assertTrue(!check(oneUntracked, messages) &&
+                            messages.find("missing-join expected 0 diagnostic(s), got 1") !=
+                                std::string::npos,
+                        "a missing join no entry names should still be counted: " + messages) &&
+             ok;
+
+        FixtureExpectation stale = *row;
+        stale.trackedMissingJoins.push_back(
+            {.issue = "#173", .function = "start", .line = 17, .column = 9});
+        ok =
+            assertTrue(
+                !check(stale, messages) && messages.find("no longer reported") != std::string::npos,
+                "an entry naming no reported missing join should fail the row: " + messages) &&
+            ok;
+
+        FixtureExpectation otherRule = *row;
+        ++otherRule.dataRace;
+        ok = assertTrue(!check(otherRule, messages) &&
+                            messages.find("data-race expected 2") != std::string::npos,
+                        "the other rules should still be checked: " + messages) &&
+             ok;
+
+        return ok;
+    }
+
     /// Guards against fixtures that exist but are asserted nowhere. Two real defects — the
     /// three-lock cycle and the helper shared between main and a worker — sat in the tree
     /// undetected precisely because their fixtures were never referenced.
@@ -3878,6 +3980,7 @@ int main()
     ok = testAccessCountsDistinguishNotComputedFromZero() && ok;
     ok = testOptimizationRequestDoesNotChangeFindings() && ok;
     ok = testFixtureExpectationTable() && ok;
+    ok = testTrackedMissingJoinsExcuseOnlyWhatTheyName() && ok;
     ok = testEveryConcurrencyFixtureIsCovered() && ok;
 
     if (!ok)
