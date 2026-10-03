@@ -3432,6 +3432,20 @@ namespace
              .intent = "a constructor builds an object no earlier thread of its class holds",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_built_in_place_by_helper_no_fp.cpp",
+             .intent = "a constructor called from a helper builds an object no earlier thread holds",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_built_in_place_by_helper_written_after_start_race.cpp",
+             .intent = "a constructor called from a helper races with the thread it started",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_owning_objects_constructor_writes_global_race.cpp",
+             .intent = "a constructor's write to a global races with earlier rounds' threads",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_thread_owning_object_written_after_start_race.cpp",
              .intent = "a constructor races with the thread it started on its object",
              .dataRace = 1,
