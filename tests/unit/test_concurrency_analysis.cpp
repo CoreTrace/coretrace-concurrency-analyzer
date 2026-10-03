@@ -3354,6 +3354,13 @@ namespace
              .intent = "a thread joined on one branch only still runs after the branches",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joined_on_both_branches_written_before_race.c",
+             .intent = "joined with success on both branches: the write before the if races, "
+                       "the one after does not (L3)",
+             .dataRace = 1,
+             .racingSymbol = "before_value",
+             .trackedMissingJoins = {{.issue = "#143", .function = "main", .line = 24, .column = 5}}},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_from_previous_round_race.c",
              .intent = "the previous round's thread runs while main writes",
              .dataRace = 1},
