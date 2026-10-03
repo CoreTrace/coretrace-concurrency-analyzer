@@ -78,6 +78,13 @@ namespace ctrace::concurrency::internal::analysis
         JoinedThisRound,
     };
 
+    /// Whether the element belongs to the spawning thread's side of the hand-over: its thread is
+    /// not started yet, or was joined with success.
+    [[nodiscard]] constexpr bool heldBySpawningThread(ElementOwner owner) noexcept
+    {
+        return owner == ElementOwner::NotYetHandedOver || owner == ElementOwner::JoinedThisRound;
+    }
+
     /// Byte range touched inside a root object. Field sensitivity is expressed as an offset and a
     /// size rather than a chain of indices, because the lowering elides the index of the first
     /// element: `g[0]` and `g.first` reach the IR as a plain pointer to `g`.
@@ -140,16 +147,11 @@ namespace ctrace::concurrency::internal::analysis
         /// and the threads still running hold other elements.
         [[nodiscard]] bool orderedWithElementOwner(const MemoryRegion& other) const noexcept
         {
-            auto spawning = [](ElementOwner owner)
-            {
-                return owner == ElementOwner::NotYetHandedOver ||
-                       owner == ElementOwner::JoinedThisRound;
-            };
             return elementEntry == other.elementEntry &&
                    ((elementOwner == ElementOwner::AccessingThread &&
-                     spawning(other.elementOwner)) ||
+                     heldBySpawningThread(other.elementOwner)) ||
                     (other.elementOwner == ElementOwner::AccessingThread &&
-                     spawning(elementOwner)));
+                     heldBySpawningThread(elementOwner)));
         }
 
         [[nodiscard]] std::string suffix() const
