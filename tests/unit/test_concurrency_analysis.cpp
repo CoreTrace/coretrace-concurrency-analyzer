@@ -3516,8 +3516,9 @@ namespace
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_thread_started_twice_on_object_by_method_race.cpp",
-             .intent = "a method started twice on one object races with its first thread",
-             .dataRace = 1,
+             .intent = "a method started twice on one object races with its first thread, and "
+                       "the two threads race with each other (#126)",
+             .dataRace = 2,
              .requiresCxx20 = true},
 
             // --- compiler error path -------------------------------------------------------
