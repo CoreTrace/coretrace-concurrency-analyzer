@@ -7,8 +7,8 @@ When a new minor is released, the previous one stops being supported.
 
 | Version | Supported |
 | ------- | --------- |
-| 0.2.x   | yes       |
-| < 0.2   | no        |
+| Latest `0.x` minor | yes |
+| Older `0.x` minors | no |
 
 ## Reporting a vulnerability
 

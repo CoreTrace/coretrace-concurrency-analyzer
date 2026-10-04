@@ -9,6 +9,15 @@ The project follows the `coretrace-stack-analyzer` conventions:
 - CLI wrapper for local analysis runs.
 - Consumer example in `extern-project/`.
 
+## Repository documents
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
+- [AUTHORS.md](AUTHORS.md)
+- [CHANGELOG.md](CHANGELOG.md)
+- [LICENSE](LICENSE)
+- [SECURITY.md](SECURITY.md)
+
 ## Current Scope
 
 The repository no longer stops at IR compilation. It currently provides a single-translation-unit
