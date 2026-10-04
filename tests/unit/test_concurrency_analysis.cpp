@@ -1033,10 +1033,12 @@ namespace
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_two_objects_one_joined_then_read_race.cpp",
              .intent = "joining one object's thread leaves another object's running (#99)",
-             .dataRace = 1, .racingSymbol = "_ZL4hits", .requiresCxx20 = true},
+             .dataRace = 2, .racingSymbol = "_ZL4hits", .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_two_objects_both_joined_then_read_no_fp.cpp",
-             .intent = "each object's join ends its own thread (#99)",
+             .intent = "each object's join ends its own thread (#99): main's read races with "
+                       "neither, but the two threads write hits together (#126)",
+             .dataRace = 1,
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_service_started_and_stopped_then_read_no_fp.cpp",
@@ -1520,32 +1522,32 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_started_twice_joined_once_race.c",
              .intent = "a join ends the thread its field holds, not the one it replaced (#99)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_handle_first_started_twice_joined_once_race.c",
              .intent = "starting a task writes its handle, not the whole task, when the handle is "
                        "its first field (#110)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_handle_array_first_started_twice_joined_once_race.c",
              .intent = "a handle in an array that is the task's first field reaches that array, "
                        "not the whole task (#110)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_handle_first_started_through_local_pointer_race.c",
              .intent = "a local pointer to the handle, the task's first field, still designates "
                        "and names that field (#110)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_started_again_in_other_function_race.c",
              .intent = "a function starting the task it received again joins only its own "
                        "thread (#99)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_detached_then_run_again_in_other_function_race.c",
              .intent = "a function joining the thread it started leaves the detached one running "
                        "(#99)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/data_race_owner_writes_local_object.c",
              .intent = "the owner of a local object handed to a thread still races with it (#103)",
              .dataRace = 1},
