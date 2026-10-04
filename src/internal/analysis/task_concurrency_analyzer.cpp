@@ -1319,17 +1319,15 @@ namespace ctrace::concurrency::internal::analysis
                     const ThreadInstances started = running.startedAt(function, instruction);
                     ThreadInstances live = running.inheritedAt(function, instruction);
                     live.insert(started.begin(), started.end());
+                    const ThreadEntrySet liveEntries = entriesOf(live);
                     if (const auto spawned = spawnedEntries.find(&instruction);
-                        spawned != spawnedEntries.end() &&
-                        std::ranges::any_of(
-                            live, [&](const ThreadInstance& instance)
-                            { return instance.entryFunctionId == *spawned->second; }))
+                        spawned != spawnedEntries.end() && liveEntries.contains(*spawned->second))
                         result.overlappingSpawnEntries.insert(*spawned->second);
                     if (!started.empty())
                         result.startedEntriesAtInstruction.emplace(&instruction,
                                                                    entriesOf(started));
-                    if (!live.empty())
-                        result.liveEntriesAtInstruction.emplace(&instruction, entriesOf(live));
+                    if (!liveEntries.empty())
+                        result.liveEntriesAtInstruction.emplace(&instruction, liveEntries);
                 }
             }
         }
