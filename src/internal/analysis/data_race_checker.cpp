@@ -190,6 +190,13 @@ namespace ctrace::concurrency::internal::analysis
             return false;
         }
 
+        /// Two accesses each instance of one entry makes to the object its own spawn handed it:
+        /// two instances reach two objects, and one instance runs its accesses in sequence.
+        bool inOwnObjectsOfInstances(const AccessFact& lhs, const AccessFact& rhs)
+        {
+            return !lhs.instanceOwner.empty() && lhs.instanceOwner == rhs.instanceOwner;
+        }
+
         bool shareSelfConcurrentEntry(const EntrySet& lhsEntries, const EntrySet& rhsEntries,
                                       const TUFacts& facts)
         {
@@ -480,6 +487,9 @@ namespace ctrace::concurrency::internal::analysis
                     if (!mayHappenInParallel(lhs, lhsEntries, rhs, rhsEntries, facts))
                         continue;
 
+                    if (inOwnObjectsOfInstances(lhs, rhs))
+                        continue;
+
                     if (shareRecognizedLock(lhs, rhs) || orderedByPublication(lhs, rhs))
                         continue;
 
@@ -599,6 +609,9 @@ namespace ctrace::concurrency::internal::analysis
 
                 const EntrySet& entries = entriesOf(*access);
                 if (!isSelfConcurrent(entries, facts))
+                    continue;
+
+                if (inOwnObjectsOfInstances(*access, *access))
                     continue;
 
                 // A write to the element its own thread was handed never meets itself in another

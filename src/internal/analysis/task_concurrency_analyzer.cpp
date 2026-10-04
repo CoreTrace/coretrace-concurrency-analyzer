@@ -116,13 +116,52 @@ namespace ctrace::concurrency::internal::analysis
                 return end == nullptr || point.comesBefore(end);
             }
 
+            /// Blocks entered from their top, each with whether every path entering it had the
+            /// thread still in its handle, and the points that fill that handle again.
+            std::unordered_map<const llvm::BasicBlock*, bool> enteredNamed;
+            llvm::SmallPtrSet<const llvm::Instruction*, 8> restarts;
+
+            [[nodiscard]] bool fromStart(const llvm::Instruction& point) const
+            {
+                return start != nullptr && point.getParent() == start->getParent() &&
+                       start->comesBefore(&point) && before(point, startEnd);
+            }
+
             [[nodiscard]] bool contains(const llvm::Instruction& point) const
             {
                 if (const auto it = fromTop.find(point.getParent());
                     it != fromTop.end() && before(point, it->second))
                     return true;
-                return start != nullptr && point.getParent() == start->getParent() &&
-                       start->comesBefore(&point) && before(point, startEnd);
+                return fromStart(point);
+            }
+
+            /// Whether the handle still holds the thread at `point` on every path reaching it:
+            /// none fills it again between the start and `point`.
+            [[nodiscard]] bool namedAt(const llvm::Instruction& point) const
+            {
+                auto stillNamed = [&](const llvm::Instruction* first, bool named)
+                {
+                    for (const llvm::Instruction* instruction = first;
+                         named && instruction != &point; instruction = instruction->getNextNode())
+                        named = !restarts.contains(instruction);
+                    return named;
+                };
+
+                bool reached = false;
+                bool named = true;
+                if (fromStart(point))
+                {
+                    reached = true;
+                    named = stillNamed(start->getNextNode(), true);
+                }
+                if (const auto it = fromTop.find(point.getParent());
+                    it != fromTop.end() && before(point, it->second))
+                {
+                    reached = true;
+                    named = named && stillNamed(&point.getParent()->front(),
+                                                enteredNamed.at(point.getParent()));
+                }
+                return reached && named;
             }
         };
 
@@ -234,6 +273,7 @@ namespace ctrace::concurrency::internal::analysis
 
             Reach reach;
             reach.start = start;
+            reach.restarts = kills.restarts;
             // A block is walked again once reached unnamed: no join ends the thread then, so it
             // runs at least as far.
             std::unordered_map<const llvm::BasicBlock*, bool> reachedNamed;
@@ -274,6 +314,7 @@ namespace ctrace::concurrency::internal::analysis
                 reachedNamed[block] = named;
                 const auto [end, namedAfter] = walk(&block->front(), named);
                 reach.fromTop[block] = end;
+                reach.enteredNamed[block] = named;
                 if (end == nullptr)
                     leave(block, namedAfter);
             }
@@ -698,10 +739,20 @@ namespace ctrace::concurrency::internal::analysis
                 if (const auto calls = introducedByCalls_.find(&function);
                     calls != introducedByCalls_.end())
                 {
-                    for (const auto& [call, instance] : calls->second)
+                    for (const IntroducedThread& introduced : calls->second)
                     {
-                        if (handleReach(function, call, instance.handle).contains(point))
-                            started.insert(instance);
+                        const Reach& reach =
+                            handleReach(function, introduced.call, introduced.storage);
+                        if (!reach.contains(point))
+                            continue;
+                        // Where its storage still holds it on every path, the thread is named by
+                        // that storage, even one filled again elsewhere: a callee's join of it
+                        // ends it.
+                        ThreadInstance instance = introduced.instance;
+                        if (!instance.handle.has_value() && introduced.storage.has_value() &&
+                            reach.namedAt(point))
+                            instance.handle = introduced.storage;
+                        started.insert(std::move(instance));
                     }
                 }
                 return started;
@@ -1134,15 +1185,20 @@ namespace ctrace::concurrency::internal::analysis
                             continue;
                         for (const ThreadInstance& instance : calleeLeaks->second)
                         {
-                            ThreadInstance started{instance.entryFunctionId, std::nullopt};
+                            IntroducedThread introduced{
+                                .call = site->call,
+                                .instance = {instance.entryFunctionId, std::nullopt},
+                            };
                             if (instance.handle.has_value())
-                                started.handle = handleAtCaller(
+                                introduced.storage = handleAtCaller(
                                     *instance.handle, site->calleeFunctionId, *site->call);
-                            if (started.handle.has_value() &&
-                                ambiguousIn(*function, *started.handle))
-                                started.handle.reset();
-                            introducedByCalls_[function].emplace_back(site->call,
-                                                                      std::move(started));
+                            // Storage filled more than once names no single thread, but a join
+                            // of it still ends the thread it holds until it is filled again,
+                            // as for a thread started there in place.
+                            if (introduced.storage.has_value() &&
+                                !ambiguousIn(*function, *introduced.storage))
+                                introduced.instance.handle = introduced.storage;
+                            introducedByCalls_[function].push_back(std::move(introduced));
                         }
                     }
                 }
@@ -1155,8 +1211,16 @@ namespace ctrace::concurrency::internal::analysis
             std::unordered_map<const llvm::Function*, FunctionThreads> functions_;
             std::unordered_map<const llvm::Function*, ThreadInstances> leaked_;
             std::unordered_map<const llvm::Function*, ThreadInstances> inherited_;
-            std::unordered_map<const llvm::Function*,
-                               std::vector<std::pair<const llvm::Instruction*, ThreadInstance>>>
+            /// A thread a call leaves running in its caller: the instance as the caller names it,
+            /// and the storage holding it there, which a join ends it through even when that
+            /// storage receives more than one thread and so names none of them.
+            struct IntroducedThread
+            {
+                const llvm::Instruction* call = nullptr;
+                ThreadInstance instance;
+                std::optional<std::string> storage;
+            };
+            std::unordered_map<const llvm::Function*, std::vector<IntroducedThread>>
                 introducedByCalls_;
             mutable std::map<std::pair<const llvm::Function*, std::string>,
                              std::vector<std::pair<const llvm::Instruction*, JoinSuccess>>>
@@ -1198,21 +1262,6 @@ namespace ctrace::concurrency::internal::analysis
 
             const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
 
-            // Two instances of the same entry overlap when a spawn happens while a previous
-            // instance is still live. Counting spawn sites instead would treat mutually exclusive
-            // branches, or a spawn/join pair repeated sequentially, as concurrent.
-            for (const SpawnSite& spawn : sites.spawns)
-            {
-                for (const SpawnSite& earlier : sites.spawns)
-                {
-                    if (earlier.entryFunctionId == spawn.entryFunctionId &&
-                        running.spawnIsLiveAt(function, earlier, *spawn.instruction))
-                    {
-                        result.overlappingSpawnEntries.insert(spawn.entryFunctionId);
-                    }
-                }
-            }
-
             // A spawn dominated by the join of another entry's only instance can never overlap it.
             for (const SpawnSite& spawn : sites.spawns)
             {
@@ -1249,6 +1298,16 @@ namespace ctrace::concurrency::internal::analysis
             if (function.isDeclaration() || !running.mayHoldThreads(function))
                 continue;
 
+            // Two instances of an entry overlap when one is started while another may still run:
+            // started earlier in the function or in a previous round of its loop, left running by
+            // a call, or running in a caller, as when a helper that starts the thread is called
+            // twice or in a loop. Counting spawn sites instead would take mutually exclusive
+            // branches, or a start and a join repeated in sequence, as concurrent, and a helper
+            // called several times as one instance.
+            std::unordered_map<const llvm::Instruction*, const std::string*> spawnedEntries;
+            for (const SpawnSite& spawn : running.sitesOf(function).spawns)
+                spawnedEntries.emplace(spawn.instruction, &spawn.entryFunctionId);
+
             const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
             for (const llvm::BasicBlock& block : function)
             {
@@ -1260,6 +1319,12 @@ namespace ctrace::concurrency::internal::analysis
                     const ThreadInstances started = running.startedAt(function, instruction);
                     ThreadInstances live = running.inheritedAt(function, instruction);
                     live.insert(started.begin(), started.end());
+                    if (const auto spawned = spawnedEntries.find(&instruction);
+                        spawned != spawnedEntries.end() &&
+                        std::ranges::any_of(
+                            live, [&](const ThreadInstance& instance)
+                            { return instance.entryFunctionId == *spawned->second; }))
+                        result.overlappingSpawnEntries.insert(*spawned->second);
                     if (!started.empty())
                         result.startedEntriesAtInstruction.emplace(&instruction,
                                                                    entriesOf(started));

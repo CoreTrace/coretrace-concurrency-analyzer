@@ -1512,6 +1512,12 @@ namespace
                        "thread (#99)",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_refilled_by_other_entry_then_stopped_race.c",
+             .intent = "a callee's join through a field refilled by another thread ends that one "
+                       "(#126)",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_started_twice_joined_once_race.c",
              .intent = "a join ends the thread its field holds, not the one it replaced (#99)",
              .dataRace = 1},
@@ -3361,6 +3367,33 @@ namespace
              .racingSymbol = "before_value",
              .trackedMissingJoins = {{.issue = "#143", .function = "main", .line = 24, .column = 5}}},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_in_loop_race.c",
+             .intent = "threads a helper starts in a loop run together (#126)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_twice_race.c",
+             .intent = "threads a helper called twice starts run together (#126)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_joined_each_time_no_fp.c",
+             .intent = "a helper's thread joined before the helper is called again (#126)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_in_loop_joined_each_round_no_fp.c",
+             .intent = "a join ends the thread a helper started into storage refilled each round "
+                       "(#126)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_after_joining_previous_no_fp.c",
+             .intent = "each round joins the previous thread before the helper starts the next "
+                       "(#126)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_after_failed_join_race.c",
+             .intent = "a round going on past a failed join starts beside the previous thread "
+                       "(#126)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_from_previous_round_race.c",
              .intent = "the previous round's thread runs while main writes",
              .dataRace = 1},
@@ -3437,6 +3470,28 @@ namespace
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_thread_owning_objects_built_in_loop_no_fp.cpp",
              .intent = "a constructor builds an object no earlier thread of its class holds",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_constructor_starts_two_entries_on_object_race.cpp",
+             .intent = "two entries a constructor starts on its object share it (#126)",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_constructor_started_run_called_by_main_race.cpp",
+             .intent = "main calling the entry on the object races with the thread there (#126)",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_constructor_started_instances_write_global_race.cpp",
+             .intent = "threads each constructor starts on its own object share a global (#126)",
+             .dataRace = 1,
+             .racingSymbol = "_ZL5total",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_constructor_counts_then_starts_race.cpp",
+             .intent = "each thread races with the next one and with the next constructor (#126)",
+             .dataRace = 2,
+             .racingSymbol = "_ZL5total",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_thread_built_in_place_by_helper_no_fp.cpp",

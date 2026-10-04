@@ -153,7 +153,8 @@ namespace ctrace::concurrency::internal::analysis
                    << toString(fact.aliasProvenance) << "|" << fact.loweredLocation.file << "|"
                    << fact.loweredLocation.line << "|" << fact.loweredLocation.column << "|"
                    << fact.loweredLocation.function << "|" << fact.coarseCallEffect
-                   << fact.guessedIdentity << fact.sharedObject << fact.inRootTask;
+                   << fact.guessedIdentity << fact.sharedObject << fact.inRootTask << "|"
+                   << fact.instanceOwner;
 
             for (const std::string& lock : fact.heldLocks)
                 stream << "|lock:" << lock;
@@ -1267,17 +1268,17 @@ namespace ctrace::concurrency::internal::analysis
 
         // Replace the raw spawn-site count by the number of instances that can actually be alive at
         // once: two spawn sites on mutually exclusive branches, or a spawn/join pair repeated
-        // sequentially, never yield two concurrent instances. Only meaningful once the task
-        // analysis has run, which is exactly when the entry concurrency is read.
+        // sequentially, never yield two concurrent instances, and one spawn site in a helper
+        // called twice does. Only meaningful once the task analysis has run, which is exactly
+        // when the entry concurrency is read.
         if (selection.threadEntries)
         {
             for (auto& [entryId, concurrency] : facts.entryConcurrency)
             {
-                if (concurrency.staticSpawnCount >= 2 &&
-                    !taskConcurrency.overlappingSpawnEntries.contains(entryId))
-                {
-                    concurrency.staticSpawnCount = 1;
-                }
+                concurrency.staticSpawnCount =
+                    taskConcurrency.overlappingSpawnEntries.contains(entryId)
+                        ? std::max<std::size_t>(concurrency.staticSpawnCount, 2)
+                        : std::min<std::size_t>(concurrency.staticSpawnCount, 1);
             }
         }
 
@@ -1986,6 +1987,8 @@ namespace ctrace::concurrency::internal::analysis
                     // passes, and the call's own binding makes that an access of the caller.
                     fact.inRootTask = false;
                     fact.boundBySpawn = true;
+                    if (!binding.constructedClass.empty())
+                        fact.instanceOwner = summaryFunctionId;
                     addConcreteAccess(concreteAccesses, concreteAccessKeys, std::move(fact));
                 }
             }
@@ -2019,6 +2022,7 @@ namespace ctrace::concurrency::internal::analysis
                         mergeHeldLocks(locksAtCallSite(remapped.heldLocks, callBinding),
                                        callBinding.callsiteHeldLocks);
                     remapped.inRootTask = callBinding.callerInRootTask;
+                    remapped.instanceOwner.clear();
                     std::tie(remapped.liveEntries, remapped.startedEntries) =
                         threadsThroughCall(remapped.liveEntries, remapped.startedEntries,
                                            callBinding.liveAtCall, callBinding.startedAtCall);
