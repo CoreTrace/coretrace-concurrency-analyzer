@@ -1240,8 +1240,16 @@ namespace ctrace::concurrency::internal::analysis
             ThreadCompletion completion;
             if (join.success.has_value() &&
                 join.success->covers(*second->getLoopLatch()->getTerminator(), dominators))
+            {
                 completion.ended =
                     JoinSuccess{.branch = second->getHeader(), .successor = secondExit};
+                // Both slots read at their loop's counter: the thread a round joins is the one
+                // the spawn loop's round of the same counter value started. A join loop with a
+                // counter tests it, so its slots were read at that counter (`countedSlots`).
+                if (indexed && a && b &&
+                    countedSlots(writer.getArgOperand(0), *a, loops, dominators, layout))
+                    completion.roundJoin = RoundJoin{.loop = second, .success = *join.success};
+            }
             return completion;
         }
 
@@ -1634,6 +1642,15 @@ namespace ctrace::concurrency::internal::analysis
                 return false;
         }
         return true;
+    }
+
+    std::optional<LoopCounter> loopCounter(const llvm::Loop& loop,
+                                           const llvm::DominatorTree& dominators)
+    {
+        const std::optional<CountedLoop> counted = countedLoop(loop, dominators);
+        if (!counted.has_value())
+            return std::nullopt;
+        return LoopCounter{.variable = counted->induction, .increment = counted->increment};
     }
 
     bool completionCoversReturns(const llvm::Instruction& start,

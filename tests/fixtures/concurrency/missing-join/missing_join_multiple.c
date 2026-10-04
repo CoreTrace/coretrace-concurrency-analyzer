@@ -49,11 +49,11 @@ int main() {
 // 	symbol: results
 // 	at line 12, column 17
 // 	[!!!Error] unsynchronized concurrent access to global 'results'
-// 	     ↳ access: write at ${REPO_ROOT}/tests/fixtures/concurrency/missing-join/missing_join_multiple.c:12:17 in compute (thread entries: compute)
-// 	     ↳ conflicts with another concurrent invocation reachable from thread entry 'compute'
-// 	     ↳ possible conflict kinds: write/write
+// 	     ↳ first access: write at ${REPO_ROOT}/tests/fixtures/concurrency/missing-join/missing_join_multiple.c:12:17 in compute (thread entries: compute)
+// 	     ↳ conflicting access: read at ${REPO_ROOT}/tests/fixtures/concurrency/missing-join/missing_join_multiple.c:34:23 in main (thread entries: <main-task>)
+// 	     ↳ possible conflict kinds: read/write
 // 	     ↳ no common recognized lock protects the conflicting accesses
-// 	related: Concurrent invocation -> ${REPO_ROOT}/tests/fixtures/concurrency/missing-join/missing_join_multiple.c:12:17 in compute
+// 	related: Conflicting access -> ${REPO_ROOT}/tests/fixtures/concurrency/missing-join/missing_join_multiple.c:34:23 in main
 //
 // Function: main
 // 	severity: WARNING

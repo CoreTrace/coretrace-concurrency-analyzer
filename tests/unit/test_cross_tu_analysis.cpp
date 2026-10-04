@@ -664,6 +664,42 @@ namespace
                           "there, whether pthread_t is a pointer or an integer");
     }
 
+    /// An element a spawn loop hands to each of its threads is no longer that thread's own when
+    /// another unit starts the same entry on it (#108).
+    bool testElementHandedOutInAnotherUnitTooStillRaces()
+    {
+        CompiledProject project;
+        if (!project.add("per-thread-element-spawned-elsewhere/main.c") ||
+            !project.add("per-thread-element-spawned-elsewhere/extra.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRule(report, RuleId::DataRaceGlobal) == 1,
+                          "thread 0 and the other unit's thread write the same element") &&
+               assertTrue(countRule(report, RuleId::MissingJoin) == 0, "every thread is joined");
+    }
+
+    /// An element whose address a function of another unit publishes may be written by any
+    /// thread there, beside the thread it was handed to (#108).
+    bool testElementKeptByAnotherUnitStillRaces()
+    {
+        CompiledProject project;
+        if (!project.add("per-thread-element-kept-elsewhere/main.c") ||
+            !project.add("per-thread-element-kept-elsewhere/keeper.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRule(report, RuleId::DataRaceGlobal) == 1,
+                          "the observer writes the element its thread writes") &&
+               assertTrue(countRule(report, RuleId::MissingJoin) == 0, "every thread is joined");
+    }
+
     /// The helper's join changes what the threading unit concludes for the rules that ask
     /// whether a thread has ended, and for no other (#89).
     bool testHelperJoinReanalysisFollowsTheSelection()
@@ -794,6 +830,10 @@ namespace
             {.units = {"cross-tu-lock-wrapper/workers.c", "cross-tu-lock-wrapper/sync.c"}},
             {.units = {"cross-tu-reaped-elsewhere/main.c", "cross-tu-reaped-elsewhere/reaper.c"}},
             {.units = {"cross-tu-helper-join/workers.c", "cross-tu-helper-join/join.c"}},
+            {.units = {"per-thread-element-spawned-elsewhere/main.c",
+                       "per-thread-element-spawned-elsewhere/extra.c"}},
+            {.units = {"per-thread-element-kept-elsewhere/main.c",
+                       "per-thread-element-kept-elsewhere/keeper.c"}},
             {.units = {"cross-tu-vtable-declaration/widget.cpp",
                        "cross-tu-vtable-declaration/main.cpp"},
              .compileArgs = cxx},
@@ -1487,6 +1527,8 @@ int main()
     ok = testForkingUnitAloneStillReportsTheChild() && ok;
     ok = testReapingReanalysisFollowsTheSelection() && ok;
     ok = testThreadsJoinedByAHelperInAnotherUnitAreFinished() && ok;
+    ok = testElementHandedOutInAnotherUnitTooStillRaces() && ok;
+    ok = testElementKeptByAnotherUnitStillRaces() && ok;
     ok = testThreadingUnitAloneCannotSeeTheHelperJoin() && ok;
     ok = testHelperJoinReanalysisFollowsTheSelection() && ok;
     ok = testIdiomaticServiceKeepsItsKnownBlindSpots() && ok;

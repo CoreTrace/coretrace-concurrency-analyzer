@@ -188,8 +188,9 @@ namespace ctrace::concurrency::internal::analysis
             const bool calleeIsDefined = callee != nullptr && !callee->isDeclaration();
 
             std::unordered_set<std::string> seenEffects;
-            auto appendEffect = [&](const RootBinding& root, const MemoryRegion& region,
-                                    AccessKind kind, bool isAtomic, bool restates)
+            auto appendEffect = [&](unsigned operand, const RootBinding& root,
+                                    const MemoryRegion& region, AccessKind kind, bool isAtomic,
+                                    bool restates)
             {
                 RootBinding effectRoot = root;
                 effectRoot.region = region;
@@ -203,6 +204,7 @@ namespace ctrace::concurrency::internal::analysis
                 appendAccessTo(accesses, function, call, std::move(effectRoot), kind,
                                AliasProvenance::Direct, isAtomic, true);
                 accesses.back().restatesCalleeAccesses = restates;
+                accesses.back().callOperand = operand;
             };
 
             for (const llvm::Use& argument : call.args())
@@ -224,7 +226,7 @@ namespace ctrace::concurrency::internal::analysis
                 const unsigned argumentNumber = call.getArgOperandNo(&argument);
                 if (!calleeIsDefined || argumentNumber >= callee->arg_size())
                 {
-                    appendEffect(*root, root->designated, *allowed, false, false);
+                    appendEffect(argumentNumber, *root, root->designated, *allowed, false, false);
                     continue;
                 }
 
@@ -242,7 +244,8 @@ namespace ctrace::concurrency::internal::analysis
                                                      : extent.readsWholeObject;
                         if (wholeObject)
                         {
-                            appendEffect(*root, root->designated, kind, false, restates);
+                            appendEffect(argumentNumber, *root, root->designated, kind, false,
+                                         restates);
                             continue;
                         }
 
@@ -254,7 +257,7 @@ namespace ctrace::concurrency::internal::analysis
                                 .byteOffset = range.begin,
                                 .byteSize = static_cast<std::uint64_t>(range.end - range.begin),
                             };
-                            appendEffect(*root,
+                            appendEffect(argumentNumber, *root,
                                          calleeRegion.rebasedOn(root->region, root->designated),
                                          kind, range.isAtomic, restates);
                         }

@@ -162,6 +162,27 @@ namespace ctrace::concurrency::internal::analysis
                                                                const llvm::DataLayout* layout,
                                                                unsigned argumentIndex,
                                                                const RootBinding& object);
+    /// A pointer into the element of an array that one variable index picks, every other
+    /// indexing step being constant: `&base[c][index].field`.
+    struct VariablyIndexedPointer
+    {
+        /// The object indexed, before any indexing step.
+        const llvm::Value* base = nullptr;
+        /// The variable index, without the integer extension the lowering adds.
+        const llvm::Value* index = nullptr;
+        /// Where element zero starts in `base`, and the distance between two elements.
+        std::int64_t elementStart = 0;
+        std::uint64_t elementSize = 0;
+        /// Where the pointer sits inside its element.
+        std::int64_t position = 0;
+    };
+
+    /// Reads a pointer as a chain of indexing steps with exactly one variable index; nothing for
+    /// any other pointer. Only casts and indexing steps are followed: a pointer read back from
+    /// memory may have been computed in an earlier iteration, with another index.
+    [[nodiscard]] std::optional<VariablyIndexedPointer>
+    variablyIndexedPointer(const llvm::Value& pointer, const llvm::DataLayout& layout);
+
     /// Resolves the tracked root of a pointer: where in it the pointer points, with `byteSize` as
     /// the extent (zero when unknown), and the object the pointer designates. When an integer
     /// parameter of the function picks the place, that is recorded as its `index`.
@@ -195,6 +216,8 @@ namespace ctrace::concurrency::internal::analysis
     {
         std::string context;
         std::string base;
+        /// The function constructs an object of its class, handed as its first parameter.
+        bool constructor = false;
     };
 
     /// Nothing when `mangled` names no function.
