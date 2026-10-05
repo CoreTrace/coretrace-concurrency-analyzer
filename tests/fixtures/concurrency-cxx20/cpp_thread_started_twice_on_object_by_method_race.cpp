@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // start() is a method, not a constructor: its second call writes n on the same object while the
 // thread of the first call increments it, and the two threads increment it together (#113).
-// Expected: one data race.
+// Expected: two data races: the second start() against run(), and run() against run() (#126).
 #include <thread>
 
 struct Worker

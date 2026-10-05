@@ -1033,10 +1033,12 @@ namespace
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_two_objects_one_joined_then_read_race.cpp",
              .intent = "joining one object's thread leaves another object's running (#99)",
-             .dataRace = 1, .racingSymbol = "_ZL4hits", .requiresCxx20 = true},
+             .dataRace = 2, .racingSymbol = "_ZL4hits", .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_two_objects_both_joined_then_read_no_fp.cpp",
-             .intent = "each object's join ends its own thread (#99)",
+             .intent = "each object's join ends its own thread (#99): main's read races with "
+                       "neither, but the two threads write hits together (#126)",
+             .dataRace = 1,
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_service_started_and_stopped_then_read_no_fp.cpp",
@@ -1512,34 +1514,40 @@ namespace
                        "thread (#99)",
              .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_refilled_by_other_entry_then_stopped_race.c",
+             .intent = "a callee's join through a field refilled by another thread ends that one "
+                       "(#126)",
+             .dataRace = 1,
+             .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_started_twice_joined_once_race.c",
              .intent = "a join ends the thread its field holds, not the one it replaced (#99)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_handle_first_started_twice_joined_once_race.c",
              .intent = "starting a task writes its handle, not the whole task, when the handle is "
                        "its first field (#110)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_handle_array_first_started_twice_joined_once_race.c",
              .intent = "a handle in an array that is the task's first field reaches that array, "
                        "not the whole task (#110)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_handle_first_started_through_local_pointer_race.c",
              .intent = "a local pointer to the handle, the task's first field, still designates "
                        "and names that field (#110)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_started_again_in_other_function_race.c",
              .intent = "a function starting the task it received again joins only its own "
                        "thread (#99)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_task_detached_then_run_again_in_other_function_race.c",
              .intent = "a function joining the thread it started leaves the detached one running "
                        "(#99)",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/data_race_owner_writes_local_object.c",
              .intent = "the owner of a local object handed to a thread still races with it (#103)",
              .dataRace = 1},
@@ -3361,6 +3369,33 @@ namespace
              .racingSymbol = "before_value",
              .trackedMissingJoins = {{.issue = "#143", .function = "main", .line = 24, .column = 5}}},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_in_loop_race.c",
+             .intent = "threads a helper starts in a loop run together (#126)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_twice_race.c",
+             .intent = "threads a helper called twice starts run together (#126)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_joined_each_time_no_fp.c",
+             .intent = "a helper's thread joined before the helper is called again (#126)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_in_loop_joined_each_round_no_fp.c",
+             .intent = "a join ends the thread a helper started into storage refilled each round "
+                       "(#126)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_after_joining_previous_no_fp.c",
+             .intent = "each round joins the previous thread before the helper starts the next "
+                       "(#126)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_by_helper_after_failed_join_race.c",
+             .intent = "a round going on past a failed join starts beside the previous thread "
+                       "(#126)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_from_previous_round_race.c",
              .intent = "the previous round's thread runs while main writes",
              .dataRace = 1},
@@ -3439,6 +3474,28 @@ namespace
              .intent = "a constructor builds an object no earlier thread of its class holds",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_constructor_starts_two_entries_on_object_race.cpp",
+             .intent = "two entries a constructor starts on its object share it (#126)",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_constructor_started_run_called_by_main_race.cpp",
+             .intent = "main calling the entry on the object races with the thread there (#126)",
+             .dataRace = 1,
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_constructor_started_instances_write_global_race.cpp",
+             .intent = "threads each constructor starts on its own object share a global (#126)",
+             .dataRace = 1,
+             .racingSymbol = "_ZL5total",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_constructor_counts_then_starts_race.cpp",
+             .intent = "each thread races with the next one and with the next constructor (#126)",
+             .dataRace = 2,
+             .racingSymbol = "_ZL5total",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_thread_built_in_place_by_helper_no_fp.cpp",
              .intent = "a constructor called from a helper builds an object no earlier thread holds",
              .requiresCxx20 = true},
@@ -3459,8 +3516,9 @@ namespace
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency-cxx20/"
                      "cpp_thread_started_twice_on_object_by_method_race.cpp",
-             .intent = "a method started twice on one object races with its first thread",
-             .dataRace = 1,
+             .intent = "a method started twice on one object races with its first thread, and "
+                       "the two threads race with each other (#126)",
+             .dataRace = 2,
              .requiresCxx20 = true},
 
             // --- compiler error path -------------------------------------------------------

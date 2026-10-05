@@ -285,6 +285,12 @@ namespace ctrace::concurrency::internal::analysis
         /// entry reaches: a direct call of the entry reaches what the call passes. A copy of this
         /// access at a call site keeps the flag, and the object it names.
         bool boundBySpawn = false;
+        /// The entry whose spawns hand each of its instances an object of its own, when the access
+        /// reaches that object in the entry's own frame: a constructor starting the thread on the
+        /// object it builds, whose lifetime begins with that construction. Two instances of the
+        /// entry reach two objects through it, however alike their names. A copy of the access
+        /// at a direct call of the entry runs in the caller, not in an instance, and has none.
+        std::string instanceOwner;
         std::set<std::string> heldLocks;
         /// Atomic flags whose releasing publication this access happens before, and flags whose
         /// observed publication it happens after. An access before a release and one after the
