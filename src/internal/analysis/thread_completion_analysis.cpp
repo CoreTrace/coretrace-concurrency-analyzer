@@ -504,6 +504,13 @@ namespace ctrace::concurrency::internal::analysis
                    name.find("operator" + std::string(method)) != std::string::npos;
         }
 
+        /// Whether `call` reads the element an iterator designates: `*it`, or `it->` before a
+        /// member call such as `it->join()`. Both yield the same element.
+        bool dereferencesIterator(const llvm::CallBase& call)
+        {
+            return iteratorMethod(call, "*") || iteratorMethod(call, "->");
+        }
+
         /// Strip an iterator object's zero-offset ABI wrapper without conflating array
         /// elements. References copied to local slots are followed only with one store.
         const llvm::Value* object(const llvm::Value* value)
@@ -638,14 +645,14 @@ namespace ctrace::concurrency::internal::analysis
 
         /// The two ends of the vector range `loop` reads to join each element, when it traverses
         /// the whole range: an iterator from `begin()` to `end()`, both read before the first
-        /// round, advanced by one `++` a round, and serving only the join, through `*`, and the
-        /// loop's test.
+        /// round, advanced by one `++` a round, and serving only the join, through `*` or `->`,
+        /// and the loop's test.
         std::optional<std::pair<RangeEnd, RangeEnd>>
         wholeRangeJoin(const JoinSite& join, const llvm::Loop& loop,
                        const llvm::DominatorTree& dominators)
         {
             const auto* dereference = joinedDereference(join);
-            if (!dereference || dereference->arg_size() != 1 || !iteratorMethod(*dereference, "*"))
+            if (!dereference || dereference->arg_size() != 1 || !dereferencesIterator(*dereference))
                 return std::nullopt;
             const llvm::Value* iterator = object(dereference->getArgOperand(0));
             const std::optional<RangeEnd> begin =
@@ -686,7 +693,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (iteratorMethod(*call, "++") && loop.contains(call) &&
                         dominators.dominates(call, loop.getLoopLatch()->getTerminator()))
                         ++increments;
-                    else if (!iteratorMethod(*call, "*") && !iteratorMethod(*call, "==") &&
+                    else if (!dereferencesIterator(*call) && !iteratorMethod(*call, "==") &&
                              !iteratorMethod(*call, "!="))
                         return std::nullopt;
                 }
