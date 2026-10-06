@@ -3007,6 +3007,38 @@ namespace
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_joined_in_batches_no_fp.cpp",
+             .intent = "each round of a loop joins the vector it fills before the next one",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_joined_and_cleared_in_batches_no_fp.cpp",
+             .intent = "one vector filled, joined and cleared each round ends its threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_in_batches_race.cpp",
+             .intent = "the threads of one round still race with each other",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_written_before_batch_join_race.cpp",
+             .intent = "main's write before a round's join races with the round's thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_inserted_after_batch_join_race.cpp",
+             .intent = "a thread moved in after a round's join loop runs past the last round",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_appended_during_join_loop_below_read_size_race.cpp",
+             .intent = "threads appended past a size read before the join loop are not joined",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_thread_emplaced_temporary_joined_no_fp.cpp",
              .intent = "the loop joining a vector ends the thread emplace_back moved into it",
              .requiresCxx20 = true},
