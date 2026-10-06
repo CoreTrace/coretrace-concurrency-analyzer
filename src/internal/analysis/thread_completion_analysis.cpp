@@ -1418,19 +1418,33 @@ namespace ctrace::concurrency::internal::analysis
             return name.has_value() && isStdClass(name->context, "vector");
         }
 
-        /// A use of a vector that builds or destroys it, and nothing else.
-        bool builtOrDestroyed(const CopyUse& use)
+        /// The uses a vector may have: as `this` of a member of `std::vector` that `methods`
+        /// names, or of one of `reads`.
+        struct VectorUses
         {
-            const auto* call = llvm::dyn_cast<llvm::CallBase>(use.user);
-            if (call == nullptr)
-                return false;
-            if (llvm::isa<llvm::IntrinsicInst>(call))
-                return true;
-            for (unsigned index = 1; index < call->arg_size(); ++index)
-                if (call->getArgOperand(index) == use.copy)
+            llvm::ArrayRef<std::string_view> methods;
+            llvm::ArrayRef<const llvm::Instruction*> reads;
+
+            bool operator()(const CopyUse& use) const
+            {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(use.user);
+                if (call == nullptr)
                     return false;
-            return vectorMethod(*call, "vector") || vectorMethod(*call, "~vector");
-        }
+                if (llvm::isa<llvm::IntrinsicInst>(call))
+                    return true;
+                for (unsigned index = 1; index < call->arg_size(); ++index)
+                    if (call->getArgOperand(index) == use.copy)
+                        return false;
+                for (const std::string_view method : methods)
+                    if (vectorMethod(*call, method))
+                        return true;
+                return llvm::is_contained(reads, call);
+            }
+        };
+
+        constexpr std::string_view kBuildingMethods[] = {"vector", "~vector"};
+        constexpr std::string_view kAppendingMethods[] = {"vector", "reserve", "push_back",
+                                                          "emplace_back", "~vector"};
 
         bool never(const llvm::Instruction&)
         {
@@ -1502,7 +1516,8 @@ namespace ctrace::concurrency::internal::analysis
                         continue;
                     if (index >= callee->arg_size() ||
                         !usesOnlyAsAllowed(*callee->getArg(index), offset, container, layout,
-                                           builtOrDestroyed, never, depth - 1))
+                                           VectorUses{.methods = kBuildingMethods}, never,
+                                           depth - 1))
                         return false;
                 }
                 // The callee may hand the object back, as a constructor returning `this` does.
@@ -1523,22 +1538,9 @@ namespace ctrace::concurrency::internal::analysis
                                    llvm::function_ref<bool(const llvm::Instruction&)> later,
                                    const llvm::DataLayout& layout)
         {
-            auto atVector = [&](const CopyUse& use)
-            {
-                const auto* call = llvm::dyn_cast<llvm::CallBase>(use.user);
-                if (call == nullptr)
-                    return false;
-                if (llvm::isa<llvm::IntrinsicInst>(call))
-                    return true;
-                for (unsigned index = 1; index < call->arg_size(); ++index)
-                    if (call->getArgOperand(index) == use.copy)
-                        return false;
-                return vectorMethod(*call, "vector") || vectorMethod(*call, "reserve") ||
-                       vectorMethod(*call, "push_back") || vectorMethod(*call, "emplace_back") ||
-                       vectorMethod(*call, "~vector") || llvm::is_contained(reads, call);
-            };
-            return usesOnlyAsAllowed(*container.object, 0, container, layout, atVector, later,
-                                     kMaxCalleeDepth);
+            return usesOnlyAsAllowed(*container.object, 0, container, layout,
+                                     VectorUses{.methods = kAppendingMethods, .reads = reads},
+                                     later, kMaxCalleeDepth);
         }
 
         /// Whether the element `element` reads serves `uses` alone, through the locals it is kept
