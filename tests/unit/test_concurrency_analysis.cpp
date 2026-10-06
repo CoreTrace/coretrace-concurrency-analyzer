@@ -2927,6 +2927,52 @@ namespace
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_below_constant_no_fp.cpp",
+             .intent = "a loop joining below the count of threads moved in ends them all",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_below_constant_race.cpp",
+             .intent = "threads joined below their count still race with each other",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_written_before_join_below_constant_race.cpp",
+             .intent = "main's write before the join below a constant races with the threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_below_smaller_constant_race.cpp",
+             .intent = "a join loop below fewer than the threads moved in leaves one running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_appended_past_counted_loop_race.cpp",
+             .intent = "a thread moved in past the counted loop is not joined below its count",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_join_below_constant_failure_caught_race.cpp",
+             .intent = "a round going on past a failed join below a constant leaves its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_built_from_other_vector_joined_below_constant_race.cpp",
+             .intent = "a vector built from another holds more than its loop moves in",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_inserted_in_nested_loop_joined_below_constant_race.cpp",
+             .intent = "a counted loop run twice moves in twice its count",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_thread_emplaced_temporary_joined_no_fp.cpp",
              .intent = "the loop joining a vector ends the thread emplace_back moved into it",
              .requiresCxx20 = true},
