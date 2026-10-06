@@ -10,6 +10,7 @@
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
 #include <llvm/Demangle/Demangle.h>
@@ -1570,11 +1571,15 @@ namespace ctrace::concurrency::internal::analysis
             ContainerPlace container;
             std::vector<const llvm::Instruction*> reads;
             const llvm::Instruction* lastRead = nullptr;
+            /// For an index below a constant rather than the vector's size, that constant: the
+            /// loop reads the whole vector only if it holds that many threads.
+            std::optional<std::int64_t> size;
         };
 
         /// How `loop` traverses the whole vector `join` takes its elements from: an iterator from
         /// `begin()` to `end()`, as `wholeRangeJoin` checks it, or an index from 0 below the
-        /// vector's `size()`, read before the loop or at each test, one more each round.
+        /// vector's `size()`, read before the loop or at each test, one more each round, or below
+        /// a constant the vector's size must then be.
         std::optional<VectorTraversal> wholeVectorJoin(const JoinSite& join, const llvm::Loop& loop,
                                                        const llvm::DominatorTree& dominators)
         {
@@ -1586,6 +1591,21 @@ namespace ctrace::concurrency::internal::analysis
             const auto* zero = count ? llvm::dyn_cast<llvm::ConstantInt>(count->begin) : nullptr;
             const auto* size = count ? llvm::dyn_cast<llvm::CallBase>(count->end) : nullptr;
             const llvm::CallBase* element = joinedDereference(join);
+            if (const auto* bound = count ? llvm::dyn_cast<llvm::ConstantInt>(count->end) : nullptr)
+            {
+                const llvm::BasicBlock* preheader = loop.getLoopPreheader();
+                const std::optional<ContainerPlace> container =
+                    element != nullptr && element->arg_size() == 2
+                        ? placeOf(element->getArgOperand(0), element->getModule()->getDataLayout())
+                        : std::nullopt;
+                if (!zero || !zero->isZero() || bound->isNegative() || preheader == nullptr ||
+                    !container || !accessesInductionElement(*element, *container, *count))
+                    return std::nullopt;
+                return VectorTraversal{.container = *container,
+                                       .reads = {element},
+                                       .lastRead = preheader->getTerminator(),
+                                       .size = bound->getSExtValue()};
+            }
             const std::optional<ContainerPlace> container =
                 size && size->arg_size() == 1
                     ? placeOf(size->getArgOperand(0), size->getModule()->getDataLayout())
@@ -1595,6 +1615,57 @@ namespace ctrace::concurrency::internal::analysis
                 return std::nullopt;
             return VectorTraversal{
                 .container = *container, .reads = {size, element}, .lastRead = size};
+        }
+
+        /// Whether the vector at `container` holds exactly `size` threads once the loop inserting
+        /// them is over: this function builds it empty, and inserts into it with one call alone,
+        /// in a counted loop of `size` rounds, outside any other loop, without an early exit. The
+        /// call runs once in every round, and a round it throws in does not go on.
+        bool holdsExactly(const ContainerPlace& container, std::int64_t size,
+                          const llvm::Function& function, const llvm::LoopInfo& loops,
+                          const llvm::DominatorTree& dominators)
+        {
+            const llvm::DataLayout& layout = function.getParent()->getDataLayout();
+            const llvm::CallBase* insertion = nullptr;
+            unsigned builds = 0;
+            bool builtEmpty = false;
+            for (const llvm::BasicBlock& block : function)
+                for (const llvm::Instruction& instruction : block)
+                {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (call == nullptr || call->arg_empty() ||
+                        placeOf(call->getArgOperand(0), layout) != container)
+                        continue;
+                    if (vectorMethod(*call, "vector"))
+                    {
+                        ++builds;
+                        builtEmpty = call->arg_size() == 1;
+                    }
+                    else if (vectorMethod(*call, "push_back") ||
+                             vectorMethod(*call, "emplace_back"))
+                    {
+                        if (insertion != nullptr)
+                            return false;
+                        insertion = call;
+                    }
+                }
+            if (builds != 1 || !builtEmpty || insertion == nullptr)
+                return false;
+            const llvm::Loop* loop = loops.getLoopFor(insertion->getParent());
+            if (loop == nullptr || loop->getParentLoop() != nullptr ||
+                loop->getLoopLatch() == nullptr || !noEarlyNormalExit(*loop) ||
+                !dominators.dominates(insertion, loop->getLoopLatch()->getTerminator()))
+                return false;
+            if (const auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(insertion);
+                invoke != nullptr &&
+                llvm::isPotentiallyReachable(invoke->getUnwindDest(), loop->getHeader(), nullptr,
+                                             &dominators, &loops))
+                return false;
+            const std::optional<CountedLoop> rounds = countedLoop(*loop, dominators);
+            const auto* begin = rounds ? llvm::dyn_cast<llvm::ConstantInt>(rounds->begin) : nullptr;
+            const auto* end = rounds ? llvm::dyn_cast<llvm::ConstantInt>(rounds->end) : nullptr;
+            return begin != nullptr && end != nullptr &&
+                   end->getSExtValue() - begin->getSExtValue() == size;
         }
 
         /// Where the thread `create` started has been joined, `insertion` having moved it into a
@@ -1622,7 +1693,9 @@ namespace ctrace::concurrency::internal::analysis
                 wholeVectorJoin(join, *loop, dominators);
             const llvm::CallBase* element = joinedDereference(join);
             if (!traversal || traversal->container != *container || element == nullptr ||
-                !servesOnly(*element, {join.call}))
+                !servesOnly(*element, {join.call}) ||
+                (traversal->size && !holdsExactly(*container, *traversal->size,
+                                                  *insertion.getFunction(), loops, dominators)))
                 return std::nullopt;
 
             // The edge the loop's test exits by: a break entering its block too, having skipped
