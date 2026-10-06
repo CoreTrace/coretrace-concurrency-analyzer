@@ -538,14 +538,59 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
+        /// Where a vector lies in this function's frame: the local object holding it, and its
+        /// offset in that object. A vector that is itself a local lies at offset 0; a vector
+        /// member of a local object, at the member's offset.
+        struct ContainerPlace
+        {
+            const llvm::AllocaInst* object = nullptr;
+            std::int64_t offset = 0;
+
+            friend bool operator==(const ContainerPlace&, const ContainerPlace&) = default;
+        };
+
+        /// The place `value` points to, through casts, constant offsets and locals stored once.
+        /// Nothing when an offset is not constant, or the object is not a local.
+        std::optional<ContainerPlace> placeOf(const llvm::Value* value,
+                                              const llvm::DataLayout& layout)
+        {
+            std::int64_t offset = 0;
+            llvm::SmallPtrSet<const llvm::Value*, 16> seen;
+            while (value != nullptr && seen.insert(value).second)
+            {
+                value = value->stripPointerCasts();
+                if (const auto* local = llvm::dyn_cast<llvm::AllocaInst>(value))
+                    return ContainerPlace{.object = local, .offset = offset};
+                if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(value))
+                {
+                    llvm::APInt step(layout.getIndexTypeSizeInBits(gep->getType()), 0);
+                    if (!gep->accumulateConstantOffset(layout, step))
+                        return std::nullopt;
+                    offset += step.getSExtValue();
+                    value = gep->getPointerOperand();
+                }
+                else if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(value))
+                {
+                    const auto* store = uniqueStore(load->getPointerOperand());
+                    if (store == nullptr)
+                        return std::nullopt;
+                    value = store->getValueOperand();
+                }
+                else
+                    return std::nullopt;
+            }
+            return std::nullopt;
+        }
+
         /// Where a loop reads one end of the vector range it traverses: the store setting its
         /// iterator from the vector's `begin()` or `end()`, once and before the loop, that read,
-        /// and the vector.
+        /// and the vector, as a value and as a place.
         struct RangeEnd
         {
             const llvm::StoreInst* store = nullptr;
             const llvm::CallBase* read = nullptr;
             const llvm::Value* container = nullptr;
+            ContainerPlace place;
         };
 
         std::optional<RangeEnd> vectorRangeEnd(const llvm::Value* iterator, const llvm::Loop& loop,
@@ -570,7 +615,11 @@ namespace ctrace::concurrency::internal::analysis
                             !dominators.dominates(store, loop.getHeader()->getTerminator()) ||
                             result)
                             return std::nullopt;
-                        result = RangeEnd{store, call, object(call->getArgOperand(0))};
+                        const std::optional<ContainerPlace> place =
+                            placeOf(call->getArgOperand(0), call->getModule()->getDataLayout());
+                        if (!place)
+                            return std::nullopt;
+                        result = RangeEnd{store, call, object(call->getArgOperand(0)), *place};
                     }
             if (!result || !result->container)
                 return std::nullopt;
@@ -632,7 +681,7 @@ namespace ctrace::concurrency::internal::analysis
                 return std::nullopt;
             const std::optional<RangeEnd> end =
                 vectorRangeEnd(compare->getArgOperand(1), loop, "end", dominators);
-            if (!end || end->container != begin->container)
+            if (!end || end->place != begin->place)
                 return std::nullopt;
             unsigned increments = 0;
             for (const auto& block : *loop.getHeader()->getParent())
@@ -653,12 +702,13 @@ namespace ctrace::concurrency::internal::analysis
             return std::pair{*begin, *end};
         }
 
-        /// Whether `access` reads the element of `container` at the index `count` runs over.
-        bool accessesInductionElement(const llvm::CallBase& access, const llvm::Value* container,
+        /// Whether `access` reads the element of the vector at `container` at the index `count`
+        /// runs over.
+        bool accessesInductionElement(const llvm::CallBase& access, const ContainerPlace& container,
                                       const CountedLoop& count)
         {
             if (access.arg_size() != 2 || !vectorMethod(access, "operator[]") ||
-                object(access.getArgOperand(0)) != container)
+                placeOf(access.getArgOperand(0), access.getModule()->getDataLayout()) != container)
                 return false;
             const auto* index =
                 llvm::dyn_cast<llvm::LoadInst>(stripIntegerCasts(access.getArgOperand(1)));
@@ -674,8 +724,9 @@ namespace ctrace::concurrency::internal::analysis
             if (!access || access->arg_empty() || !zero || !zero->isZero())
                 return false;
             const llvm::Value* container = object(access->getArgOperand(0));
-            if (!llvm::isa_and_nonnull<llvm::AllocaInst>(container) ||
-                !accessesInductionElement(*access, container, count))
+            const auto* local = llvm::dyn_cast_or_null<llvm::AllocaInst>(container);
+            if (local == nullptr ||
+                !accessesInductionElement(*access, ContainerPlace{.object = local}, count))
                 return false;
             const auto range = wholeRangeJoin(join, second, dominators);
             if (!range || range->first.container != container)
@@ -1361,33 +1412,142 @@ namespace ctrace::concurrency::internal::analysis
             return uses;
         }
 
-        /// Whether the local vector `container` is only built, reserved, appended to and destroyed,
-        /// and read by `reads` alone: nothing may take a thread out of it, nor join, detach or
-        /// move one. It is used as `this` only. Any use `later` accepts is left free: it can only
-        /// run once every thread the proof covers has been joined.
-        bool onlyAppendedAndReadBy(const llvm::Value& container,
-                                   llvm::ArrayRef<const llvm::Instruction*> reads,
-                                   llvm::function_ref<bool(const llvm::Instruction&)> later)
+        /// How many calls deep the code an object is handed to is read.
+        constexpr unsigned kMaxCalleeDepth = 4;
+
+        /// Whether `function` is a member of `std::vector`: what it does to its vector is known by
+        /// its name, never read from its body.
+        bool memberOfStdVector(const llvm::Function& function)
         {
-            for (const CopyUse& use : usersThroughLocals(container))
+            if (!function.getName().contains("vector"))
+                return false;
+            const std::optional<DemangledName> name = demangleFunction(function.getName());
+            return name.has_value() && isStdClass(name->context, "vector");
+        }
+
+        /// The uses a vector may have: as `this` of a member of `std::vector` that `methods`
+        /// names, or of one of `reads`.
+        struct VectorUses
+        {
+            llvm::ArrayRef<std::string_view> methods;
+            llvm::ArrayRef<const llvm::Instruction*> reads;
+
+            bool operator()(const CopyUse& use) const
             {
-                const auto* instruction = llvm::dyn_cast<llvm::Instruction>(use.user);
-                if (instruction != nullptr && later(*instruction))
-                    continue;
                 const auto* call = llvm::dyn_cast<llvm::CallBase>(use.user);
                 if (call == nullptr)
                     return false;
                 if (llvm::isa<llvm::IntrinsicInst>(call))
-                    continue;
+                    return true;
                 for (unsigned index = 1; index < call->arg_size(); ++index)
                     if (call->getArgOperand(index) == use.copy)
                         return false;
-                if (!vectorMethod(*call, "vector") && !vectorMethod(*call, "reserve") &&
-                    !vectorMethod(*call, "push_back") && !vectorMethod(*call, "emplace_back") &&
-                    !vectorMethod(*call, "~vector") && !llvm::is_contained(reads, call))
+                for (const std::string_view method : methods)
+                    if (vectorMethod(*call, method))
+                        return true;
+                return llvm::is_contained(reads, call);
+            }
+        };
+
+        constexpr std::string_view kBuildingMethods[] = {"vector", "~vector"};
+        constexpr std::string_view kAppendingMethods[] = {"vector", "reserve", "push_back",
+                                                          "emplace_back", "~vector"};
+
+        bool never(const llvm::Instruction&)
+        {
+            return false;
+        }
+
+        /// Whether the vector at `container` is only built and destroyed by the code a pointer
+        /// `pointer` to its object reaches, `pointer` lying at `offset` in that object: another
+        /// member's own uses are free, and a constructor, destructor or other function the
+        /// object is handed to is read for what it does to the vector in turn. At the vector
+        /// itself, `atVector` judges each use. Anything else may reach it, and refuses.
+        bool usesOnlyAsAllowed(const llvm::Value& pointer, std::int64_t offset,
+                               const ContainerPlace& container, const llvm::DataLayout& layout,
+                               llvm::function_ref<bool(const CopyUse&)> atVector,
+                               llvm::function_ref<bool(const llvm::Instruction&)> later,
+                               unsigned depth)
+        {
+            for (const CopyUse& use : usersThroughLocals(pointer))
+            {
+                const auto* instruction = llvm::dyn_cast<llvm::Instruction>(use.user);
+                if (instruction != nullptr && later(*instruction))
+                    continue;
+                if (const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(use.user);
+                    gep != nullptr && gep->getPointerOperand() == use.copy)
+                {
+                    llvm::APInt step(layout.getIndexTypeSizeInBits(gep->getType()), 0);
+                    if (!gep->accumulateConstantOffset(layout, step))
+                        return false;
+                    const std::int64_t start = offset + step.getSExtValue();
+                    const llvm::Type* member = gep->getResultElementType();
+                    // A member that does not hold the vector's first byte does not hold it.
+                    if (member->isSized() &&
+                        (container.offset < start ||
+                         container.offset >=
+                             start + static_cast<std::int64_t>(
+                                         layout.getTypeAllocSize(const_cast<llvm::Type*>(member))
+                                             .getFixedValue())))
+                        continue;
+                    if (!usesOnlyAsAllowed(*gep, start, container, layout, atVector, later, depth))
+                        return false;
+                    continue;
+                }
+                // Handing the object back to the caller, which reads the call's result in turn.
+                if (llvm::isa<llvm::ReturnInst>(use.user))
+                    continue;
+                // At the vector's own address, a call to one of its members uses the vector; any
+                // other function may be handed the object holding it, and is read below.
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(use.user);
+                const llvm::Function* callee =
+                    call != nullptr ? call->getCalledFunction() : nullptr;
+                if (offset == container.offset &&
+                    (callee == nullptr || callee->isDeclaration() ||
+                     llvm::isa<llvm::IntrinsicInst>(call) || memberOfStdVector(*callee)))
+                {
+                    if (!atVector(use))
+                        return false;
+                    continue;
+                }
+                // Marking the object's lifetime or its debug location leaves it unchanged.
+                if (const auto* intrinsic = llvm::dyn_cast_or_null<llvm::IntrinsicInst>(call);
+                    intrinsic != nullptr && (intrinsic->isLifetimeStartOrEnd() ||
+                                             llvm::isa<llvm::DbgInfoIntrinsic>(intrinsic)))
+                    continue;
+                if (callee == nullptr || callee->isDeclaration() || depth == 0)
+                    return false;
+                for (unsigned index = 0; index < call->arg_size(); ++index)
+                {
+                    if (call->getArgOperand(index) != use.copy)
+                        continue;
+                    if (index >= callee->arg_size() ||
+                        !usesOnlyAsAllowed(*callee->getArg(index), offset, container, layout,
+                                           VectorUses{.methods = kBuildingMethods}, never,
+                                           depth - 1))
+                        return false;
+                }
+                // The callee may hand the object back, as a constructor returning `this` does.
+                if (call->getType()->isPointerTy() &&
+                    !usesOnlyAsAllowed(*call, offset, container, layout, atVector, later, depth))
                     return false;
             }
             return true;
+        }
+
+        /// Whether the vector of `container` is only built, reserved, appended to and destroyed,
+        /// and read by `reads` alone: nothing may take a thread out of it, nor join, detach or
+        /// move one. It is used as `this` only. Code its object is handed to may only build or
+        /// destroy it. Any use `later` accepts is left free: it can only run once every thread
+        /// the proof covers has been joined.
+        bool onlyAppendedAndReadBy(const ContainerPlace& container,
+                                   llvm::ArrayRef<const llvm::Instruction*> reads,
+                                   llvm::function_ref<bool(const llvm::Instruction&)> later,
+                                   const llvm::DataLayout& layout)
+        {
+            return usesOnlyAsAllowed(*container.object, 0, container, layout,
+                                     VectorUses{.methods = kAppendingMethods, .reads = reads},
+                                     later, kMaxCalleeDepth);
         }
 
         /// Whether the element `element` reads serves `uses` alone, through the locals it is kept
@@ -1407,7 +1567,7 @@ namespace ctrace::concurrency::internal::analysis
         /// joined must be in the vector.
         struct VectorTraversal
         {
-            const llvm::Value* container = nullptr;
+            ContainerPlace container;
             std::vector<const llvm::Instruction*> reads;
             const llvm::Instruction* lastRead = nullptr;
         };
@@ -1419,20 +1579,22 @@ namespace ctrace::concurrency::internal::analysis
                                                        const llvm::DominatorTree& dominators)
         {
             if (const auto range = wholeRangeJoin(join, loop, dominators))
-                return VectorTraversal{.container = range->first.container,
+                return VectorTraversal{.container = range->first.place,
                                        .reads = {range->first.read, range->second.read},
                                        .lastRead = range->second.store};
             const std::optional<CountedLoop> count = countedLoop(loop, dominators);
             const auto* zero = count ? llvm::dyn_cast<llvm::ConstantInt>(count->begin) : nullptr;
             const auto* size = count ? llvm::dyn_cast<llvm::CallBase>(count->end) : nullptr;
             const llvm::CallBase* element = joinedDereference(join);
-            if (!zero || !zero->isZero() || !size || size->arg_size() != 1 ||
-                !vectorMethod(*size, "size") || !element ||
-                !accessesInductionElement(*element, object(size->getArgOperand(0)), *count))
+            const std::optional<ContainerPlace> container =
+                size && size->arg_size() == 1
+                    ? placeOf(size->getArgOperand(0), size->getModule()->getDataLayout())
+                    : std::nullopt;
+            if (!zero || !zero->isZero() || !container || !vectorMethod(*size, "size") ||
+                !element || !accessesInductionElement(*element, *container, *count))
                 return std::nullopt;
-            return VectorTraversal{.container = object(size->getArgOperand(0)),
-                                   .reads = {size, element},
-                                   .lastRead = size};
+            return VectorTraversal{
+                .container = *container, .reads = {size, element}, .lastRead = size};
         }
 
         /// Where the thread `create` started has been joined, `insertion` having moved it into a
@@ -1449,16 +1611,17 @@ namespace ctrace::concurrency::internal::analysis
                                                              const llvm::LoopInfo& loops,
                                                              const llvm::DominatorTree& dominators)
         {
-            const llvm::Value* container = object(insertion.getArgOperand(0));
+            const std::optional<ContainerPlace> container =
+                placeOf(insertion.getArgOperand(0), insertion.getModule()->getDataLayout());
             const llvm::Loop* loop = loops.getLoopFor(join.call->getParent());
-            if (!llvm::isa_and_nonnull<llvm::AllocaInst>(container) || loop == nullptr ||
-                loop->getLoopLatch() == nullptr || !join.success.has_value() ||
+            if (!container || loop == nullptr || loop->getLoopLatch() == nullptr ||
+                !join.success.has_value() ||
                 !join.success->covers(*loop->getLoopLatch()->getTerminator(), dominators))
                 return std::nullopt;
             const std::optional<VectorTraversal> traversal =
                 wholeVectorJoin(join, *loop, dominators);
             const llvm::CallBase* element = joinedDereference(join);
-            if (!traversal || traversal->container != container || element == nullptr ||
+            if (!traversal || traversal->container != *container || element == nullptr ||
                 !servesOnly(*element, {join.call}))
                 return std::nullopt;
 
@@ -1475,7 +1638,8 @@ namespace ctrace::concurrency::internal::analysis
             { return exit.covers(use, dominators); };
             if (mayFollow(*traversal->lastRead, insertion) ||
                 !passesThrough(create, insertion, *traversal->lastRead) ||
-                !onlyAppendedAndReadBy(*container, traversal->reads, pastExit))
+                !onlyAppendedAndReadBy(*container, traversal->reads, pastExit,
+                                       insertion.getModule()->getDataLayout()))
                 return std::nullopt;
             return exit;
         }
