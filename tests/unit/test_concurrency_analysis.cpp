@@ -3039,6 +3039,62 @@ namespace
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_joined_through_back_no_fp.cpp",
+             .intent = "joining back() ends the only thread moved into the vector",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_joined_through_front_no_fp.cpp",
+             .intent = "joining front() ends the only thread moved into the vector",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_back_joined_after_second_race.cpp",
+             .intent = "back() joins the idle second thread moved in, not the first",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_front_joined_after_second_race.cpp",
+             .intent = "front() joins the idle first thread moved in, not the second",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_written_before_back_join_race.cpp",
+             .intent = "main's write before joining back() races with its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_swapped_out_before_back_join_race.cpp",
+             .intent = "a thread swapped out of back() is not the one its join ends",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_back_join_failure_caught_race.cpp",
+             .intent = "going on past a failed join of back() leaves its thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_front_of_moved_in_vector_joined_race.cpp",
+             .intent = "front() of a vector built from another is not the thread moved in",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_back_kept_swapped_before_join_race.cpp",
+             .intent = "the element back() reads, swapped before its join, ends another thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_back_insertion_failure_caught_race.cpp",
+             .intent = "a push_back that throws leaves back() on the thread moved in before",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_thread_emplaced_temporary_joined_no_fp.cpp",
              .intent = "the loop joining a vector ends the thread emplace_back moved into it",
              .requiresCxx20 = true},
