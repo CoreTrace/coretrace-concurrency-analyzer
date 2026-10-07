@@ -1312,28 +1312,6 @@ namespace ctrace::concurrency::internal::analysis
             return completion;
         }
 
-        /// Whether `later` may run after `earlier` on some path.
-        bool mayFollow(const llvm::Instruction& earlier, const llvm::Instruction& later)
-        {
-            if (earlier.getParent() == later.getParent() && earlier.comesBefore(&later))
-                return true;
-            llvm::SmallPtrSet<const llvm::BasicBlock*, 32> visited;
-            std::vector<const llvm::BasicBlock*> pending(llvm::succ_begin(earlier.getParent()),
-                                                         llvm::succ_end(earlier.getParent()));
-            while (!pending.empty())
-            {
-                const llvm::BasicBlock* block = pending.back();
-                pending.pop_back();
-                if (block == later.getParent())
-                    return true;
-                if (!visited.insert(block).second)
-                    continue;
-                for (const auto* successor : llvm::successors(block))
-                    pending.push_back(successor);
-            }
-            return false;
-        }
-
         /// Whether every path from `start` to `target` goes past `through` first. Along an invoke's
         /// unwind edge, `through` has not gone past: the call did not complete.
         bool passesThrough(const llvm::Instruction& start, const llvm::Instruction& through,
@@ -1700,8 +1678,10 @@ namespace ctrace::concurrency::internal::analysis
 
             // The edge the loop's test exits by: a break entering its block too, having skipped
             // rounds, leaves that block uncovered. A use of the vector past it finds every thread
-            // joined; were the loop to run again, it would join only what `insertion`, which cannot
-            // follow the loop's read, did not add.
+            // joined. A thread `insertion` adds is read by the loop before its test can exit:
+            // every path from the insertion to that test goes past the loop's last read first, as
+            // in a later round of a loop around both, where a new thread is inserted and joined
+            // anew.
             const JoinSuccess exit{
                 .branch = loop->getHeader(),
                 .successor = llvm::cast<llvm::BranchInst>(loop->getHeader()->getTerminator())
@@ -1709,7 +1689,8 @@ namespace ctrace::concurrency::internal::analysis
             };
             auto pastExit = [&](const llvm::Instruction& use)
             { return exit.covers(use, dominators); };
-            if (mayFollow(*traversal->lastRead, insertion) ||
+            if (!passesThrough(insertion, *traversal->lastRead,
+                               *loop->getHeader()->getTerminator()) ||
                 !passesThrough(create, insertion, *traversal->lastRead) ||
                 !onlyAppendedAndReadBy(*container, traversal->reads, pastExit,
                                        insertion.getModule()->getDataLayout()))
