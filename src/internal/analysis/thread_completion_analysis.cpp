@@ -2076,12 +2076,10 @@ namespace ctrace::concurrency::internal::analysis
                                                           const llvm::DominatorTree& dominators)
         {
             const JoinSuccess returned{.after = &call};
+            const ContainerPlace& container = handOff.container;
             auto free = [&](const llvm::Instruction& use)
-            {
-                return returned.covers(use, dominators) ||
-                       joinsVector(use, handOff.container, joining);
-            };
-            if (!onlyAppendedAndReadBy(handOff.container, handOff.reads, free,
+            { return returned.covers(use, dominators) || joinsVector(use, container, joining); };
+            if (!onlyAppendedAndReadBy(container, handOff.reads, free,
                                        call.getModule()->getDataLayout()))
                 return std::nullopt;
             return returned;
