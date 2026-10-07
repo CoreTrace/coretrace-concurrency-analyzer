@@ -1049,6 +1049,14 @@ namespace ctrace::concurrency::internal::analysis
                     for (const llvm::Instruction* restart : startSites(function, *handle))
                         kills.restarts.insert(restart);
                 }
+                // A call proven to leave its threads in a vector this function joins ends them
+                // there, as a start proven so does.
+                if (const auto* call = llvm::dyn_cast_or_null<llvm::CallBase>(start))
+                {
+                    if (const auto completion = completions_.find(call);
+                        completion != completions_.end() && completion->second.ended.has_value())
+                        kills.always.add(*completion->second.ended);
+                }
                 if (start != nullptr)
                     cutCorrelatedEdges(function, *start, kills.always);
                 return reaches_.emplace(key, flood(function, start, kills)).first->second;
