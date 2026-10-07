@@ -3474,6 +3474,53 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a std::list or std::deque of std::thread joined through it ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_list_threads_joined_no_fp.cpp",
+             .intent = "the range-for joining a list ends the threads moved into it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_deque_threads_joined_no_fp.cpp",
+             .intent = "the range-for joining a deque ends the threads moved into it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_deque_threads_joined_by_index_no_fp.cpp",
+             .intent = "a loop below a deque's size ends the threads moved into it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_list_thread_joined_through_back_no_fp.cpp",
+             .intent = "joining a list's back() ends the only thread moved into it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_list_threads_written_before_join_race.cpp",
+             .intent = "main's write before the list is joined races with its threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_deque_threads_written_before_join_race.cpp",
+             .intent = "main's write before the deque is joined races with its threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_deque_thread_pushed_front_then_front_joined_race.cpp",
+             .intent = "front() joins the thread pushed to the front, not the one before",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_list_thread_swapped_out_before_join_race.cpp",
+             .intent = "a thread swapped out of the list before its join still runs",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_list_thread_popped_before_join_race.cpp",
+             .intent = "a thread moved out of the list and popped still runs",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a std::thread move-assigned into an array slot and joined through it (#162) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_array_move_assigned_joined_no_fp.cpp",
