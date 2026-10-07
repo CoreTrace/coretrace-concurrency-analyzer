@@ -656,26 +656,28 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
-        /// The two ends of the vector range `loop` reads to join each element, when it traverses
-        /// the whole range: an iterator from `begin()` to `end()`, both read before the first
-        /// round, advanced by one `++` a round, and serving only the join, through `*` or `->`,
-        /// and the loop's test.
-        std::optional<std::pair<RangeEnd, RangeEnd>>
-        wholeRangeJoin(const JoinSite& join, const llvm::Loop& loop,
-                       const llvm::DominatorTree& dominators)
+        /// The iterator a loop advances to join each element, and the value it is compared with to
+        /// stop: both as objects the loop reads.
+        struct TraversedRange
+        {
+            const llvm::Value* iterator = nullptr;
+            const llvm::Value* end = nullptr;
+        };
+
+        /// How `loop` walks a range to join each element: an iterator advanced by one `++` a
+        /// round, serving only the join, through `*` or `->`, and the loop's test, which leaves the
+        /// loop once the iterator equals the end.
+        std::optional<TraversedRange> traversedRange(const JoinSite& join, const llvm::Loop& loop,
+                                                     const llvm::DominatorTree& dominators)
         {
             const auto* dereference = joinedDereference(join);
             if (!dereference || dereference->arg_size() != 1 || !dereferencesIterator(*dereference))
                 return std::nullopt;
             const llvm::Value* iterator = object(dereference->getArgOperand(0));
-            const std::optional<RangeEnd> begin =
-                vectorRangeEnd(iterator, loop, "begin", dominators);
-            if (!begin)
-                return std::nullopt;
             const auto* branch =
                 llvm::dyn_cast<llvm::BranchInst>(loop.getHeader()->getTerminator());
-            if (!branch || !branch->isConditional() || !loop.contains(branch->getSuccessor(0)) ||
-                loop.contains(branch->getSuccessor(1)))
+            if (!iterator || !branch || !branch->isConditional() ||
+                !loop.contains(branch->getSuccessor(0)) || loop.contains(branch->getSuccessor(1)))
                 return std::nullopt;
             const llvm::Value* condition = branch->getCondition();
             bool inverted = false;
@@ -692,10 +694,6 @@ namespace ctrace::concurrency::internal::analysis
                 !iteratorMethod(*compare, inverted ? "==" : "!=") ||
                 object(compare->getArgOperand(0)) != iterator)
                 return std::nullopt;
-            const std::optional<RangeEnd> end =
-                vectorRangeEnd(compare->getArgOperand(1), loop, "end", dominators);
-            if (!end || end->place != begin->place)
-                return std::nullopt;
             unsigned increments = 0;
             for (const auto& block : *loop.getHeader()->getParent())
                 for (const auto& instruction : block)
@@ -711,6 +709,24 @@ namespace ctrace::concurrency::internal::analysis
                         return std::nullopt;
                 }
             if (increments != 1)
+                return std::nullopt;
+            return TraversedRange{.iterator = iterator, .end = compare->getArgOperand(1)};
+        }
+
+        /// The two ends of the vector range `loop` reads to join each element, when it traverses
+        /// the whole range: an iterator from `begin()` to `end()`, both read before the first
+        /// round, walked as `traversedRange` checks it.
+        std::optional<std::pair<RangeEnd, RangeEnd>>
+        wholeRangeJoin(const JoinSite& join, const llvm::Loop& loop,
+                       const llvm::DominatorTree& dominators)
+        {
+            const std::optional<TraversedRange> range = traversedRange(join, loop, dominators);
+            if (!range)
+                return std::nullopt;
+            const std::optional<RangeEnd> begin =
+                vectorRangeEnd(range->iterator, loop, "begin", dominators);
+            const std::optional<RangeEnd> end = vectorRangeEnd(range->end, loop, "end", dominators);
+            if (!begin || !end || end->place != begin->place)
                 return std::nullopt;
             return std::pair{*begin, *end};
         }
@@ -1660,6 +1676,31 @@ namespace ctrace::concurrency::internal::analysis
                    end->getSExtValue() - begin->getSExtValue() == size;
         }
 
+        /// The loop `join` stands in when each round goes on only past the join's success, and the
+        /// element it joins serves the join alone.
+        const llvm::Loop* joiningLoop(const JoinSite& join, const llvm::LoopInfo& loops,
+                                      const llvm::DominatorTree& dominators)
+        {
+            const llvm::Loop* loop = loops.getLoopFor(join.call->getParent());
+            const llvm::CallBase* element = joinedDereference(join);
+            if (loop == nullptr || loop->getLoopLatch() == nullptr || !join.success.has_value() ||
+                !join.success->covers(*loop->getLoopLatch()->getTerminator(), dominators) ||
+                element == nullptr || !servesOnly(*element, {join.call}))
+                return nullptr;
+            return loop;
+        }
+
+        /// The edge `loop`'s test exits by: a break entering its block too, having skipped rounds,
+        /// leaves that block uncovered.
+        JoinSuccess loopExit(const llvm::Loop& loop)
+        {
+            return JoinSuccess{
+                .branch = loop.getHeader(),
+                .successor = llvm::cast<llvm::BranchInst>(loop.getHeader()->getTerminator())
+                                 ->getSuccessor(1),
+            };
+        }
+
         /// How a loop joins every thread of a vector: how it traverses the vector, and the edge its
         /// test exits by, past which every thread the vector held when the loop last read it
         /// before starting has been joined.
@@ -1677,23 +1718,13 @@ namespace ctrace::concurrency::internal::analysis
                                                               const llvm::LoopInfo& loops,
                                                               const llvm::DominatorTree& dominators)
         {
-            const llvm::Loop* loop = loops.getLoopFor(join.call->getParent());
-            if (loop == nullptr || loop->getLoopLatch() == nullptr || !join.success.has_value() ||
-                !join.success->covers(*loop->getLoopLatch()->getTerminator(), dominators))
+            const llvm::Loop* loop = joiningLoop(join, loops, dominators);
+            std::optional<VectorTraversal> traversal =
+                loop != nullptr ? wholeVectorJoin(join, *loop, dominators) : std::nullopt;
+            if (!traversal)
                 return std::nullopt;
-            std::optional<VectorTraversal> traversal = wholeVectorJoin(join, *loop, dominators);
-            const llvm::CallBase* element = joinedDereference(join);
-            if (!traversal || element == nullptr || !servesOnly(*element, {join.call}))
-                return std::nullopt;
-
-            // The edge the loop's test exits by: a break entering its block too, having skipped
-            // rounds, leaves that block uncovered. A use of the vector past it finds every thread
-            // joined.
-            const JoinSuccess exit{
-                .branch = loop->getHeader(),
-                .successor = llvm::cast<llvm::BranchInst>(loop->getHeader()->getTerminator())
-                                 ->getSuccessor(1),
-            };
+            // A use of the vector past the loop's exit finds every thread joined.
+            const JoinSuccess exit = loopExit(*loop);
             auto pastExit = [&](const llvm::Instruction& use)
             { return exit.covers(use, dominators); };
             if (!onlyAppendedAndReadBy(traversal->container, traversal->reads, pastExit,
@@ -1806,41 +1837,161 @@ namespace ctrace::concurrency::internal::analysis
             friend bool operator==(const JoinedVector&, const JoinedVector&) = default;
         };
 
-        /// The vectors each function this module defines joins every thread of.
-        using VectorJoiningHelpers =
-            std::unordered_map<const llvm::Function*, std::vector<JoinedVector>>;
+        /// A range a function joins every thread of on every normal return: from the iterator its
+        /// parameter `first` holds to the one its parameter `last` holds.
+        struct JoinedRange
+        {
+            unsigned first = 0;
+            unsigned last = 0;
 
-        /// The vectors `call` hands to a function joining every thread of them, each through one
-        /// argument alone. Any other argument reaching the vector's object would let the function
-        /// take a thread out of it unseen; one whose place is unknown does not reach a local the
-        /// caller checks never escapes, nor holds at an offset it cannot follow.
+            friend bool operator==(const JoinedRange&, const JoinedRange&) = default;
+        };
+
+        /// What each function this module defines joins every thread of.
+        struct VectorJoiningHelpers
+        {
+            std::unordered_map<const llvm::Function*, std::vector<JoinedVector>> vectors;
+            std::unordered_map<const llvm::Function*, std::vector<JoinedRange>> ranges;
+        };
+
+        /// Whether `call` alone takes `value`, directly or once cast, as an iterator passed by value
+        /// is.
+        bool takenOnlyBy(const llvm::Value& value, const llvm::CallBase& call)
+        {
+            for (const llvm::User* user : value.users())
+            {
+                const auto* cast = llvm::dyn_cast<llvm::CastInst>(user);
+                if (user != &call && (cast == nullptr || !takenOnlyBy(*cast, call)))
+                    return false;
+            }
+            return true;
+        }
+
+        /// The one store into the iterator object `iterator`, through its zero-offset fields, when
+        /// nothing else changes or copies it. Its other uses are, with `passedTo`, loads whose value
+        /// that call alone takes, the iterator passed by value; without, the iterator's own `++`,
+        /// `*`, `->`, `==` and `!=`.
+        const llvm::StoreInst* soleStore(const llvm::Value& iterator,
+                                         const llvm::CallBase* passedTo)
+        {
+            const llvm::StoreInst* found = nullptr;
+            std::vector<const llvm::Value*> pointers{&iterator};
+            while (!pointers.empty())
+            {
+                const llvm::Value* pointer = pointers.back();
+                pointers.pop_back();
+                for (const llvm::User* user : pointer->users())
+                {
+                    const auto* gep = llvm::dyn_cast<llvm::GEPOperator>(user);
+                    const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                    const auto* load = llvm::dyn_cast<llvm::LoadInst>(user);
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+                    if (gep != nullptr && gep->hasAllZeroIndices())
+                        pointers.push_back(gep);
+                    else if (store != nullptr && store->getPointerOperand() == pointer &&
+                             found == nullptr)
+                        found = store;
+                    else if (load != nullptr && passedTo != nullptr &&
+                             takenOnlyBy(*load, *passedTo))
+                        continue;
+                    else if (call == nullptr || passedTo != nullptr ||
+                             (!dereferencesIterator(*call) && !iteratorMethod(*call, "++") &&
+                              !iteratorMethod(*call, "==") && !iteratorMethod(*call, "!=")))
+                        return nullptr;
+                }
+            }
+            return found;
+        }
+
+        /// `value` once the casts between a pointer and the integer it is passed as are undone.
+        const llvm::Value* uncast(const llvm::Value* value)
+        {
+            while (const auto* cast = llvm::dyn_cast<llvm::CastInst>(value))
+                value = cast->getOperand(0);
+            return value;
+        }
+
+        /// The parameter whose value the iterator object `iterator` receives, once, before `loop`
+        /// starts, when the parameter serves that store alone and the iterator is only walked:
+        /// the range end is the caller's.
+        const llvm::Argument* storedParameter(const llvm::Value* iterator, const llvm::Loop& loop,
+                                              const llvm::DominatorTree& dominators)
+        {
+            iterator = object(iterator);
+            const llvm::StoreInst* store =
+                iterator != nullptr && llvm::isa<llvm::AllocaInst>(iterator)
+                    ? soleStore(*iterator, nullptr)
+                    : nullptr;
+            if (store == nullptr || !dominators.dominates(store, loop.getHeader()->getTerminator()))
+                return nullptr;
+            const llvm::Value* value = store->getValueOperand();
+            while (const auto* cast = llvm::dyn_cast<llvm::CastInst>(value))
+            {
+                if (!cast->hasOneUse())
+                    return nullptr;
+                value = cast->getOperand(0);
+            }
+            const auto* parameter = llvm::dyn_cast<llvm::Argument>(value);
+            return parameter != nullptr && parameter->hasOneUse() ? parameter : nullptr;
+        }
+
+        /// The range of its parameters a function joins every thread of, as `join` proves it: in a
+        /// loop, it walks an iterator from the one parameter to the other, as `traversedRange`
+        /// checks it, joining each element.
+        std::optional<std::pair<JoinedRange, JoinSuccess>>
+        parameterRangeJoin(const JoinSite& join, const llvm::LoopInfo& loops,
+                           const llvm::DominatorTree& dominators)
+        {
+            const llvm::Loop* loop = joiningLoop(join, loops, dominators);
+            const std::optional<TraversedRange> range =
+                loop != nullptr ? traversedRange(join, *loop, dominators) : std::nullopt;
+            if (!range)
+                return std::nullopt;
+            const llvm::Argument* first = storedParameter(range->iterator, *loop, dominators);
+            const llvm::Argument* last = storedParameter(range->end, *loop, dominators);
+            if (first == nullptr || last == nullptr || first == last)
+                return std::nullopt;
+            return std::pair{JoinedRange{.first = first->getArgNo(), .last = last->getArgNo()},
+                             loopExit(*loop)};
+        }
+
+        /// Whether no argument of `call` but the one at `kept` reaches `object`: through any other,
+        /// the function called could take a thread out of the vector unseen. One whose place is
+        /// unknown does not reach a local the caller checks never escapes, nor holds at an offset
+        /// it cannot follow.
+        bool reachedOnlyThrough(const llvm::CallBase& call, const llvm::Value& object,
+                                unsigned kept)
+        {
+            const llvm::DataLayout& layout = call.getModule()->getDataLayout();
+            for (unsigned index = 0; index < call.arg_size(); ++index)
+            {
+                const std::optional<ContainerPlace> other =
+                    framePlaceOf(call.getArgOperand(index), layout);
+                if (index != kept && other && other->object == &object)
+                    return false;
+            }
+            return true;
+        }
+
+        /// The vectors `call` hands, through one argument alone, to a function joining every
+        /// thread of them.
         std::vector<ContainerPlace> joinedVectorsOf(const llvm::CallBase& call,
                                                     const VectorJoiningHelpers& joining)
         {
             std::vector<ContainerPlace> joined;
-            const auto found = joining.find(call.getCalledFunction());
-            if (found == joining.end())
+            const auto found = joining.vectors.find(call.getCalledFunction());
+            if (found == joining.vectors.end())
                 return joined;
-            const llvm::DataLayout& layout = call.getModule()->getDataLayout();
             for (const JoinedVector& vector : found->second)
             {
                 if (vector.index >= call.arg_size())
                     continue;
-                std::optional<ContainerPlace> place =
-                    framePlaceOf(call.getArgOperand(vector.index), layout);
-                if (!place)
+                std::optional<ContainerPlace> place = framePlaceOf(
+                    call.getArgOperand(vector.index), call.getModule()->getDataLayout());
+                if (!place || !reachedOnlyThrough(call, *place->object, vector.index))
                     continue;
-                bool alone = true;
-                for (unsigned index = 0; index < call.arg_size(); ++index)
-                {
-                    const std::optional<ContainerPlace> other =
-                        framePlaceOf(call.getArgOperand(index), layout);
-                    if (index != vector.index && other && other->object == place->object)
-                        alone = false;
-                }
                 place->offset += vector.offset;
-                if (alone)
-                    joined.push_back(*place);
+                joined.push_back(*place);
             }
             return joined;
         }
@@ -1853,41 +2004,113 @@ namespace ctrace::concurrency::internal::analysis
                    llvm::is_contained(joinedVectorsOf(*call, joining), container);
         }
 
-        /// Where every thread the vector at `container` holds when `call` is made has been joined:
-        /// past the call's return, `call` handing the vector to a function joining every thread of
-        /// it. Nothing but such calls reads the vector before: no thread left it unjoined.
+        /// The end of a vector range `call` is handed as the argument `value`: an iterator read
+        /// from the vector's `method`, `begin()` or `end()`, stored once into a local the call
+        /// alone loads, before the call.
+        std::optional<RangeEnd> passedRangeEnd(const llvm::Value* value, std::string_view method,
+                                               const llvm::CallBase& call,
+                                               const llvm::DominatorTree& dominators)
+        {
+            const auto* load = llvm::dyn_cast<llvm::LoadInst>(uncast(value));
+            const llvm::Value* iterator =
+                load != nullptr ? object(load->getPointerOperand()) : nullptr;
+            const llvm::StoreInst* store =
+                iterator != nullptr && llvm::isa<llvm::AllocaInst>(iterator)
+                    ? soleStore(*iterator, &call)
+                    : nullptr;
+            const auto* read =
+                store != nullptr ? llvm::dyn_cast<llvm::CallBase>(uncast(store->getValueOperand()))
+                                 : nullptr;
+            if (read == nullptr || read->arg_empty() || !vectorMethod(*read, method) ||
+                !dominators.dominates(store, &call))
+                return std::nullopt;
+            const std::optional<ContainerPlace> place =
+                framePlaceOf(read->getArgOperand(0), call.getModule()->getDataLayout());
+            if (!place)
+                return std::nullopt;
+            return RangeEnd{store, read, object(read->getArgOperand(0)), *place};
+        }
+
+        /// A vector a call hands over to a function joining every thread of it, and the calls
+        /// reading it for that: none when the call hands the vector itself, `begin()` and `end()`
+        /// when it hands its whole range.
+        struct HandOff
+        {
+            ContainerPlace container;
+            std::vector<const llvm::Instruction*> reads;
+        };
+
+        std::vector<HandOff> handOffsOf(const llvm::CallBase& call,
+                                        const VectorJoiningHelpers& joining,
+                                        const llvm::DominatorTree& dominators)
+        {
+            std::vector<HandOff> handOffs;
+            for (const ContainerPlace& container : joinedVectorsOf(call, joining))
+                handOffs.push_back(HandOff{.container = container});
+            const auto found = joining.ranges.find(call.getCalledFunction());
+            if (found == joining.ranges.end())
+                return handOffs;
+            for (const JoinedRange& range : found->second)
+            {
+                if (range.first >= call.arg_size() || range.last >= call.arg_size())
+                    continue;
+                const std::optional<RangeEnd> begin =
+                    passedRangeEnd(call.getArgOperand(range.first), "begin", call, dominators);
+                const std::optional<RangeEnd> end =
+                    passedRangeEnd(call.getArgOperand(range.last), "end", call, dominators);
+                // Handing the vector itself along with its range is a use of it the caller's
+                // check refuses: unlike a call handing the vector over, this one is not left free.
+                if (begin && end && begin->place == end->place)
+                    handOffs.push_back(
+                        HandOff{.container = begin->place, .reads = {begin->read, end->read}});
+            }
+            return handOffs;
+        }
+
+        /// Where every thread the vector `handOff` names holds when `call` reads it has been joined:
+        /// past the call's return. Nothing but those reads and calls handing the vector itself to a
+        /// function joining it reads the vector before: no thread left it unjoined.
         std::optional<JoinSuccess> handedVectorCompletion(const llvm::CallBase& call,
-                                                          const ContainerPlace& container,
+                                                          const HandOff& handOff,
                                                           const VectorJoiningHelpers& joining,
                                                           const llvm::DominatorTree& dominators)
         {
-            if (!joinsVector(call, container, joining))
-                return std::nullopt;
             const JoinSuccess returned{.after = &call};
             auto free = [&](const llvm::Instruction& use)
-            { return returned.covers(use, dominators) || joinsVector(use, container, joining); };
-            if (!onlyAppendedAndReadBy(container, {}, free, call.getModule()->getDataLayout()))
+            {
+                return returned.covers(use, dominators) ||
+                       joinsVector(use, handOff.container, joining);
+            };
+            if (!onlyAppendedAndReadBy(handOff.container, handOff.reads, free,
+                                       call.getModule()->getDataLayout()))
                 return std::nullopt;
             return returned;
         }
 
-        /// Where the thread `create` started has been joined, `insertion` having moved it into a
-        /// vector `call` hands to a function joining every thread of it: past the call's return.
-        /// Every path from `create` to the call goes past `insertion`, and `create` may not run
-        /// once the call is made: every thread it starts is in the vector each time the call hands
-        /// it over. `insertion` running again past the call could only move in the emptied local.
+        /// Where the thread `create` started has been joined, `insertion` having moved it into the
+        /// vector `call` hands over as `handOff`: past the call's return. Every path from `create`
+        /// to the call, and to each of its reads, goes past `insertion`, which may not run between
+        /// a read and the call; `create` may not run once the call is made: every thread it starts
+        /// is in the vector each time the call reads it. `insertion` running again past the call
+        /// could only move in the emptied local.
         std::optional<JoinSuccess> handedThreadsCompletion(const llvm::CallBase& create,
                                                            const llvm::CallBase& insertion,
                                                            const llvm::CallBase& call,
+                                                           const HandOff& handOff,
                                                            const VectorJoiningHelpers& joining,
                                                            const llvm::DominatorTree& dominators)
         {
             const std::optional<ContainerPlace> container =
                 placeOf(insertion.getArgOperand(0), insertion.getModule()->getDataLayout());
-            if (!container || llvm::isPotentiallyReachable(&call, &create, nullptr, &dominators) ||
+            if (container != handOff.container ||
+                llvm::isPotentiallyReachable(&call, &create, nullptr, &dominators) ||
                 !passesThrough(create, insertion, call))
                 return std::nullopt;
-            return handedVectorCompletion(call, *container, joining, dominators);
+            for (const llvm::Instruction* read : handOff.reads)
+                if (!passesThrough(create, insertion, *read) ||
+                    !passesThrough(insertion, *read, call))
+                    return std::nullopt;
+            return handedVectorCompletion(call, handOff, joining, dominators);
         }
 
         /// The call moving the thread `create` starts out of a local, when `create` starts it into
@@ -1999,7 +2222,7 @@ namespace ctrace::concurrency::internal::analysis
             if (parameter == nullptr ||
                 !completionCoversReturns(function.getEntryBlock().front(), completion))
                 return false;
-            std::vector<JoinedVector>& joined = joining[&function];
+            std::vector<JoinedVector>& joined = joining.vectors[&function];
             const JoinedVector vector{.index = parameter->getArgNo(), .offset = container.offset};
             if (llvm::is_contained(joined, vector))
                 return false;
@@ -2020,18 +2243,25 @@ namespace ctrace::concurrency::internal::analysis
             {
                 if (function.isDeclaration())
                     continue;
+                const llvm::Instruction& entry = function.getEntryBlock().front();
                 for (const JoinSite& join : joinSites(function, classifier, helpers))
                 {
-                    const std::optional<VectorCompletion> completion = wholeVectorCompletion(
-                        join, analyses.getLoopInfo(function), analyses.getDominatorTree(function));
+                    const llvm::LoopInfo& loops = analyses.getLoopInfo(function);
+                    const llvm::DominatorTree& dominators = analyses.getDominatorTree(function);
+                    const std::optional<VectorCompletion> completion =
+                        wholeVectorCompletion(join, loops, dominators);
                     // A loop below a constant joins the whole vector only if it holds that many
                     // threads, which the caller alone knows.
                     if (completion && !completion->traversal.size)
                         recordJoinedVector(joining, function, completion->traversal.container,
                                            completion->exit);
+                    const auto range = parameterRangeJoin(join, loops, dominators);
+                    if (range && completionCoversReturns(entry, range->second) &&
+                        !llvm::is_contained(joining.ranges[&function], range->first))
+                        joining.ranges[&function].push_back(range->first);
                 }
             }
-            bool changed = !joining.empty();
+            bool changed = !joining.vectors.empty() || !joining.ranges.empty();
             while (changed)
             {
                 changed = false;
@@ -2042,12 +2272,13 @@ namespace ctrace::concurrency::internal::analysis
                             const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
                             if (call == nullptr)
                                 continue;
-                            for (const ContainerPlace& container : joinedVectorsOf(*call, joining))
+                            const llvm::DominatorTree& dominators =
+                                analyses.getDominatorTree(function);
+                            for (const HandOff& handOff : handOffsOf(*call, joining, dominators))
                                 if (const std::optional<JoinSuccess> returned =
-                                        handedVectorCompletion(*call, container, joining,
-                                                               analyses.getDominatorTree(function)))
-                                    changed = recordJoinedVector(joining, function, container,
-                                                                 *returned) ||
+                                        handedVectorCompletion(*call, handOff, joining, dominators))
+                                    changed = recordJoinedVector(joining, function,
+                                                                 handOff.container, *returned) ||
                                               changed;
                         }
             }
@@ -2282,7 +2513,8 @@ namespace ctrace::concurrency::internal::analysis
             for (const llvm::BasicBlock& block : function)
                 for (const llvm::Instruction& instruction : block)
                     if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                        call != nullptr && joining.contains(call->getCalledFunction()))
+                        call != nullptr && (joining.vectors.contains(call->getCalledFunction()) ||
+                                            joining.ranges.contains(call->getCalledFunction())))
                         handOffs.push_back(call);
             if (joins.empty() && handOffs.empty())
                 continue;
@@ -2322,8 +2554,10 @@ namespace ctrace::concurrency::internal::analysis
                                                                         dominators));
                 }
                 for (const llvm::CallBase* call : handOffs)
-                    proven = proven || proves(handedThreadsCompletion(*create, *insertion, *call,
-                                                                      joining, dominators));
+                    for (const HandOff& handOff : handOffsOf(*call, joining, dominators))
+                        proven =
+                            proven || proves(handedThreadsCompletion(*create, *insertion, *call,
+                                                                     handOff, joining, dominators));
             }
             for (const auto* create : creates)
                 for (const JoinSite& join : joins)

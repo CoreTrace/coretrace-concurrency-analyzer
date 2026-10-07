@@ -3306,6 +3306,79 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a vector's whole range handed to a function joining each element of it ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_for_each_no_fp.cpp",
+             .intent = "std::for_each with a joining lambda over the whole vector ends its threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_range_template_no_fp.cpp",
+             .intent = "a template joining each element of the whole range it is handed ends them",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_helper_for_each_no_fp.cpp",
+             .intent = "a helper handing its vector's whole range to std::for_each ends its threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_written_before_for_each_join_race.cpp",
+             .intent = "main's write before std::for_each joins the threads races with them",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_over_first_only_race.cpp",
+             .intent = "std::for_each over the first element only leaves the second thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_for_each_over_other_vector_race.cpp",
+             .intent = "std::for_each over another vector ends none of this one's threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_for_each_over_empty_range_race.cpp",
+             .intent = "std::for_each from begin() to begin() joins none of the threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_join_failure_caught_race.cpp",
+             .intent = "a lambda going on past a failed join leaves its thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_range_template_skipping_first_race.cpp",
+             .intent = "a template stepping past the first element leaves its thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_range_template_returning_early_race.cpp",
+             .intent = "a template returning early on one path joins nothing there",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_swapped_through_iterator_copy_race.cpp",
+             .intent = "a template swapping a thread out through a copy of its iterator",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_swapped_through_begin_before_range_join_race.cpp",
+             .intent = "a thread swapped out through begin() before the range is joined",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_swapped_through_vector_handed_with_range_race.cpp",
+             .intent = "a function handed the vector with its range swaps a thread out",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a std::thread move-assigned into an array slot and joined through it (#162) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_array_move_assigned_joined_no_fp.cpp",
