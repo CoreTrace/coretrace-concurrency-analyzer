@@ -1717,6 +1717,71 @@ namespace ctrace::concurrency::internal::analysis
             return exit;
         }
 
+        /// Where the thread `create` started has been joined, `insertion` having moved it into a
+        /// vector, when `join` joins the element `back()` or `front()` reads and goes on only past
+        /// its join's success. That element is the thread `insertion` moved in:
+        /// - `back()`, the last element: every path from `insertion` to any insertion into the
+        ///   vector, itself in a later round included, reads the element first;
+        /// - `front()`, the first: this function builds the vector empty, every path from that
+        ///   build to any other insertion goes past `insertion` first, and `insertion` runs again
+        ///   only once the vector has been built again.
+        /// The thread is in the vector when the element is read, the element serves the join alone,
+        /// and nothing else reads the vector nor takes a thread out of it before the join.
+        std::optional<JoinSuccess> accessedElementCompletion(const llvm::CallBase& create,
+                                                             const llvm::CallBase& insertion,
+                                                             const JoinSite& join,
+                                                             const llvm::DominatorTree& dominators)
+        {
+            const llvm::DataLayout& layout = insertion.getModule()->getDataLayout();
+            const std::optional<ContainerPlace> container =
+                placeOf(insertion.getArgOperand(0), layout);
+            const llvm::CallBase* element = joinedDereference(join);
+            if (!container || !join.success.has_value() || element == nullptr ||
+                element->arg_size() != 1 ||
+                placeOf(element->getArgOperand(0), layout) != container ||
+                !servesOnly(*element, {join.call}) || !passesThrough(create, insertion, *element))
+                return std::nullopt;
+            const bool last = vectorMethod(*element, "back");
+            if (!last && !vectorMethod(*element, "front"))
+                return std::nullopt;
+
+            std::vector<const llvm::CallBase*> builds;
+            std::vector<const llvm::CallBase*> insertions;
+            for (const llvm::BasicBlock& block : *insertion.getFunction())
+                for (const llvm::Instruction& instruction : block)
+                {
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    if (call == nullptr || call->arg_empty() ||
+                        placeOf(call->getArgOperand(0), layout) != container)
+                        continue;
+                    if (vectorMethod(*call, "vector"))
+                        builds.push_back(call);
+                    else if (vectorMethod(*call, "push_back") ||
+                             vectorMethod(*call, "emplace_back"))
+                        insertions.push_back(call);
+                }
+            const bool builtEmptyOnce = builds.size() == 1 && builds.front()->arg_size() == 1;
+            if (!last && !builtEmptyOnce)
+                return std::nullopt;
+            for (const llvm::CallBase* other : insertions)
+            {
+                if (last && !passesThrough(insertion, *element, *other))
+                    return std::nullopt;
+                if (!last && other == &insertion &&
+                    !passesThrough(insertion, *builds.front(), insertion))
+                    return std::nullopt;
+                if (!last && other != &insertion &&
+                    !passesThrough(*builds.front(), insertion, *other))
+                    return std::nullopt;
+            }
+
+            auto pastJoin = [&](const llvm::Instruction& use)
+            { return join.success->covers(use, dominators); };
+            if (!onlyAppendedAndReadBy(*container, {element}, pastJoin, layout))
+                return std::nullopt;
+            return join.success;
+        }
+
         /// The call moving the thread `create` starts out of a local, when `create` starts it into
         /// a local only to be moved: a temporary, or a local handed over with `std::move`, which
         /// clang folds away. The call takes the local as its second operand, the value it moves.
@@ -2057,8 +2122,10 @@ namespace ctrace::concurrency::internal::analysis
                     continue;
                 for (const JoinSite& join : joins)
                 {
-                    const std::optional<JoinSuccess> ended =
+                    std::optional<JoinSuccess> ended =
                         insertedThreadsCompletion(*create, *insertion, join, loops, dominators);
+                    if (!ended)
+                        ended = accessedElementCompletion(*create, *insertion, join, dominators);
                     if (ended && completionCoversReturns(*create, *ended))
                     {
                         result.emplace(create, ThreadCompletion{.ended = ended});
