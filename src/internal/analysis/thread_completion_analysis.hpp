@@ -74,6 +74,8 @@ namespace ctrace::concurrency::internal::analysis
         std::optional<RoundJoin> roundJoin;
     };
 
+    /// Keyed by the spawn, or by a call to a function filling a vector with every thread it leaves
+    /// running: the proof then covers every thread that call leaves running in its caller.
     using ThreadCompletionMap = std::unordered_map<const llvm::CallBase*, ThreadCompletion>;
 
     /// A parameter a function joins on every normal return, by position. A `pthread_t` travels by

@@ -3379,6 +3379,101 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a vector filled by a function with every thread it leaves running ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_added_by_helper_joined_no_fp.cpp",
+             .intent = "the loop joining the vector ends the threads a helper moved into it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_returned_by_function_joined_no_fp.cpp",
+             .intent = "the loop joining a returned vector ends the threads its function started",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_added_through_nested_helper_joined_no_fp.cpp",
+             .intent = "the loop ends the threads a helper's helper moved into the vector",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_added_by_helper_joined_by_helper_no_fp.cpp",
+             .intent = "a helper joining the vector ends the threads another helper moved in",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_written_before_join_of_added_race.cpp",
+             .intent = "main's write before joining the threads a helper moved in races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_added_after_join_loop_race.cpp",
+             .intent = "a thread a helper moves in after the join loop still runs",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_helper_also_detaches_race.cpp",
+             .intent = "a helper detaching a thread besides those it moves in leaves it running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_helper_adds_to_other_vector_race.cpp",
+             .intent = "a helper filling another vector than the one joined leaves its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_helper_takes_thread_out_race.cpp",
+             .intent = "a helper swapping its thread out of the vector leaves it running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_added_by_helper_joined_below_constant_race.cpp",
+             .intent = "a join loop below a constant may miss threads a helper moved in",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_added_by_helper_front_joined_race.cpp",
+             .intent = "front() joins one of the threads a helper moved in, not the other",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_helper_detaches_on_one_path_race.cpp",
+             .intent = "a helper detaching its thread on one path leaves it out of the vector",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_helper_calls_detaching_starter_race.cpp",
+             .intent = "a helper calling a function that starts a detached thread leaves it",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_helper_fills_two_vectors_race.cpp",
+             .intent = "a helper filling two vectors leaves a thread in the one not joined",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_helper_moves_thread_out_race.cpp",
+             .intent = "a helper moving its thread back out of the vector leaves it running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_counted_and_added_joined_below_constant_race.cpp",
+             .intent = "a counted loop and a helper both fill the vector a constant bounds",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_added_then_taken_through_aliased_parameter_race.cpp",
+             .intent = "a thread added through one reference and taken through another",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a std::thread move-assigned into an array slot and joined through it (#162) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_array_move_assigned_joined_no_fp.cpp",
