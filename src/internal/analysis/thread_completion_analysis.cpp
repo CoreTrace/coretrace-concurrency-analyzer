@@ -2150,8 +2150,9 @@ namespace ctrace::concurrency::internal::analysis
                               const std::vector<JoinSuccess>& completions,
                               const llvm::Instruction* point)
     {
-        // A completion past an instruction cuts off what follows it, successors included; one
-        // past a branch cuts off that edge only.
+        // A completion past an instruction cuts off what follows it, successors included, but for
+        // an invoke's unwind edge: the call did not complete along it. One past a branch cuts off
+        // that edge only.
         llvm::SmallPtrSet<const llvm::BasicBlock*, 32> entered;
         std::vector<const llvm::BasicBlock*> pending;
         // Whether a path walking `block` from `first` reaches `point`, or a return when there is
@@ -2164,8 +2165,12 @@ namespace ctrace::concurrency::internal::analysis
                     return true;
                 for (const JoinSuccess& completion : completions)
                 {
-                    if (completion.after == &*instruction)
-                        return false;
+                    if (completion.after != &*instruction)
+                        continue;
+                    if (const auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(&*instruction);
+                        invoke != nullptr && entered.insert(invoke->getUnwindDest()).second)
+                        pending.push_back(invoke->getUnwindDest());
+                    return false;
                 }
             }
             if (point == nullptr && llvm::isa<llvm::ReturnInst>(block.getTerminator()))

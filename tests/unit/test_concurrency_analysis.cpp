@@ -3821,6 +3821,12 @@ namespace
                        "the two threads race with each other (#126)",
              .dataRace = 2,
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency-cxx20/"
+                     "cpp_thread_joined_by_helper_catching_failure_race.cpp",
+             .intent = "a helper returning past a failed join it caught has not ended the thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
 
             // --- compiler error path -------------------------------------------------------
             {.path = "tests/fixtures/concurrency/data-race/cpp_double_checked_locking.cpp",
