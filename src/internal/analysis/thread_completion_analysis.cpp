@@ -739,9 +739,34 @@ namespace ctrace::concurrency::internal::analysis
             const llvm::Value* end = nullptr;
         };
 
+        /// What a call handed the iterator a range walk advances, or the end it stops at, as its
+        /// argument `index` does to it: a comparison reads either, the iterator's own `*` and `->`
+        /// read it and its `++` steps it, and a member returning an iterator in place builds it.
+        /// Anything else may move it.
+        enum class RangeStep
+        {
+            Read,
+            Step,
+            Build,
+            Unknown,
+        };
+
+        RangeStep rangeStep(const llvm::CallBase& call, unsigned index, bool walked)
+        {
+            if (iteratorMethod(call, "==") || iteratorMethod(call, "!="))
+                return RangeStep::Read;
+            if (index == 0 && thisIndex(call) == 1)
+                return RangeStep::Build;
+            if (walked && index == 0 && dereferencesIterator(call))
+                return RangeStep::Read;
+            if (walked && index == 0 && iteratorMethod(call, "++"))
+                return RangeStep::Step;
+            return RangeStep::Unknown;
+        }
+
         /// How `loop` walks a range to join each element: an iterator advanced by one `++` a
         /// round, serving only the join, through `*` or `->`, and the loop's test, which leaves the
-        /// loop once the iterator equals the end.
+        /// loop once the iterator equals the end. Nothing else is handed the iterator or the end.
         std::optional<TraversedRange> traversedRange(const JoinSite& join, const llvm::Loop& loop,
                                                      const llvm::DominatorTree& dominators)
         {
@@ -770,28 +795,51 @@ namespace ctrace::concurrency::internal::analysis
                 !iteratorMethod(*compare, inverted ? "==" : "!=") ||
                 object(compare->getArgOperand(0)) != iterator)
                 return std::nullopt;
+            // Every call handed the iterator or the end, through any of its arguments, must be one
+            // of the walk's own steps: one moving either otherwise could skip elements.
+            const llvm::Value* end = object(compare->getArgOperand(1));
+            if (end == nullptr)
+                return std::nullopt;
             unsigned increments = 0;
             for (const auto& block : *loop.getHeader()->getParent())
                 for (const auto& instruction : block)
                 {
                     const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                    if (!call || call->arg_empty() || object(call->getArgOperand(0)) != iterator)
+                    if (call == nullptr)
                         continue;
-                    if (iteratorMethod(*call, "++") && loop.contains(call) &&
-                        dominators.dominates(call, loop.getLoopLatch()->getTerminator()))
+                    for (unsigned index = 0; index < call->arg_size(); ++index)
+                    {
+                        const llvm::Value* used = object(call->getArgOperand(index));
+                        if (used != iterator && used != end)
+                            continue;
+                        const RangeStep step = rangeStep(*call, index, used == iterator);
+                        if (step == RangeStep::Unknown)
+                            return std::nullopt;
+                        if (step != RangeStep::Step)
+                            continue;
+                        if (!loop.contains(call) ||
+                            !dominators.dominates(call, loop.getLoopLatch()->getTerminator()))
+                            return std::nullopt;
                         ++increments;
-                    else if (!dereferencesIterator(*call) && !iteratorMethod(*call, "==") &&
-                             !iteratorMethod(*call, "!=") && thisIndex(*call) != 1)
-                        return std::nullopt;
+                    }
                 }
             if (increments != 1)
                 return std::nullopt;
             return TraversedRange{.iterator = iterator, .end = compare->getArgOperand(1)};
         }
 
+        /// The members whose iterators bound a sequence's whole range, one way or the other.
+        struct WholeRange
+        {
+            std::string_view first;
+            std::string_view last;
+        };
+        constexpr WholeRange kWholeRanges[] = {{.first = "begin", .last = "end"},
+                                               {.first = "rbegin", .last = "rend"}};
+
         /// The two ends of the vector range `loop` reads to join each element, when it traverses
-        /// the whole range: an iterator from `begin()` to `end()`, both read before the first
-        /// round, walked as `traversedRange` checks it.
+        /// the whole range: an iterator from `begin()` to `end()`, or from `rbegin()` to `rend()`,
+        /// both read before the first round, walked as `traversedRange` checks it.
         std::optional<std::pair<RangeEnd, RangeEnd>>
         wholeRangeJoin(const JoinSite& join, const llvm::Loop& loop,
                        const llvm::DominatorTree& dominators)
@@ -799,12 +847,16 @@ namespace ctrace::concurrency::internal::analysis
             const std::optional<TraversedRange> range = traversedRange(join, loop, dominators);
             if (!range)
                 return std::nullopt;
-            const std::optional<RangeEnd> begin =
-                vectorRangeEnd(range->iterator, loop, "begin", dominators);
-            const std::optional<RangeEnd> end = vectorRangeEnd(range->end, loop, "end", dominators);
-            if (!begin || !end || end->place != begin->place)
-                return std::nullopt;
-            return std::pair{*begin, *end};
+            for (const WholeRange& whole : kWholeRanges)
+            {
+                const std::optional<RangeEnd> begin =
+                    vectorRangeEnd(range->iterator, loop, whole.first, dominators);
+                const std::optional<RangeEnd> end =
+                    vectorRangeEnd(range->end, loop, whole.last, dominators);
+                if (begin && end && end->place == begin->place)
+                    return std::pair{*begin, *end};
+            }
+            return std::nullopt;
         }
 
         /// Whether `access` reads the element of the vector at `container` at the index `count`
