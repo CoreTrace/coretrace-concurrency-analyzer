@@ -3627,6 +3627,14 @@ namespace
              .intent = "popping a member vector empty beside a sibling member ends its threads",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_popped_beside_resized_sibling_no_fp.cpp",
+             .intent = "resizing a sibling member to a count leaves the popped vector alone",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_popped_by_helper_beside_sibling_no_fp.cpp",
+             .intent = "a helper popping a member vector empty beside a sibling ends its threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_member_threads_written_before_pop_beside_sibling_race.cpp",
              .intent = "main's write before the member vector is popped empty races",
              .dataRace = 1,
@@ -3653,6 +3661,18 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_member_threads_swapped_with_sibling_race.cpp",
              .intent = "the vector swapping contents with a sibling hands its thread over",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_swapped_with_aliasing_parameter_race.cpp",
+             .intent = "a sibling swapping contents with an alias of the vector takes its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_swapped_with_unknown_pointer_race.cpp",
+             .intent = "a sibling swapping contents with an unknown pointer may take its thread",
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},

@@ -1717,15 +1717,37 @@ namespace ctrace::concurrency::internal::analysis
         constexpr PoppedEnd kPoppedEnds[] = {{.read = "back", .pop = "pop_back"},
                                              {.read = "front", .pop = "pop_front"}};
 
+        /// Whether every pointer argument of `call` but the one at `kept` is a local of the frame
+        /// `call` runs in, so that none can be a parameter, a global, another frame's local or an
+        /// unknown pointer holding an alias of another object.
+        bool othersAreLocals(const llvm::CallBase& call, unsigned kept,
+                             const llvm::DataLayout& layout)
+        {
+            for (unsigned index = 0; index < call.arg_size(); ++index)
+            {
+                const llvm::Value* argument = call.getArgOperand(index);
+                if (index == kept || !argument->getType()->isPointerTy())
+                    continue;
+                const std::optional<ContainerPlace> place = framePlaceOf(argument, layout);
+                const auto* local =
+                    place ? llvm::dyn_cast<llvm::AllocaInst>(place->object) : nullptr;
+                if (local == nullptr || local->getFunction() != call.getFunction())
+                    return false;
+            }
+            return true;
+        }
+
         /// Whether `call` is handed the object holding the vector at `container`, through any of
         /// its arguments, but as the sequence a standard sequence's member works on when that
-        /// sequence lies at another offset: two sequences of one object are distinct members, and
-        /// such a member reaches nothing beyond its own.
+        /// sequence lies at another offset and its other arguments are locals: two sequences of
+        /// one object are distinct members, and such a member reaches nothing beyond its own and
+        /// what it is handed, which a local proves is not an alias of the vector.
         bool handsObjectOf(const llvm::CallBase& call, const ContainerPlace& container)
         {
             const llvm::DataLayout& layout = call.getModule()->getDataLayout();
             const llvm::Function* callee = call.getCalledFunction();
-            const bool sequenceMember = callee != nullptr && memberOfSequence(*callee);
+            const bool sequenceMember = callee != nullptr && memberOfSequence(*callee) &&
+                                        othersAreLocals(call, thisIndex(call), layout);
             for (unsigned index = 0; index < call.arg_size(); ++index)
             {
                 const std::optional<ContainerPlace> place =
