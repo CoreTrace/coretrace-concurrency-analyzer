@@ -1718,15 +1718,23 @@ namespace ctrace::concurrency::internal::analysis
                                              {.read = "front", .pop = "pop_front"}};
 
         /// Whether `call` is handed the object holding the vector at `container`, through any of
-        /// its arguments.
+        /// its arguments, but as the sequence a standard sequence's member works on when that
+        /// sequence lies at another offset: two sequences of one object are distinct members, and
+        /// such a member reaches nothing beyond its own.
         bool handsObjectOf(const llvm::CallBase& call, const ContainerPlace& container)
         {
             const llvm::DataLayout& layout = call.getModule()->getDataLayout();
-            for (const llvm::Value* argument : call.args())
+            const llvm::Function* callee = call.getCalledFunction();
+            const bool sequenceMember = callee != nullptr && memberOfSequence(*callee);
+            for (unsigned index = 0; index < call.arg_size(); ++index)
             {
-                const std::optional<ContainerPlace> place = framePlaceOf(argument, layout);
-                if (place && place->object == container.object)
-                    return true;
+                const std::optional<ContainerPlace> place =
+                    framePlaceOf(call.getArgOperand(index), layout);
+                if (!place || place->object != container.object)
+                    continue;
+                if (sequenceMember && index == thisIndex(call) && place->offset != container.offset)
+                    continue;
+                return true;
             }
             return false;
         }
