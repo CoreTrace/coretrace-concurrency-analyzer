@@ -739,9 +739,34 @@ namespace ctrace::concurrency::internal::analysis
             const llvm::Value* end = nullptr;
         };
 
+        /// What a call handed the iterator a range walk advances, or the end it stops at, as its
+        /// argument `index` does to it: a comparison reads either, the iterator's own `*` and `->`
+        /// read it and its `++` steps it, and a member returning an iterator in place builds it.
+        /// Anything else may move it.
+        enum class RangeStep
+        {
+            Read,
+            Step,
+            Build,
+            Unknown,
+        };
+
+        RangeStep rangeStep(const llvm::CallBase& call, unsigned index, bool walked)
+        {
+            if (iteratorMethod(call, "==") || iteratorMethod(call, "!="))
+                return RangeStep::Read;
+            if (index == 0 && thisIndex(call) == 1)
+                return RangeStep::Build;
+            if (walked && index == 0 && dereferencesIterator(call))
+                return RangeStep::Read;
+            if (walked && index == 0 && iteratorMethod(call, "++"))
+                return RangeStep::Step;
+            return RangeStep::Unknown;
+        }
+
         /// How `loop` walks a range to join each element: an iterator advanced by one `++` a
         /// round, serving only the join, through `*` or `->`, and the loop's test, which leaves the
-        /// loop once the iterator equals the end.
+        /// loop once the iterator equals the end. Nothing else is handed the iterator or the end.
         std::optional<TraversedRange> traversedRange(const JoinSite& join, const llvm::Loop& loop,
                                                      const llvm::DominatorTree& dominators)
         {
@@ -770,19 +795,33 @@ namespace ctrace::concurrency::internal::analysis
                 !iteratorMethod(*compare, inverted ? "==" : "!=") ||
                 object(compare->getArgOperand(0)) != iterator)
                 return std::nullopt;
+            // Every call handed the iterator or the end, through any of its arguments, must be one
+            // of the walk's own steps: one moving either otherwise could skip elements.
+            const llvm::Value* end = object(compare->getArgOperand(1));
+            if (end == nullptr)
+                return std::nullopt;
             unsigned increments = 0;
             for (const auto& block : *loop.getHeader()->getParent())
                 for (const auto& instruction : block)
                 {
                     const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                    if (!call || call->arg_empty() || object(call->getArgOperand(0)) != iterator)
+                    if (call == nullptr)
                         continue;
-                    if (iteratorMethod(*call, "++") && loop.contains(call) &&
-                        dominators.dominates(call, loop.getLoopLatch()->getTerminator()))
+                    for (unsigned index = 0; index < call->arg_size(); ++index)
+                    {
+                        const llvm::Value* used = object(call->getArgOperand(index));
+                        if (used != iterator && used != end)
+                            continue;
+                        const RangeStep step = rangeStep(*call, index, used == iterator);
+                        if (step == RangeStep::Unknown)
+                            return std::nullopt;
+                        if (step != RangeStep::Step)
+                            continue;
+                        if (!loop.contains(call) ||
+                            !dominators.dominates(call, loop.getLoopLatch()->getTerminator()))
+                            return std::nullopt;
                         ++increments;
-                    else if (!dereferencesIterator(*call) && !iteratorMethod(*call, "==") &&
-                             !iteratorMethod(*call, "!=") && thisIndex(*call) != 1)
-                        return std::nullopt;
+                    }
                 }
             if (increments != 1)
                 return std::nullopt;
