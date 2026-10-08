@@ -3261,6 +3261,10 @@ namespace
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_helper_given_count_no_fp.cpp",
+             .intent = "a constant handed beside the vector is no alias of it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_threads_helper_join_failure_caught_race.cpp",
              .intent = "a helper going on past a failed join leaves its thread running",
              .dataRace = 1,
