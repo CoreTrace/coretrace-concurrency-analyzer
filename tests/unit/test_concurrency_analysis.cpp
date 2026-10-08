@@ -3521,6 +3521,57 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a sequence of std::thread joined from rbegin() to rend() ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_in_reverse_no_fp.cpp",
+             .intent = "a loop from rbegin() to rend() ends the threads of the vector",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_deque_threads_joined_in_reverse_no_fp.cpp",
+             .intent = "a loop from rbegin() to rend() ends the threads of the deque",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_written_before_reverse_join_race.cpp",
+             .intent = "main's write before the reverse join loop races with the threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_reverse_join_stopping_early_race.cpp",
+             .intent = "a reverse loop stopping before rend() leaves the first thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_reverse_join_over_other_vector_race.cpp",
+             .intent = "a reverse loop over another vector ends none of this one's threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_reverse_join_over_empty_range_race.cpp",
+             .intent = "a loop from rbegin() to rbegin() joins none of the threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_reverse_join_skipped_by_helper_race.cpp",
+             .intent = "a helper stepping the reverse loop's iterator skips a thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_join_skipped_by_helper_race.cpp",
+             .intent = "a helper stepping the loop's iterator skips a thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_join_end_moved_by_helper_race.cpp",
+             .intent = "a helper moving the loop's end back leaves the last thread unjoined",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a std::thread move-assigned into an array slot and joined through it (#162) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_array_move_assigned_joined_no_fp.cpp",
