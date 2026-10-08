@@ -3572,6 +3572,55 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a sequence of std::thread joined and popped until it is empty ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_and_popped_no_fp.cpp",
+             .intent = "joining back() and popping it until empty ends the vector's threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_list_threads_joined_and_popped_no_fp.cpp",
+             .intent = "joining back() and popping it until empty ends the list's threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_deque_threads_joined_and_popped_from_front_no_fp.cpp",
+             .intent = "joining front() and popping it until empty ends the deque's threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_written_before_pop_join_race.cpp",
+             .intent = "main's write before the loop popping the joined threads races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_pop_join_breaking_early_race.cpp",
+             .intent = "a popping loop breaking out before empty leaves a thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_pop_join_failure_caught_race.cpp",
+             .intent = "a popping loop going on past a failed join leaves its thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_pop_join_over_other_vector_race.cpp",
+             .intent = "a popping loop over another vector ends none of this one's threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_deque_threads_front_joined_back_popped_race.cpp",
+             .intent = "joining front() while popping back() leaves the back thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_popped_while_other_vector_not_empty_race.cpp",
+             .intent = "a loop testing another vector's empty() pops too few threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a std::thread move-assigned into an array slot and joined through it (#162) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_array_move_assigned_joined_no_fp.cpp",

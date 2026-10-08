@@ -1708,13 +1708,100 @@ namespace ctrace::concurrency::internal::analysis
             std::optional<std::int64_t> size;
         };
 
-        /// How `loop` traverses the whole vector `join` takes its elements from: an iterator from
-        /// `begin()` to `end()`, as `wholeRangeJoin` checks it, or an index from 0 below the
-        /// vector's `size()`, read before the loop or at each test, one more each round, or below
-        /// a constant the vector's size must then be.
+        /// The member a loop emptying a sequence reads an end through, and the one removing it.
+        struct PoppedEnd
+        {
+            std::string_view read;
+            std::string_view pop;
+        };
+        constexpr PoppedEnd kPoppedEnds[] = {{.read = "back", .pop = "pop_back"},
+                                             {.read = "front", .pop = "pop_front"}};
+
+        /// Whether `call` is handed the object holding the vector at `container`, through any of
+        /// its arguments.
+        bool handsObjectOf(const llvm::CallBase& call, const ContainerPlace& container)
+        {
+            const llvm::DataLayout& layout = call.getModule()->getDataLayout();
+            for (const llvm::Value* argument : call.args())
+            {
+                const std::optional<ContainerPlace> place = framePlaceOf(argument, layout);
+                if (place && place->object == container.object)
+                    return true;
+            }
+            return false;
+        }
+
+        /// How `loop` empties the vector `join` takes its elements from: its test leaves the loop
+        /// once `empty()` is true, and each round joins the element `back()` reads, then removes
+        /// it with `pop_back()` past the join's success, or `front()` and `pop_front()`. Nothing
+        /// else in the loop is handed the vector. At the test's exit, every thread the vector held
+        /// when the loop started was joined before it was removed.
+        std::optional<VectorTraversal> poppedUntilEmpty(const JoinSite& join,
+                                                        const llvm::Loop& loop,
+                                                        const llvm::DominatorTree& dominators)
+        {
+            const llvm::CallBase* element = joinedDereference(join);
+            const llvm::BasicBlock* test = loopTest(loop);
+            const llvm::BasicBlock* preheader = loop.getLoopPreheader();
+            const auto* branch =
+                test != nullptr ? llvm::dyn_cast<llvm::BranchInst>(test->getTerminator()) : nullptr;
+            if (element == nullptr || element->arg_size() != 1 || preheader == nullptr ||
+                branch == nullptr || !branch->isConditional() ||
+                !loop.contains(branch->getSuccessor(0)) || loop.contains(branch->getSuccessor(1)))
+                return std::nullopt;
+            const llvm::DataLayout& layout = element->getModule()->getDataLayout();
+            const std::optional<ContainerPlace> container =
+                framePlaceOf(element->getArgOperand(0), layout);
+            // The loop goes on while the vector is not empty.
+            const auto* negate = llvm::dyn_cast<llvm::BinaryOperator>(branch->getCondition());
+            const auto* one = negate != nullptr && negate->getOpcode() == llvm::Instruction::Xor
+                                  ? llvm::dyn_cast<llvm::ConstantInt>(negate->getOperand(1))
+                                  : nullptr;
+            const auto* empty = one != nullptr && one->isOne()
+                                    ? llvm::dyn_cast<llvm::CallBase>(negate->getOperand(0))
+                                    : nullptr;
+            if (!container || empty == nullptr || empty->arg_size() != 1 ||
+                !vectorMethod(*empty, "empty") ||
+                framePlaceOf(empty->getArgOperand(0), layout) != container)
+                return std::nullopt;
+            for (const PoppedEnd& end : kPoppedEnds)
+            {
+                if (!vectorMethod(*element, end.read))
+                    continue;
+                const llvm::CallBase* pop = nullptr;
+                for (const llvm::BasicBlock* block : loop.blocks())
+                    for (const llvm::Instruction& instruction : *block)
+                    {
+                        const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                        if (call == nullptr || call == empty || call == element ||
+                            !handsObjectOf(*call, *container))
+                            continue;
+                        if (pop != nullptr || call->arg_size() != 1 ||
+                            !vectorMethod(*call, end.pop) ||
+                            framePlaceOf(call->getArgOperand(0), layout) != container)
+                            return std::nullopt;
+                        pop = call;
+                    }
+                if (pop == nullptr || !join.success->covers(*pop, dominators) ||
+                    !dominators.dominates(pop, loop.getLoopLatch()->getTerminator()))
+                    return std::nullopt;
+                return VectorTraversal{.container = *container,
+                                       .reads = {empty, element, pop},
+                                       .lastRead = preheader->getTerminator()};
+            }
+            return std::nullopt;
+        }
+
+        /// How `loop` traverses the whole vector `join` takes its elements from: popping each until
+        /// it is empty, as `poppedUntilEmpty` checks it, an iterator from `begin()` to `end()`, as
+        /// `wholeRangeJoin` checks it, or an index from 0 below the vector's `size()`, read before
+        /// the loop or at each test, one more each round, or below a constant the vector's size must
+        /// then be.
         std::optional<VectorTraversal> wholeVectorJoin(const JoinSite& join, const llvm::Loop& loop,
                                                        const llvm::DominatorTree& dominators)
         {
+            if (std::optional<VectorTraversal> popped = poppedUntilEmpty(join, loop, dominators))
+                return popped;
             if (const auto range = wholeRangeJoin(join, loop, dominators))
                 return VectorTraversal{.container = range->first.place,
                                        .reads = {range->first.read, range->second.read},
