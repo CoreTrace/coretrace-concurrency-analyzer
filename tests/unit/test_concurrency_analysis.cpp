@@ -3677,6 +3677,24 @@ namespace
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_sibling_predicate_holding_alias_race.cpp",
+             .intent = "a predicate holding an alias of the vector may take its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_sibling_lambda_capturing_alias_race.cpp",
+             .intent = "a lambda capturing an alias of the vector may take its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_sibling_element_destroying_alias_race.cpp",
+             .intent = "a sibling element's destructor may take a thread from the vector",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_member_threads_moved_with_object_race.cpp",
              .intent = "moving the object holding the vector takes its thread out",
              .dataRace = 1,
