@@ -1879,18 +1879,21 @@ namespace ctrace::concurrency::internal::analysis
         };
 
         /// Whether no argument of `call` but the one at `kept` reaches `object`: through any other,
-        /// the function called could take a thread out of the vector unseen. One whose place is
-        /// unknown does not reach a local the caller checks never escapes, nor holds at an offset
-        /// it cannot follow.
+        /// the function called could take a thread out of the vector unseen. Each other argument
+        /// is a constant, or resolves to another object of the frame. One whose place is unknown
+        /// may be the vector itself, as the reference a function handed it returns, which the
+        /// caller's check that the vector never escapes follows up to this call.
         bool reachedOnlyThrough(const llvm::CallBase& call, const llvm::Value& object,
                                 unsigned kept)
         {
             const llvm::DataLayout& layout = call.getModule()->getDataLayout();
             for (unsigned index = 0; index < call.arg_size(); ++index)
             {
-                const std::optional<ContainerPlace> other =
-                    framePlaceOf(call.getArgOperand(index), layout);
-                if (index != kept && other && other->object == &object)
+                const llvm::Value* argument = call.getArgOperand(index);
+                if (index == kept || llvm::isa<llvm::ConstantData>(argument))
+                    continue;
+                const std::optional<ContainerPlace> other = framePlaceOf(argument, layout);
+                if (!other || other->object == &object)
                     return false;
             }
             return true;

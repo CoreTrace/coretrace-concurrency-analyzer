@@ -3249,6 +3249,22 @@ namespace
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_taken_out_through_returned_alias_race.cpp",
+             .intent = "a helper taking a thread out through a returned reference to the vector",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_popped_beside_returned_alias_race.cpp",
+             .intent = "a helper popping the vector empty detaches through a returned reference",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_helper_given_count_no_fp.cpp",
+             .intent = "a constant handed beside the vector is no alias of it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_threads_helper_join_failure_caught_race.cpp",
              .intent = "a helper going on past a failed join leaves its thread running",
              .dataRace = 1,
