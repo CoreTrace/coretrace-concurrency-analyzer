@@ -789,9 +789,18 @@ namespace ctrace::concurrency::internal::analysis
             return TraversedRange{.iterator = iterator, .end = compare->getArgOperand(1)};
         }
 
+        /// The members whose iterators bound a sequence's whole range, one way or the other.
+        struct WholeRange
+        {
+            std::string_view first;
+            std::string_view last;
+        };
+        constexpr WholeRange kWholeRanges[] = {{.first = "begin", .last = "end"},
+                                               {.first = "rbegin", .last = "rend"}};
+
         /// The two ends of the vector range `loop` reads to join each element, when it traverses
-        /// the whole range: an iterator from `begin()` to `end()`, both read before the first
-        /// round, walked as `traversedRange` checks it.
+        /// the whole range: an iterator from `begin()` to `end()`, or from `rbegin()` to `rend()`,
+        /// both read before the first round, walked as `traversedRange` checks it.
         std::optional<std::pair<RangeEnd, RangeEnd>>
         wholeRangeJoin(const JoinSite& join, const llvm::Loop& loop,
                        const llvm::DominatorTree& dominators)
@@ -799,12 +808,16 @@ namespace ctrace::concurrency::internal::analysis
             const std::optional<TraversedRange> range = traversedRange(join, loop, dominators);
             if (!range)
                 return std::nullopt;
-            const std::optional<RangeEnd> begin =
-                vectorRangeEnd(range->iterator, loop, "begin", dominators);
-            const std::optional<RangeEnd> end = vectorRangeEnd(range->end, loop, "end", dominators);
-            if (!begin || !end || end->place != begin->place)
-                return std::nullopt;
-            return std::pair{*begin, *end};
+            for (const WholeRange& whole : kWholeRanges)
+            {
+                const std::optional<RangeEnd> begin =
+                    vectorRangeEnd(range->iterator, loop, whole.first, dominators);
+                const std::optional<RangeEnd> end =
+                    vectorRangeEnd(range->end, loop, whole.last, dominators);
+                if (begin && end && end->place == begin->place)
+                    return std::pair{*begin, *end};
+            }
+            return std::nullopt;
         }
 
         /// Whether `access` reads the element of the vector at `container` at the index `count`
