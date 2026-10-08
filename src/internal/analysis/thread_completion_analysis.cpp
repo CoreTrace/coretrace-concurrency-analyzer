@@ -485,26 +485,69 @@ namespace ctrace::concurrency::internal::analysis
             return name;
         }
 
-        /// Whether `call` calls the member `method` of `std::vector`, read from the callee's scope
-        /// and name alone: a member returning `void`, such as `push_back`, or a member template,
-        /// such as `emplace_back` before C++17, has a demangled name starting with its return type.
+        /// The standard sequences the vector proofs read alike: each appends at its end with
+        /// `push_back` or `emplace_back` without moving an element out, and walks every element from
+        /// `begin()` to `end()`. Their members are known by name.
+        constexpr std::string_view kSequences[] = {"vector", "deque", "list"};
+
+        /// How `vectorMethod` names the constructor and the destructor of any of the sequences.
+        constexpr std::string_view kConstructor = "vector";
+        constexpr std::string_view kDestructor = "~vector";
+
+        /// The sequence `function` is a member of, if any. Only a mangled name holding the class's
+        /// own name can be one of its members; the check spares demangling every other function.
+        std::optional<std::string_view> sequenceOf(const llvm::Function& function)
+        {
+            const llvm::StringRef mangled = function.getName();
+            if (llvm::none_of(kSequences, [&](std::string_view sequence)
+                              { return mangled.contains(sequence); }))
+                return std::nullopt;
+            const std::optional<DemangledName> name = demangleFunction(mangled);
+            if (!name.has_value())
+                return std::nullopt;
+            for (const std::string_view sequence : kSequences)
+                if (isStdClass(name->context, sequence))
+                    return sequence;
+            return std::nullopt;
+        }
+
+        /// Whether `call` calls the member `method` of one of the sequences, read from the
+        /// callee's scope and name alone: a member returning `void`, such as `push_back`, or a
+        /// member template, such as `emplace_back` before C++17, has a demangled name starting with
+        /// its return type. `kConstructor` and `kDestructor` name the sequence's own.
         bool vectorMethod(const llvm::CallBase& call, std::string_view method)
         {
             const llvm::Function* callee = call.getCalledFunction();
-            // Only a mangled name holding the class's own name can be one of its members; the
-            // check spares demangling every other callee.
-            if (callee == nullptr || !callee->getName().contains("vector"))
+            const std::optional<std::string_view> sequence =
+                callee != nullptr ? sequenceOf(*callee) : std::nullopt;
+            if (!sequence)
                 return false;
             const std::optional<DemangledName> name = demangleFunction(callee->getName());
-            return name.has_value() && name->base == method && isStdClass(name->context, "vector");
+            if (method == kConstructor)
+                return name->base == *sequence;
+            if (method == kDestructor)
+                return name->base == "~" + std::string(*sequence);
+            return name->base == method;
         }
+
+        /// The iterators of the sequences, in libc++ and libstdc++.
+        constexpr std::string_view kSequenceIterators[] = {
+            "std::__1::__wrap_iter<",      "__gnu_cxx::__normal_iterator<",
+            "std::__1::__deque_iterator<", "std::_Deque_iterator<",
+            "std::__1::__list_iterator<",  "std::_List_iterator<"};
 
         bool iteratorMethod(const llvm::CallBase& call, std::string_view method)
         {
             const std::string name = calledName(call);
-            return (name.find("std::__1::__wrap_iter<") != std::string::npos ||
-                    name.find("__gnu_cxx::__normal_iterator<") != std::string::npos) &&
+            return llvm::any_of(kSequenceIterators, [&](std::string_view iterator)
+                                { return name.find(iterator) != std::string::npos; }) &&
                    name.find("operator" + std::string(method)) != std::string::npos;
+        }
+
+        /// The argument a member call is made on: past the slot a returned object is built in.
+        unsigned thisIndex(const llvm::CallBase& call)
+        {
+            return call.paramHasAttr(0, llvm::Attribute::StructRet) ? 1 : 0;
         }
 
         /// Whether `call` reads the element an iterator designates: `*it`, or `it->` before a
@@ -602,7 +645,8 @@ namespace ctrace::concurrency::internal::analysis
         /// and the vector, as a value and as a place.
         struct RangeEnd
         {
-            const llvm::StoreInst* store = nullptr;
+            /// The store setting the iterator, or the call building it in place.
+            const llvm::Instruction* store = nullptr;
             const llvm::CallBase* read = nullptr;
             const llvm::Value* container = nullptr;
             ContainerPlace place;
@@ -618,24 +662,36 @@ namespace ctrace::concurrency::internal::analysis
             std::optional<RangeEnd> result;
             for (const auto& block : *loop.getHeader()->getParent())
                 for (const auto& instruction : block)
-                    if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction))
+                {
+                    const auto* store = llvm::dyn_cast<llvm::StoreInst>(&instruction);
+                    const auto* built = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    const llvm::CallBase* call = nullptr;
+                    if (store != nullptr && object(store->getPointerOperand()) == iterator)
                     {
-                        if (object(store->getPointerOperand()) != iterator)
-                            continue;
                         const llvm::Value* stored = store->getValueOperand();
                         while (const auto* cast = llvm::dyn_cast<llvm::CastInst>(stored))
                             stored = cast->getOperand(0);
-                        const auto* call = llvm::dyn_cast<llvm::CallBase>(stored);
-                        if (!call || call->arg_empty() || !vectorMethod(*call, method) ||
-                            !dominators.dominates(store, loop.getHeader()->getTerminator()) ||
-                            result)
+                        call = llvm::dyn_cast<llvm::CallBase>(stored);
+                        if (call == nullptr)
                             return std::nullopt;
-                        const std::optional<ContainerPlace> place = framePlaceOf(
-                            call->getArgOperand(0), call->getModule()->getDataLayout());
-                        if (!place)
-                            return std::nullopt;
-                        result = RangeEnd{store, call, object(call->getArgOperand(0)), *place};
                     }
+                    else if (built != nullptr && thisIndex(*built) == 1 &&
+                             object(built->getArgOperand(0)) == iterator)
+                        call = built;
+                    else
+                        continue;
+                    const unsigned self = thisIndex(*call);
+                    if (call->arg_size() <= self || !vectorMethod(*call, method) ||
+                        !dominators.dominates(&instruction, loop.getHeader()->getTerminator()) ||
+                        result)
+                        return std::nullopt;
+                    const std::optional<ContainerPlace> place =
+                        framePlaceOf(call->getArgOperand(self), call->getModule()->getDataLayout());
+                    if (!place)
+                        return std::nullopt;
+                    result =
+                        RangeEnd{&instruction, call, object(call->getArgOperand(self)), *place};
+                }
             if (!result || !result->container)
                 return std::nullopt;
             return result;
@@ -658,6 +714,23 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
+        /// The block holding `loop`'s test: its header, or, when the header ends in an invoked
+        /// comparison, as with an iterator whose comparison may throw, the block the comparison
+        /// returns to, entered from the header alone. A comparison that throws leaves the loop
+        /// without the test's exit.
+        const llvm::BasicBlock* loopTest(const llvm::Loop& loop)
+        {
+            const llvm::BasicBlock* header = loop.getHeader();
+            if (llvm::isa<llvm::BranchInst>(header->getTerminator()))
+                return header;
+            const auto* invoke = llvm::dyn_cast<llvm::InvokeInst>(header->getTerminator());
+            const llvm::BasicBlock* test = invoke != nullptr ? invoke->getNormalDest() : nullptr;
+            if (test == nullptr || !loop.contains(test) || test->getSinglePredecessor() != header ||
+                !llvm::isa<llvm::BranchInst>(test->getTerminator()))
+                return nullptr;
+            return test;
+        }
+
         /// The iterator a loop advances to join each element, and the value it is compared with to
         /// stop: both as objects the loop reads.
         struct TraversedRange
@@ -676,8 +749,9 @@ namespace ctrace::concurrency::internal::analysis
             if (!dereference || dereference->arg_size() != 1 || !dereferencesIterator(*dereference))
                 return std::nullopt;
             const llvm::Value* iterator = object(dereference->getArgOperand(0));
+            const llvm::BasicBlock* test = loopTest(loop);
             const auto* branch =
-                llvm::dyn_cast<llvm::BranchInst>(loop.getHeader()->getTerminator());
+                test != nullptr ? llvm::dyn_cast<llvm::BranchInst>(test->getTerminator()) : nullptr;
             if (!iterator || !branch || !branch->isConditional() ||
                 !loop.contains(branch->getSuccessor(0)) || loop.contains(branch->getSuccessor(1)))
                 return std::nullopt;
@@ -707,7 +781,7 @@ namespace ctrace::concurrency::internal::analysis
                         dominators.dominates(call, loop.getLoopLatch()->getTerminator()))
                         ++increments;
                     else if (!dereferencesIterator(*call) && !iteratorMethod(*call, "==") &&
-                             !iteratorMethod(*call, "!="))
+                             !iteratorMethod(*call, "!=") && thisIndex(*call) != 1)
                         return std::nullopt;
                 }
             if (increments != 1)
@@ -785,11 +859,11 @@ namespace ctrace::concurrency::internal::analysis
                                 return false;
                         if (object(call->getArgOperand(0)) != container)
                             continue;
-                        if (vectorMethod(*call, "vector") && call->arg_size() >= 2 &&
+                        if (vectorMethod(*call, kConstructor) && call->arg_size() >= 2 &&
                             invariantValue(call->getArgOperand(1)) == count.end &&
                             dominators.dominates(call, first.getHeader()->getTerminator()))
                             constructed = true;
-                        else if (vectorMethod(*call, "~vector"))
+                        else if (vectorMethod(*call, kDestructor))
                         {
                             if (dominators.dominates(call, join.call))
                                 return false;
@@ -1425,14 +1499,11 @@ namespace ctrace::concurrency::internal::analysis
         /// How many calls deep the code an object is handed to is read.
         constexpr unsigned kMaxCalleeDepth = 4;
 
-        /// Whether `function` is a member of `std::vector`: what it does to its vector is known by
-        /// its name, never read from its body.
-        bool memberOfStdVector(const llvm::Function& function)
+        /// Whether `function` is a member of one of the sequences: what it does to its sequence is
+        /// known by its name, never read from its body.
+        bool memberOfSequence(const llvm::Function& function)
         {
-            if (!function.getName().contains("vector"))
-                return false;
-            const std::optional<DemangledName> name = demangleFunction(function.getName());
-            return name.has_value() && isStdClass(name->context, "vector");
+            return sequenceOf(function).has_value();
         }
 
         /// The uses a vector may have: as `this` of a member of `std::vector` that `methods`
@@ -1449,8 +1520,8 @@ namespace ctrace::concurrency::internal::analysis
                     return false;
                 if (llvm::isa<llvm::IntrinsicInst>(call))
                     return true;
-                for (unsigned index = 1; index < call->arg_size(); ++index)
-                    if (call->getArgOperand(index) == use.copy)
+                for (unsigned index = 0; index < call->arg_size(); ++index)
+                    if (index != thisIndex(*call) && call->getArgOperand(index) == use.copy)
                         return false;
                 for (const std::string_view method : methods)
                     if (vectorMethod(*call, method))
@@ -1459,9 +1530,9 @@ namespace ctrace::concurrency::internal::analysis
             }
         };
 
-        constexpr std::string_view kBuildingMethods[] = {"vector", "~vector"};
-        constexpr std::string_view kAppendingMethods[] = {"vector", "reserve", "push_back",
-                                                          "emplace_back", "~vector"};
+        constexpr std::string_view kBuildingMethods[] = {kConstructor, kDestructor};
+        constexpr std::string_view kAppendingMethods[] = {kConstructor, "reserve", "push_back",
+                                                          "emplace_back", kDestructor};
 
         bool never(const llvm::Instruction&)
         {
@@ -1514,7 +1585,7 @@ namespace ctrace::concurrency::internal::analysis
                     call != nullptr ? call->getCalledFunction() : nullptr;
                 if (offset == container.offset &&
                     (callee == nullptr || callee->isDeclaration() ||
-                     llvm::isa<llvm::IntrinsicInst>(call) || memberOfStdVector(*callee)))
+                     llvm::isa<llvm::IntrinsicInst>(call) || memberOfSequence(*callee)))
                 {
                     if (!atVector(use))
                         return false;
@@ -1760,7 +1831,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (call == nullptr || call->arg_empty() ||
                         placeOf(call->getArgOperand(0), layout) != container)
                         continue;
-                    if (vectorMethod(*call, "vector"))
+                    if (vectorMethod(*call, kConstructor))
                     {
                         ++builds;
                         builtEmpty = call->arg_size() == 1;
@@ -1799,21 +1870,22 @@ namespace ctrace::concurrency::internal::analysis
         {
             const llvm::Loop* loop = loops.getLoopFor(join.call->getParent());
             const llvm::CallBase* element = joinedDereference(join);
-            if (loop == nullptr || loop->getLoopLatch() == nullptr || !join.success.has_value() ||
+            if (loop == nullptr || loop->getLoopLatch() == nullptr || loopTest(*loop) == nullptr ||
+                !join.success.has_value() ||
                 !join.success->covers(*loop->getLoopLatch()->getTerminator(), dominators) ||
                 element == nullptr || !servesOnly(*element, {join.call}))
                 return nullptr;
             return loop;
         }
 
-        /// The edge `loop`'s test exits by: a break entering its block too, having skipped rounds,
-        /// leaves that block uncovered.
+        /// The edge `loop`'s test exits by, for a loop with a test: a break entering its block too,
+        /// having skipped rounds, leaves that block uncovered.
         JoinSuccess loopExit(const llvm::Loop& loop)
         {
+            const llvm::BasicBlock* test = loopTest(loop);
             return JoinSuccess{
-                .branch = loop.getHeader(),
-                .successor = llvm::cast<llvm::BranchInst>(loop.getHeader()->getTerminator())
-                                 ->getSuccessor(1),
+                .branch = test,
+                .successor = llvm::cast<llvm::BranchInst>(test->getTerminator())->getSuccessor(1),
             };
         }
 
@@ -1934,7 +2006,7 @@ namespace ctrace::concurrency::internal::analysis
                     if (call == nullptr || call->arg_empty() ||
                         placeOf(call->getArgOperand(0), layout) != container)
                         continue;
-                    if (vectorMethod(*call, "vector"))
+                    if (vectorMethod(*call, kConstructor))
                         builds.push_back(call);
                     else if (vectorMethod(*call, "push_back") ||
                              vectorMethod(*call, "emplace_back"))
