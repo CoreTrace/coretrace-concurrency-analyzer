@@ -3637,6 +3637,85 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a member vector of std::thread popped empty beside sibling members (#190) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_popped_beside_sibling_no_fp.cpp",
+             .intent = "popping a member vector empty beside a sibling member ends its threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_popped_beside_resized_sibling_no_fp.cpp",
+             .intent = "resizing a sibling member to a count leaves the popped vector alone",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_popped_by_helper_beside_sibling_no_fp.cpp",
+             .intent = "a helper popping a member vector empty beside a sibling ends its threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_written_before_pop_beside_sibling_race.cpp",
+             .intent = "main's write before the member vector is popped empty races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_thread_taken_by_helper_of_object_race.cpp",
+             .intent = "a helper handed the whole object may take a thread out of the vector",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_sibling_of_same_type_filled_race.cpp",
+             .intent = "the threads moved into a sibling vector of threads still run",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_swapped_into_sibling_race.cpp",
+             .intent = "a sibling swapping contents with the vector takes its thread out",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_swapped_with_sibling_race.cpp",
+             .intent = "the vector swapping contents with a sibling hands its thread over",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_swapped_with_aliasing_parameter_race.cpp",
+             .intent = "a sibling swapping contents with an alias of the vector takes its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_swapped_with_unknown_pointer_race.cpp",
+             .intent = "a sibling swapping contents with an unknown pointer may take its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_sibling_predicate_holding_alias_race.cpp",
+             .intent = "a predicate holding an alias of the vector may take its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_sibling_lambda_capturing_alias_race.cpp",
+             .intent = "a lambda capturing an alias of the vector may take its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_sibling_element_destroying_alias_race.cpp",
+             .intent = "a sibling element's destructor may take a thread from the vector",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_member_threads_moved_with_object_race.cpp",
+             .intent = "moving the object holding the vector takes its thread out",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a std::thread move-assigned into an array slot and joined through it (#162) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_array_move_assigned_joined_no_fp.cpp",
