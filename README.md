@@ -1,467 +1,174 @@
-# coretrace-concurrency-analyzer
+<div align="center">
 
-CoreTrace concurrency analyzer for C and C++ source files compiled to in-memory LLVM IR.
+# CoreTrace Concurrency Analyzer
 
-The project follows the `coretrace-stack-analyzer` conventions:
-- CMake-based build with LLVM/Clang integration.
-- `coretrace-compiler` / `compilerlib` used as the compilation backend.
-- Public C++ API for compilation and analysis.
-- CLI wrapper for local analysis runs.
-- Consumer example in `extern-project/`.
+**Find data races, deadlocks and thread-lifetime bugs in C and C++ before they find you.**
 
-## Repository documents
+A static analyzer that compiles your code to LLVM IR and reasons about threads, locks,
+`fork` and signal handlers — no instrumentation, no test run, no flaky reproduction.
 
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
-- [AUTHORS.md](AUTHORS.md)
-- [CHANGELOG.md](CHANGELOG.md)
-- [LICENSE](LICENSE)
-- [SECURITY.md](SECURITY.md)
+[![cmake-ctest](https://github.com/CoreTrace/coretrace-concurrency-analyzer/actions/workflows/cmake-ctest.yml/badge.svg)](https://github.com/CoreTrace/coretrace-concurrency-analyzer/actions/workflows/cmake-ctest.yml)
+[![Release](https://img.shields.io/github/v/release/CoreTrace/coretrace-concurrency-analyzer?sort=semver)](https://github.com/CoreTrace/coretrace-concurrency-analyzer/releases)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
+[![LLVM 20](https://img.shields.io/badge/LLVM-20-262D3A?logo=llvm)](https://llvm.org)
+[![GitHub Action](https://img.shields.io/badge/GitHub%20Action-ready-2088FF?logo=githubactions&logoColor=white)](docs/github-action.md)
 
-## Current Scope
+[Quick start](#quick-start) · [Rules](#what-it-catches) · [CI](#in-ci) · [How it works](#how-it-works) · [Docs](#documentation)
 
-The repository no longer stops at IR compilation. It currently provides a single-translation-unit
-concurrency analysis pipeline on top of the generated `llvm::Module`.
+</div>
 
-Supported analysis rules. The name in the second column is what `--rules=` accepts.
+---
 
-| Rule | `--rules=` | Reports |
-| --- | --- | --- |
-| `DataRaceGlobal` | `data-race` | shared globals accessed concurrently with no common lock |
-| `MissingJoin` | `missing-join` | joinable thread handles left neither joined nor detached |
-| `DeadlockLockOrder` | `deadlock-lock-order` | lock-order inversions and self-deadlock |
-| `ConditionWaitWithoutPredicate` | `condition-wait` | a condition-variable wait that rechecks nothing when it wakes |
-| `ForkAfterThreadCreation` | `fork-after-thread` | a `fork` in a threaded program with no `exec` in the child |
-| `UnreapedChildProcess` | `unreaped-child` | a `fork` whose children are never collected |
-| `ThreadArgumentEscapesFrame` | `thread-arg-escape` | a thread given a pointer into the frame that created it |
-| `UnsafeSignalHandler` | `unsafe-signal-handler` | a signal handler reaching a call it may not make |
-| `WeakPublicationOrdering` | `weak-publication` | data published through an atomic flag with no release/acquire ordering |
-| `ThreadArgumentFreedEarly` | `thread-arg-freed` | memory handed to a thread and freed before the thread is joined |
-| `ThreadLocalOutlivesThread` | `thread-local-escape` | a thread-local reached through a pointer after its thread has ended |
+## See it in action
 
-What each of the newer rules establishes, and what it deliberately does not:
+```c
+int shared_counter = 0;
 
-- **`condition-wait`** — a wait may return without the condition holding: the standard permits a
-  spurious wake-up, and a broadcast wakes every waiter while only one may proceed. A bare wait
-  with no loop around it therefore reads waking up as proof. A helper cannot recheck a condition
-  it does not know, so the obligation to loop travels to its caller and keeps travelling until
-  some caller does loop; only the outermost function still carrying it is reported. *Not covered:*
-  a wait inside a loop that rechecks the wrong condition.
-- **`fork-after-thread`** — only the calling thread survives a `fork`, while the whole address
-  space is inherited: a mutex another thread held is copied locked with nobody left to unlock it.
-  An `exec` reachable from the forking function settles the question and suppresses the report.
-  *Not proven:* that the thread creation actually runs before the fork.
-- **`unreaped-child`** — a `fork` whose pid is never waited on leaves every finished child in the
-  process table. Handing `SIGCHLD` to `SIG_IGN` counts as reaping, and in a project analysis a
-  `wait` in any unit counts. *Not tracked:* which pid a given `wait` collects; `SA_NOCLDWAIT`
-  through `sigaction` is unrecognized.
-- **`thread-arg-escape`** — a thread argument outlives the call that passed it unless the creator
-  waits, so a pointer to a local dangles as soon as that function returns. *Covers*
-  `pthread_create`, and `std::thread` when an address of a local is stored in what it copies: a
-  lambda capturing by reference, a pointer or `std::ref` argument. A local passed by value is
-  copied into the thread and does not escape. *Not covered:* an address copied out of a pointer
-  variable (`int* p = &local; std::thread([p] {...})`), and `std::jthread`.
-- **`unsafe-signal-handler`** — a handler interrupts its own thread at an arbitrary instruction,
-  so allocating, printing or locking there re-enters a structure the interrupted code may have
-  left inconsistent. The unsafety travels back along direct calls to the handler. *Covers*
-  handlers installed through `signal` and `sigaction`.
-- **`thread-arg-freed`** — `thread-arg-escape`'s counterpart for memory the creator frees: a
-  `pthread_create` argument that the creator passes to `free` or `operator delete` before a join
-  of that thread, while the thread reads or writes through it. The freed pointer must be the one
-  handed over: the same value, or one pointer variable nothing reassigns in between. *Covers*
-  `pthread_create` only. *Not covered:* a free in another function, or through a copy of the
-  pointer.
-- **`thread-local-escape`** — a thread's thread-local objects end with the thread. A thread entry
-  that stores the address of one of its thread-locals in a global pointer leaves that pointer
-  dangling once every thread that runs the entry has been joined; a read or write through it
-  after those joins is reported. The pointer must receive nothing but that address (or null),
-  and the entry must only ever run as a thread, so the object is known to be gone. A thread-local
-  address read while its owner still runs is legal and not reported. Thread-local accesses on
-  their own are never shared state. *Covers* a store made by the entry itself, and a use in the
-  function that starts and joins those threads.
-- **`weak-publication`** (warning) — a thread writes data and then sets an atomic flag, and
-  another reads the data once it sees the flag set. Unless the store releases and the load
-  acquires, directly or through a fence, the reader may see the flag set and the data stale. The
-  same analysis lets `data-race` treat a release/acquire publication as ordering the accesses it
-  covers. *Covers* a flag with a single store of a constant, made once by a thread `main` starts
-  once, and a reader that branches on seeing that constant, for C11 atomics and `std::atomic` in
-  libc++ and libstdc++. *Not covered:* sequence locks (reads validated afterwards), store-load
-  (Dekker) ordering, ABA, and in a project analysis flags with external linkage.
+void* increment(void* arg) {
+    for (int i = 0; i < 10000; i++)
+        shared_counter++;              // two threads, no lock
+    return NULL;
+}
 
-Current implementation boundaries:
-- Whole-project analysis reads a `compile_commands.json`; seven kinds of fact cross the unit
-  boundary and nothing else does (see [docs/cross-tu-mode.md](docs/cross-tu-mode.md)).
-- Direct-call interprocedural propagation is supported for thread context, thread lifecycle, and
-  lock state.
-- A join need not be written in place: a function that joins the handle it is given on every
-  normal return — a `pthread_t` by value or a `std::thread` by reference, directly or through
-  another such function — counts as a join wherever it is called, for every rule that asks
-  whether a thread has ended. In a project analysis it may be defined in another unit.
-- `MissingJoin` supports both `pthread` and `std::thread`.
-- `DeadlockLockOrder` is intentionally conservative and does not yet model arbitrary `3+` lock
-  cycles across the whole program.
-- Shared state reached through a pointer — a field of an object on the heap or the stack — is not
-  tracked; only globals are. This is the single largest gap on idiomatic C++.
-- Thread entries reached through a pointer-to-member, as in `std::thread(&Class::method, obj)`,
-  are not resolved, so those methods are not seen as running in a thread.
-- Full LLVM alias-analysis coverage is not finished yet.
-- Sources are always compiled unoptimized: the analysis describes the program as written, and an
-  optimizer removes the very structure the rules read.
+int main(void) {
+    pthread_t t1, t2;
+    pthread_create(&t1, NULL, increment, NULL);
+    pthread_create(&t2, NULL, increment, NULL);
+    pthread_join(t1, NULL);
+    pthread_join(t2, NULL);
+}
+```
 
-## High-Level Architecture
+```text
+$ coretrace_concurrency_analyzer race.c --analyze
 
-The analyzer is intentionally layered so compilation concerns stay isolated from analysis concerns:
+Function: increment
+	severity: ERROR
+	ruleId: DataRaceGlobal
+	cwe: CWE-362
+	symbol: shared_counter
+	[!!!Error] unsynchronized concurrent access to global 'shared_counter'
+	     ↳ first access: read at race.c:10:23 in increment (thread entries: increment)
+	     ↳ conflicting access: write at race.c:10:23 in increment (thread entries: increment)
+	     ↳ possible conflict kinds: read/write, write/write
+	     ↳ no common recognized lock protects the conflicting accesses
+```
 
-- CLI / consumer layer: parse options, invoke compilation, render reports.
-- `InMemoryIRCompiler`: validate request, build compile commands, invoke the backend, load LLVM IR.
-- Analysis facts layer: build translation-unit facts from the `llvm::Module`.
-- Propagation layer: derive reusable interprocedural facts such as thread reachability, lifecycle,
-  and effective held locks at call sites.
-- Checker layer: run rule-specific analyzers on top of the shared facts.
-- Reporting layer: emit human, JSON, or SARIF diagnostics.
+The same report is available as **JSON** and **SARIF**, so it lands directly in GitHub Code Scanning.
 
-This separation is preferable to a monolithic checker because new rules can reuse the same facts and
-propagation passes without duplicating LLVM traversal logic.
+## Quick start
 
-## Backend Dependency
-
-The project intentionally depends on `compilerlib` (`coretrace-compiler`) as the compilation
-backend, but the dependency is isolated behind internal interfaces:
-
-- `InMemoryIRCompiler`: orchestration and error mapping.
-- `CompileCommandBuilder`: normalize and construct compile arguments.
-- `ICompilationBackend` / `CompilerLibBackend`: invoke `compilerlib`.
-- `IIRLoader` / `LLVMIRLoader`: parse `ll` or `bc` payloads into `llvm::Module`.
-
-`InMemoryIRCompiler` keeps a stable public `compile(...)` API and also supports dependency
-injection for architecture-level tests.
-
-## Releases
-
-Released versions are tagged `vX.Y.Z`. The version lives in `project(... VERSION ...)`
-in `CMakeLists.txt`, the binary reports it under `--version`, and the release workflow
-refuses a tag that disagrees with the tree.
-
-The published image carries the clang 20 the analyzer needs, so it needs nothing
-installed beyond a container runtime:
+**With Docker** — nothing to install but a container runtime:
 
 ```bash
 docker run --rm -v "$PWD:/work" \
   ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.7.1 file.c --analyze
 ```
 
-To build a specific release from source instead, consume the tag through CMake:
-
-```cmake
-FetchContent_Declare(
-  concurrency_analyzer
-  GIT_REPOSITORY https://github.com/CoreTrace/coretrace-concurrency-analyzer.git
-  GIT_TAG v0.7.1
-)
-```
-
-Cutting a release is pushing a tag. `.github/workflows/release.yml` then checks the
-tag against the tree, rebuilds and retests on Linux and macOS, publishes the image,
-and only then creates the GitHub release — so a release that exists is one that
-built and passed. Versions follow the Conventional Commits this repository already
-enforces; see [CHANGELOG.md](CHANGELOG.md).
-
-## Build (LLVM/Clang 20)
+**On a whole project** — reuse the compilation database your build already produces:
 
 ```bash
-cmake -S . -B build-llvm20 \
-  -DLLVM_DIR=/opt/homebrew/opt/llvm@20/lib/cmake/llvm \
-  -DClang_DIR=/opt/homebrew/opt/llvm@20/lib/cmake/clang \
-  -DCLANG_EXECUTABLE=/opt/homebrew/opt/llvm@20/bin/clang \
-  -DCLANG_RESOURCE_DIR=/opt/homebrew/opt/llvm@20/lib/clang/20
-
-cmake --build build-llvm20 -j4
+coretrace_concurrency_analyzer --compile-commands=build/compile_commands.json
 ```
 
-## CLI Usage
+**From source** (LLVM/Clang 20, CMake ≥ 3.21) — see [Building](#building).
 
-Compile only:
+## What it catches
 
-```bash
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --ir-format=ll
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --ir-format=bc
-```
+| Rule | `--rules=` | Catches |
+|---|---|---|
+| Data race | `data-race` | shared globals accessed concurrently with no common lock |
+| Lock-order deadlock | `deadlock-lock-order` | lock-order inversions and self-deadlock |
+| Missing join | `missing-join` | `pthread` / `std::thread` handles never joined nor detached |
+| Condition wait | `condition-wait` | a wait that does not recheck its predicate after waking |
+| Weak publication | `weak-publication` | data published through an atomic flag without release/acquire |
+| Thread arg escapes frame | `thread-arg-escape` | a thread handed a pointer into its creator's stack |
+| Thread arg freed early | `thread-arg-freed` | memory freed before the thread using it is joined |
+| Thread-local escape | `thread-local-escape` | a thread-local used after its thread has ended |
+| Fork after threads | `fork-after-thread` | `fork` in a threaded program with no `exec` in the child |
+| Unreaped child | `unreaped-child` | children that are never `wait`ed for |
+| Unsafe signal handler | `unsafe-signal-handler` | handlers reaching non async-signal-safe calls |
 
-Analyze with the default rule selection, which is every rule (the same as `--rules=all`):
+All rules run by default. Each one documents what it proves and what it deliberately
+does not in [docs/rules.md](docs/rules.md).
 
-```bash
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --format=human
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --format=json
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --format=sarif
-```
-
-Select one or more rules explicitly:
-
-```bash
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=data-race
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=missing-join
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=data-race,missing-join
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=condition-wait
-./build-llvm20/coretrace_concurrency_analyzer /tmp/sample.c --analyze --rules=all
-```
-
-Analyze a whole project instead of a single file, from the compilation database its build
-already produces. See [docs/cross-tu-mode.md](docs/cross-tu-mode.md) for what crosses the unit
-boundary and what does not:
-
-```bash
-./build-llvm20/coretrace_concurrency_analyzer --compile-commands=build/compile_commands.json
-```
-
-Supported CLI options:
-- `--ir-format=ll|bc`
-- `--compile-arg=<arg>` repeatable
-- `--instrument`
-- `--analyze`
-- `--rules=<comma-separated>|all` using the names in the table above
-- `--format=human|json|sarif`
-- `--verbose`
-- `--` to forward all trailing compiler args
-
-Notes:
-- `--analyze` enables all currently available rules by default.
-- `--rules=...` acts as an explicit rule filter.
-- `--rules` and `--format` require `--analyze`.
-
-## GitHub Action
-
-`action.yml` at the root of this repository runs the published container image,
-so a job starts in seconds rather than installing LLVM and building the
-analyzer.
-
-[docs/github-action.md](docs/github-action.md) carries the complete workflows,
-how to generate a compilation database on the runner, and what to do about a
-finding you believe is wrong. What follows is the short version.
+## In CI
 
 ```yaml
 permissions:
   contents: read
-  security-events: write   # only needed while upload-sarif is true
+  security-events: write   # for the Code Scanning upload
 
 steps:
   - uses: actions/checkout@v4
   - uses: CoreTrace/coretrace-concurrency-analyzer@v0
     with:
-      sources: src/worker.c src/pool.c
+      compile-commands: build/compile_commands.json
       fail-on: error
 ```
 
-Whole-project analysis takes a compilation database instead:
+The action runs the published image (it starts in seconds), uploads SARIF to Code Scanning,
+then fails the job if needed. Exit codes separate *“found something”* (`2`) from
+*“could not analyze”* (`1`), so a crashed tool never passes for a clean tree.
+Full guide: [docs/github-action.md](docs/github-action.md).
 
-```yaml
-  - uses: CoreTrace/coretrace-concurrency-analyzer@v0
-    with:
-      compile-commands: build/compile_commands.json
+## How it works
+
+```text
+C / C++ ──clang──▶ LLVM IR (in memory) ──▶ facts ──▶ interprocedural propagation ──▶ rules ──▶ text · JSON · SARIF
+                                            (threads, locks,   (thread reachability,
+                                             accesses, forks)   lifecycle, held locks)
 ```
 
-**Generate that database on the runner.** It records absolute paths and the
-toolchain that produced it, so one generated on a developer's macOS machine
-names an SDK the Linux container does not have, and every unit fails to
-compile. The action mounts the workspace at its own path precisely so a
-database made on the runner resolves unchanged inside the container.
+Sources are compiled unoptimized so the analysis sees the program as written. In project mode,
+seven kinds of facts cross translation-unit boundaries ([docs/cross-tu-mode.md](docs/cross-tu-mode.md)).
 
-| Input | Default | |
-| --- | --- | --- |
-| `sources` | | Files to analyze, space-separated |
-| `compile-commands` | | Compilation database; takes precedence over `sources` |
-| `rules` | `all` | Comma-separated rule selection |
-| `fail-on` | `error` | `none`, `error`, or `warning` |
-| `sarif-file` | `coretrace-concurrency.sarif` | Where the report is written |
-| `upload-sarif` | `true` | Send results to Code Scanning |
-| `version` | the release this action ships with | Analyzer image tag |
-| `image` | | Full image reference, overriding `version`; for testing an image built from source |
-| `extra-args` | | Forwarded to the analyzer verbatim |
+**Known limits** — shared state reached through heap or stack pointers is not tracked yet (only
+globals are), and thread entries passed as pointer-to-member are not resolved. Details in
+[docs/rules.md](docs/rules.md#limits).
 
-Outputs are `sarif-file`, `errors` and `warnings`. The SARIF is uploaded before
-the gate fails the job, so the run that stops the build is not the run whose
-findings get lost.
-
-When the gate fails the job, the action's `errors` and `warnings` outputs are
-**empty**: GitHub does not evaluate a composite action's outputs when it fails,
-so they are unavailable exactly when findings exist. Read `sarif-file` from the
-workspace instead, or set `fail-on: none` and decide for yourself:
-
-```yaml
-  - uses: CoreTrace/coretrace-concurrency-analyzer@v0
-    id: scan
-    with:
-      sources: src/worker.c
-      fail-on: none
-  - run: |
-      test "${{ steps.scan.outputs.errors }}" -eq 0 || exit 1
-```
-
-Note that `fail-on` defaults to `error` here while the CLI defaults to `none`:
-a CI job is asked to have an opinion, a command line is not.
-
-## Performance
-
-[docs/performance.md](docs/performance.md) records what the analyzer costs on a
-real project, where the time goes, and what the profile says to do next. In
-short: compiling a 49-unit project to IR takes 11.5 s and analysing it 15.4 s,
-peaking above 1 GB of RSS.
-
-## Exit Codes
-
-The exit code is what a CI job reads, so it distinguishes *the analysis found
-something* from *the analysis could not run* — a pipeline that conflates them
-reports a crashed tool as a clean tree.
-
-| Code | Meaning |
-| --- | --- |
-| `0` | The analysis ran, and nothing tripped `--fail-on`. |
-| `1` | The analysis could not produce a verdict: bad arguments, a source that would not compile, a unit missing from a compilation database. |
-| `2` | The analysis ran and reported at or above the `--fail-on` severity. |
-
-`--fail-on=none|error|warning` selects the gate, and defaults to `none`: the
-tool reports, and the caller decides what is fatal. In CI you usually want
-`--fail-on=error`.
-
-```bash
-coretrace_concurrency_analyzer src/worker.c --analyze --format=sarif --fail-on=error
-```
-
-A unit that would not compile outranks the gate. `1` wins over `2`, because a
-tree that was never fully seen cannot be pronounced clean.
-
-## Public API
-
-Compilation API:
-- `CompileRequest`
-- `CompileResult`
-- `InMemoryIRCompiler`
-
-Analysis API:
-- `AnalysisOptions`
-- `SingleTUConcurrencyAnalyzer`
-- `DiagnosticReport`
-
-Minimal example:
+## Use it as a library
 
 ```cpp
-#include "coretrace_concurrency_analyzer.hpp"
-#include "coretrace_concurrency_analysis.hpp"
-
-#include <llvm/IR/LLVMContext.h>
-
 llvm::LLVMContext context;
-
-ctrace::concurrency::CompileRequest request{
-    .inputFile = "sample.cpp",
-};
-
 ctrace::concurrency::InMemoryIRCompiler compiler;
-const auto result = compiler.compile(request, context);
-
-if (!result.success)
-    return 1;
+auto result = compiler.compile({.inputFile = "sample.cpp"}, context);
 
 ctrace::concurrency::SingleTUConcurrencyAnalyzer analyzer;
-const auto report = analyzer.analyze(*result.module);
+auto report = analyzer.analyze(*result.module);
 ```
 
-Use `AnalysisOptions` when you want a subset of rules instead of the default all-rules behavior.
+Embed it with CMake `FetchContent` (tag `v0.7.1`); a complete consumer lives in
+[`extern-project/`](extern-project/). API reference: [docs/api.md](docs/api.md).
 
-## Output Model
-
-Structured diagnostics expose:
-- severity
-- rule identifier
-- message
-- source location
-- related locations
-- notes
-- rule-specific properties
-
-Rendered formats:
-- `human`
-- `json`
-- `sarif`
-
-The JSON report also carries a `functions` array summarising, per function, the shared
-accesses seen, how many were protected, how many were writes, and which thread entries
-reach it. Those counts come from the facts the selected rules asked for: a narrow
-`--rules` run reports what it computed and nothing more, in a project analysis as in a
-single-unit one. When no selected rule reads the
-shared accesses, the three count fields are **absent** from each entry rather than
-rendered as zero — zero means the accesses were examined and none was found, which is a
-different statement. `--rules=all` reports everything.
-
-An analysis that stops at a limit before it has finished adds a notice to the report: an
-identifier, the rule concerned and a message. The lock-order cycle search gives
-`cycle-search-limit-reached` when it stops before judging every cycle: a deadlock it did not
-reach is then missing, not disproved. A notice is no diagnostic and counts in no summary. The
-JSON report lists notices in a `notices` array, **absent** when there is none; SARIF carries
-them as `toolExecutionNotifications` of the run's invocation, and the human output as a
-`Notice:` block before the summary.
-
-## Trust Model for `--compile-arg` / `extraCompileArgs`
-
-`extraCompileArgs` are forwarded as raw compiler arguments to `compilerlib::compile(...)`
-without sanitization. They are not shell-expanded by this tool, but they still influence
-compilation behavior and file access done by the compiler toolchain.
-
-Use this API or CLI only with trusted inputs, or place an explicit allowlist in front of it for
-untrusted callers.
-
-## External Consumer Example
+## Building
 
 ```bash
-cmake -S extern-project -B extern-project/build-llvm20 \
-  -DLLVM_DIR=/opt/homebrew/opt/llvm@20/lib/cmake/llvm \
-  -DClang_DIR=/opt/homebrew/opt/llvm@20/lib/cmake/clang \
-  -DCLANG_EXECUTABLE=/opt/homebrew/opt/llvm@20/bin/clang \
-  -DCLANG_RESOURCE_DIR=/opt/homebrew/opt/llvm@20/lib/clang/20
-
-cmake --build extern-project/build-llvm20 -j4
-
-./extern-project/build-llvm20/concurrency_consumer /tmp/sample.c --ir-format=ll
-./extern-project/build-llvm20/concurrency_consumer /tmp/sample.c --analyze --rules=all
-```
-
-`concurrency_consumer` keeps backward compatibility with the legacy positional format (`ll|bc`) as
-second argument.
-
-## Error Model
-
-`CompileResult` exposes a structured `CompileError`:
-- `error.code`: typed `std::error_code` backed by `CompileErrc`
-- `error.phase`: coarse pipeline stage
-- `error.message`: contextual details such as input path, parser diagnostics, or backend details
-
-Use `formatCompileError(result.error)` to render a stable CLI or log-friendly message.
-
-## Test Plan
-
-Run the C++ test suite with CTest:
-
-```bash
+LLVM=/opt/homebrew/opt/llvm@20   # or /usr/lib/llvm-20 on Debian/Ubuntu
+cmake -S . -B build \
+  -DLLVM_DIR=$LLVM/lib/cmake/llvm \
+  -DClang_DIR=$LLVM/lib/cmake/clang \
+  -DCLANG_EXECUTABLE=$LLVM/bin/clang \
+  -DCLANG_RESOURCE_DIR=$LLVM/lib/clang/20
+cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
-Replace `build` with your configured build directory, for example `build-llvm20`.
+## Documentation
 
-Optional Python integration tests:
+| | |
+|---|---|
+| [Rules & limits](docs/rules.md) | what each rule establishes and does not |
+| [CLI reference](docs/cli.md) | options, output formats, exit codes |
+| [GitHub Action](docs/github-action.md) | workflows, inputs, outputs, false positives |
+| [Project mode](docs/cross-tu-mode.md) | whole-program analysis from `compile_commands.json` |
+| [Performance](docs/performance.md) | cost on a real 49-unit project |
+| [Architecture](docs/architecture.md) | layers, backend, extension points |
 
-```bash
-python3 tests/integration/cli/test_analyzer.py
-CORETRACE_ANALYZER_BIN=./build/coretrace_concurrency_analyzer \
-python3 -m pytest tests/integration/cli/test_human_output_golden.py
-```
+## Contributing
 
-## Code Style
+Issues and PRs welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Part of the
+**CoreTrace** toolset, alongside
+[coretrace-stack-analyzer](https://github.com/CoreTrace/coretrace-stack-analyzer).
 
-- Format: `./scripts/format.sh`
-- Check: `./scripts/format-check.sh`
-- Naming and style conventions: see `CONTRIBUTING.md`
-- Fixture corpora under `tests/fixtures/` are excluded from clang-format checks
-
-## License
-
-This project is licensed under the Apache License 2.0.
-See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Licensed under [Apache 2.0](LICENSE).
