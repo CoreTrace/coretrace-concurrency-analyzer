@@ -700,6 +700,25 @@ namespace
                assertTrue(countRule(report, RuleId::MissingJoin) == 0, "every thread is joined");
     }
 
+    /// Whether a helper calling a pointer-to-member joins its thread depends on the member each
+    /// caller hands it: that conclusion stays in the helper's unit, and a caller of another unit
+    /// handing it detach still races.
+    bool testMemberPointerHelperOfAnotherUnitIsNoJoin()
+    {
+        CompiledProject project;
+        const std::vector<std::string> args = {"-std=c++20"};
+        if (!project.add("cross-tu-member-pointer/workers.cpp", args) ||
+            !project.add("cross-tu-member-pointer/call.cpp", args))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRule(report, RuleId::DataRaceGlobal) == 1,
+                          "the reader of a thread handed detach still races with main");
+    }
+
     /// The helper's join changes what the threading unit concludes for the rules that ask
     /// whether a thread has ended, and for no other (#89).
     bool testHelperJoinReanalysisFollowsTheSelection()
@@ -1530,6 +1549,7 @@ int main()
     ok = testElementHandedOutInAnotherUnitTooStillRaces() && ok;
     ok = testElementKeptByAnotherUnitStillRaces() && ok;
     ok = testThreadingUnitAloneCannotSeeTheHelperJoin() && ok;
+    ok = testMemberPointerHelperOfAnotherUnitIsNoJoin() && ok;
     ok = testHelperJoinReanalysisFollowsTheSelection() && ok;
     ok = testIdiomaticServiceKeepsItsKnownBlindSpots() && ok;
     ok = testHandleJoinedInAnotherUnitIsNotOutstanding() && ok;

@@ -3395,6 +3395,91 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a member function a pointer-to-member names, called on each thread (c03) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_for_each_mem_fn_no_fp.cpp",
+             .intent = "std::for_each with std::mem_fn of join over the whole vector ends its threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_stored_mem_fn_no_fp.cpp",
+             .intent = "a std::mem_fn of join kept in a variable ends the threads std::for_each hands it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_joined_through_member_pointer_helper_no_fp.cpp",
+             .intent = "a helper calling the pointer-to-member it is handed joins with &std::thread::join",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_written_before_for_each_mem_fn_race.cpp",
+             .intent = "main's write before std::for_each joins through std::mem_fn races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_detached_by_for_each_mem_fn_race.cpp",
+             .intent = "std::mem_fn of detach applied to every thread leaves them running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_contexts_race.cpp",
+             .intent = "each call of one std::for_each instantiation applies its own member",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_chosen_member_race.cpp",
+             .intent = "a member chosen at run time between join and detach joins nothing for sure",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_reassigned_race.cpp",
+             .intent = "a std::mem_fn object reassigned to detach before it is applied joins nothing",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_skipping_first_race.cpp",
+             .intent = "std::mem_fn of join applied past the first element leaves its thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_join_failure_caught_race.cpp",
+             .intent = "a join through std::mem_fn whose failure is caught may leave its thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_detached_through_member_pointer_helper_race.cpp",
+             .intent = "a helper calling the pointer-to-member it is handed detaches with detach",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_pointer_retargeted_through_alias_race.cpp",
+             .intent = "a pointer-to-member retargeted through a second reference names detach",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_pointer_retargeted_recursively_race.cpp",
+             .intent = "a pointer-to-member a recursive helper retargets names detach",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_pointer_with_base_adjustment_race.cpp",
+             .intent = "a pointer-to-member adjusted to another base joins that base's thread only",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_virtual_member_pointer_race.cpp",
+             .intent = "a pointer to a virtual member calls the override, which detaches",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a vector filled by a function with every thread it leaves running ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_threads_added_by_helper_joined_no_fp.cpp",
