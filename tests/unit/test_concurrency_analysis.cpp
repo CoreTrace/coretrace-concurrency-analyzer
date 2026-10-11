@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
+#include "internal/analysis/held_member_analysis.hpp"
 
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/InstIterator.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 
@@ -337,6 +341,66 @@ namespace
                           "cpp_atomic_vs_non_atomic should report a race") &&
                assertTrue(hasDiagnosticForSymbol(*report, "state"),
                           "cpp_atomic_vs_non_atomic should report state");
+    }
+
+    /// One std::for_each instantiation applies detach to one vector, then join to another: each
+    /// call resolves its own pointer-to-member, so main's write races with the detached vector's
+    /// reader alone, and not with the joined one's (c03).
+    bool testMemberPointerCallsKeepTheirOwnContext()
+    {
+        const std::optional<DiagnosticReport> report = analyzeFixture(
+            "tests/fixtures/concurrency/data-race/"
+            "cpp_vector_threads_for_each_mem_fn_contexts_race.cpp",
+            AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}}, {"-std=c++20"});
+        if (!report.has_value())
+            return false;
+
+        std::vector<std::pair<std::string, std::string>> pairs;
+        for (const Diagnostic& diagnostic : report->diagnostics)
+            for (const ctrace::concurrency::RelatedLocation& related : diagnostic.relatedLocations)
+                pairs.emplace_back(diagnostic.location.function, related.location.function);
+        const std::vector<std::pair<std::string, std::string>> expected = {
+            {"main", "detachedReader"}};
+        return assertTrue(pairs == expected,
+                          "the race is main against detachedReader alone, never joinedReader");
+    }
+
+    /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
+    /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
+    /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
+    /// adjustment apart whatever the completion analysis makes of the thread (#196).
+    bool testMemberPointerResolverRefusesAnAdjustment()
+    {
+        llvm::LLVMContext context;
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/concurrency/data-race/"
+                                        "cpp_thread_member_pointer_with_base_adjustment_race.cpp")
+                                .string();
+        request.extraCompileArgs = {"-std=c++20"};
+        request.format = IRFormat::BC;
+        CompileResult compiled = InMemoryIRCompiler().compile(request, context);
+        const llvm::Function* entry =
+            compiled.module != nullptr ? compiled.module->getFunction("main") : nullptr;
+        if (!assertTrue(entry != nullptr, "the base-adjustment control compiles"))
+            return false;
+
+        const ctrace::concurrency::internal::analysis::HeldMemberAnalysis held(*compiled.module);
+        std::optional<ctrace::concurrency::internal::analysis::MemberCall> member;
+        for (const llvm::Instruction& instruction : llvm::instructions(*entry))
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+                if (auto found = held.memberCall(*call))
+                    member = found;
+        const auto pair = member ? held.pairOf(*member) : std::nullopt;
+        if (!assertTrue(pair.has_value(), "main's call through the pointer-to-member is resolved"))
+            return false;
+
+        auto unadjusted = *pair;
+        unadjusted[1].constant = llvm::ConstantInt::get(pair->at(1).constant->getType(), 0);
+        const llvm::Function* joined = held.calledWith(*member, unadjusted);
+        return assertTrue(held.calledWith(*member, *pair) == nullptr,
+                          "a non-zero adjustment of this is refused") &&
+               assertTrue(joined != nullptr && joined->getName().contains("thread4join"),
+                          "the same pair with no adjustment names std::thread::join");
     }
 
     bool testClassDataRaceReportsGlobalCounter()
@@ -3395,6 +3459,105 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a member function a pointer-to-member names, called on each thread (c03) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_for_each_mem_fn_no_fp.cpp",
+             .intent = "std::for_each with std::mem_fn of join over the whole vector ends its threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_joined_by_stored_mem_fn_no_fp.cpp",
+             .intent = "a std::mem_fn of join kept in a variable ends the threads std::for_each hands it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_joined_through_member_pointer_helper_no_fp.cpp",
+             .intent = "a helper calling the pointer-to-member it is handed joins with &std::thread::join",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_written_before_for_each_mem_fn_race.cpp",
+             .intent = "main's write before std::for_each joins through std::mem_fn races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_detached_by_for_each_mem_fn_race.cpp",
+             .intent = "std::mem_fn of detach applied to every thread leaves them running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_contexts_race.cpp",
+             .intent = "each call of one std::for_each instantiation applies its own member",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_chosen_member_race.cpp",
+             .intent = "a member chosen at run time between join and detach joins nothing for sure",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_reassigned_race.cpp",
+             .intent = "a std::mem_fn object reassigned to detach before it is applied joins nothing",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_skipping_first_race.cpp",
+             .intent = "std::mem_fn of join applied past the first element leaves its thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_for_each_mem_fn_join_failure_caught_race.cpp",
+             .intent = "a join through std::mem_fn whose failure is caught may leave its thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_detached_through_member_pointer_helper_race.cpp",
+             .intent = "a helper calling the pointer-to-member it is handed detaches with detach",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_joined_through_member_pointer_wrapper_no_fp.cpp",
+             .intent = "a wrapper handing &std::thread::join to a pointer-to-member call joins",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_joined_through_two_member_pointer_wrappers_no_fp.cpp",
+             .intent = "a wrapper of that wrapper joins too",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_detached_through_member_pointer_wrapper_race.cpp",
+             .intent = "a wrapper handing &std::thread::detach to that call leaves the thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_pointer_retargeted_through_alias_race.cpp",
+             .intent = "a pointer-to-member retargeted through a second reference names detach",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_pointer_retargeted_recursively_race.cpp",
+             .intent = "a pointer-to-member a recursive helper retargets names detach",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_pointer_with_base_adjustment_race.cpp",
+             .intent = "a pointer-to-member adjusted to another base joins that base's thread only",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_virtual_member_pointer_race.cpp",
+             .intent = "a virtual member called through its pointer runs the override, which detaches",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a vector filled by a function with every thread it leaves running ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_threads_added_by_helper_joined_no_fp.cpp",
@@ -4740,6 +4903,8 @@ int main()
     ok = testDataRaceBasicIsReported() && ok;
     ok = testDataRaceBasicReportsDirectAliasHighConfidence() && ok;
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
+    ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
+    ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
     ok = testClassDataRaceReportsGlobalCounter() && ok;
     ok = testSharedObjectByRefReportsGlobalCounter() && ok;
     ok = testMutexProtectedFixtureHasNoDiagnostics() && ok;
