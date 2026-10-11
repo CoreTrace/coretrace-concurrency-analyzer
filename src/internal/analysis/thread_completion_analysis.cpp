@@ -2,6 +2,7 @@
 #include "thread_completion_analysis.hpp"
 
 #include "concurrency_symbol_classifier.hpp"
+#include "held_member_analysis.hpp"
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
 
@@ -160,10 +161,13 @@ namespace ctrace::concurrency::internal::analysis
             /// Where the join has certainly waited, when its result proves it anywhere. The call
             /// joins the thread either way.
             std::optional<JoinSuccess> success;
+            /// The thread, when it is not the operand itself: a call through a pointer-to-member is
+            /// handed the object adjusted by the pair, the adjustment being proven nil.
+            const llvm::Value* object = nullptr;
 
             [[nodiscard]] const llvm::Value& handle() const
             {
-                return *call->getArgOperand(operand);
+                return object != nullptr ? *object : *call->getArgOperand(operand);
             }
         };
 
@@ -1855,12 +1859,178 @@ namespace ctrace::concurrency::internal::analysis
             friend bool operator==(const ParameterVector&, const ParameterVector&) = default;
         };
 
+        /// A join a function makes through a pointer-to-member it is handed: `pair`, in the terms of
+        /// the function, names the member `call` invokes on the thread. Whether that joins the
+        /// thread depends on each caller's pair.
+        struct MemberCondition
+        {
+            HeldPair pair;
+            MemberCall call;
+
+            friend bool operator==(const MemberCondition&, const MemberCondition&) = default;
+        };
+
+        /// The parameter a function joins, on every normal return, through a pointer-to-member it
+        /// is handed.
+        struct MemberJoin
+        {
+            unsigned object = 0;
+            MemberCondition member;
+
+            friend bool operator==(const MemberJoin&, const MemberJoin&) = default;
+        };
+
+        /// Past this many, a function's joins through a pointer-to-member are no longer recorded:
+        /// a recursion stepping the pair's offset would otherwise grow them without end.
+        constexpr std::size_t kMaxMemberJoins = 8;
+
+        /// The joins each function of the unit makes through a pointer-to-member its callers hand
+        /// it. They stay in the unit: unlike `JoiningHelpers`, what they join depends on the
+        /// caller, and no other unit is told about them.
+        struct MemberJoins
+        {
+            const HeldMemberAnalysis& held;
+            const JoiningHelpers& helpers;
+            std::unordered_map<const llvm::Function*, std::vector<MemberJoin>> byFunction;
+        };
+
+        /// An invocation through a pointer-to-member that `call` makes, itself or through the
+        /// function it calls: on `object`, its operand `operand`, with the pair in the terms of the
+        /// function making `call`.
+        struct MemberInvocation
+        {
+            unsigned operand = 0;
+            const llvm::Value* object = nullptr;
+            MemberCondition member;
+        };
+
+        std::vector<MemberInvocation> memberInvocations(const llvm::CallBase& call,
+                                                        const MemberJoins& members)
+        {
+            std::vector<MemberInvocation> found;
+            if (const std::optional<MemberCall> direct = members.held.memberCall(call))
+            {
+                if (const std::optional<HeldPair> pair = members.held.pairOf(*direct))
+                    found.push_back(MemberInvocation{
+                        .object = direct->object,
+                        .member = MemberCondition{.pair = *pair, .call = *direct}});
+                return found;
+            }
+            const auto summary = members.byFunction.find(call.getCalledFunction());
+            if (summary == members.byFunction.end())
+                return found;
+            for (const MemberJoin& join : summary->second)
+                if (join.object < call.arg_size())
+                    if (const std::optional<HeldPair> pair =
+                            members.held.atCall(join.member.pair, call))
+                        found.push_back(MemberInvocation{
+                            .operand = join.object,
+                            .object = call.getArgOperand(join.object),
+                            .member = MemberCondition{.pair = *pair, .call = join.member.call}});
+            return found;
+        }
+
+        bool constantPair(const HeldPair& pair)
+        {
+            for (const WordSource& word : pair)
+                if (word.kind != WordSource::Kind::Constant)
+                    return false;
+            return true;
+        }
+
+        /// Whether calling `function` on an object joins the thread that object is:
+        /// `std::thread::join`, or a function joining its first parameter on every normal return.
+        bool joinsItsObject(const llvm::Function& function, const JoiningHelpers& helpers)
+        {
+            const std::optional<DemangledName> name = demangleFunction(function.getName());
+            if (name && !name->constructor && name->base == "join" &&
+                isStdClass(name->context, "thread"))
+                return true;
+            const auto helper = helpers.find(&function);
+            if (helper == helpers.end())
+                return false;
+            for (const JoinedParameter& parameter : helper->second)
+                if (parameter.index == 0 && parameter.ended)
+                    return true;
+            return false;
+        }
+
+        /// Whether the member `member` names, with its pair resolved at `call`, joins its object.
+        bool joinsThrough(const MemberCondition& member, const llvm::CallBase& call,
+                          const MemberJoins& members)
+        {
+            const std::optional<HeldPair> pair = members.held.atCall(member.pair, call);
+            const llvm::Function* called =
+                pair && constantPair(*pair) ? members.held.calledWith(member.call, *pair) : nullptr;
+            return called != nullptr && joinsItsObject(*called, members.helpers);
+        }
+
+        /// The joins `function` makes through a pointer-to-member whose pair depends on its own
+        /// parameters: each join site, with the condition its callers must meet.
+        std::vector<std::pair<JoinSite, MemberCondition>>
+        conditionalMemberSites(const llvm::Function& function, const MemberJoins& members)
+        {
+            std::vector<std::pair<JoinSite, MemberCondition>> sites;
+            for (const llvm::Instruction& instruction : llvm::instructions(function))
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+                    for (const MemberInvocation& invocation : memberInvocations(*call, members))
+                        if (!constantPair(invocation.member.pair))
+                            sites.emplace_back(JoinSite{.call = call,
+                                                        .operand = invocation.operand,
+                                                        .success = JoinSuccess{.after = call},
+                                                        .object = invocation.object},
+                                               invocation.member);
+            return sites;
+        }
+
+        /// Records, to a fixed point, the parameters each function joins on every normal return
+        /// through a pointer-to-member its callers hand it. A record is only ever added, and each
+        /// function holds a bounded number of them.
+        void collectMemberJoins(const llvm::Module& module, MemberJoins& members)
+        {
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                for (const llvm::Function& function : module)
+                {
+                    if (function.isDeclaration())
+                        continue;
+                    const llvm::Instruction& entry = function.getEntryBlock().front();
+                    for (const llvm::Instruction& instruction : llvm::instructions(function))
+                    {
+                        const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                        if (call == nullptr)
+                            continue;
+                        for (const MemberInvocation& invocation : memberInvocations(*call, members))
+                        {
+                            const std::optional<unsigned> object =
+                                members.held.parameterOf(*invocation.object);
+                            if (constantPair(invocation.member.pair) || !object ||
+                                !completionCoversReturns(entry, JoinSuccess{.after = call}))
+                                continue;
+                            std::vector<MemberJoin>& joins = members.byFunction[&function];
+                            const MemberJoin join{.object = *object, .member = invocation.member};
+                            if (joins.size() < kMaxMemberJoins && !llvm::is_contained(joins, join))
+                            {
+                                joins.push_back(join);
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         /// A range a function joins every thread of on every normal return: from the iterator its
         /// parameter `first` holds to the one its parameter `last` holds.
         struct JoinedRange
         {
             unsigned first = 0;
             unsigned last = 0;
+            /// The range is joined only where the pointer-to-member a caller hands names a member
+            /// joining its object.
+            std::optional<MemberCondition> member;
 
             friend bool operator==(const JoinedRange&, const JoinedRange&) = default;
         };
@@ -1876,6 +2046,8 @@ namespace ctrace::concurrency::internal::analysis
             ParameterVectors vectors;
             std::unordered_map<const llvm::Function*, std::vector<JoinedRange>> ranges;
             ParameterVectors fillers;
+            /// What resolves the condition of a range joined through a pointer-to-member.
+            const MemberJoins* members = nullptr;
         };
 
         /// Whether no argument of `call` but the one at `kept` reaches `object`: through any other,
@@ -2332,7 +2504,9 @@ namespace ctrace::concurrency::internal::analysis
                 return handOffs;
             for (const JoinedRange& range : found->second)
             {
-                if (range.first >= call.arg_size() || range.last >= call.arg_size())
+                if (range.first >= call.arg_size() || range.last >= call.arg_size() ||
+                    (range.member && (joining.members == nullptr ||
+                                      !joinsThrough(*range.member, call, *joining.members))))
                     continue;
                 const std::optional<RangeEnd> begin =
                     passedRangeEnd(call.getArgOperand(range.first), "begin", call, dominators);
@@ -2445,7 +2619,8 @@ namespace ctrace::concurrency::internal::analysis
 
         std::vector<JoinSite> joinSites(const llvm::Function& function,
                                         const ConcurrencySymbolClassifier& classifier,
-                                        const JoiningHelpers& helpers)
+                                        const JoiningHelpers& helpers,
+                                        const MemberJoins* members = nullptr)
         {
             std::vector<JoinSite> sites;
             for (const llvm::BasicBlock& block : function)
@@ -2464,6 +2639,19 @@ namespace ctrace::concurrency::internal::analysis
                                          .success = joinSuccessOf(*call, kind)});
                         continue;
                     }
+                    // A call through a pointer-to-member joins as the member it resolves to does: on
+                    // its normal return, the join has.
+                    if (members != nullptr)
+                        for (const MemberInvocation& invocation :
+                             memberInvocations(*call, *members))
+                            if (constantPair(invocation.member.pair))
+                                if (const llvm::Function* called = members->held.calledWith(
+                                        invocation.member.call, invocation.member.pair);
+                                    called != nullptr && joinsItsObject(*called, members->helpers))
+                                    sites.push_back({.call = call,
+                                                     .operand = invocation.operand,
+                                                     .success = JoinSuccess{.after = call},
+                                                     .object = invocation.object});
                     const auto helper = helpers.find(call->getCalledFunction());
                     if (helper == helpers.end())
                         continue;
@@ -2603,9 +2791,11 @@ namespace ctrace::concurrency::internal::analysis
         VectorHelpers collectVectorHelpers(const llvm::Module& module,
                                            const ConcurrencySymbolClassifier& classifier,
                                            LlvmFunctionAnalysisProvider& analyses,
-                                           const JoiningHelpers& helpers)
+                                           const JoiningHelpers& helpers,
+                                           const MemberJoins& members)
         {
             VectorHelpers joining;
+            joining.members = &members;
             const std::unordered_set<const llvm::Function*> starters =
                 threadStarters(module, classifier);
             bool filling = true;
@@ -2631,7 +2821,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (function.isDeclaration())
                     continue;
                 const llvm::Instruction& entry = function.getEntryBlock().front();
-                for (const JoinSite& join : joinSites(function, classifier, helpers))
+                for (const JoinSite& join : joinSites(function, classifier, helpers, &members))
                 {
                     const llvm::LoopInfo& loops = analyses.getLoopInfo(function);
                     const llvm::DominatorTree& dominators = analyses.getDominatorTree(function);
@@ -2645,6 +2835,18 @@ namespace ctrace::concurrency::internal::analysis
                     const auto range = parameterRangeJoin(join, loops, dominators);
                     if (range && completionCoversReturns(entry, range->second) &&
                         !llvm::is_contained(joining.ranges[&function], range->first))
+                        joining.ranges[&function].push_back(range->first);
+                }
+                // A range joined through a pointer-to-member the function is handed is joined
+                // only where its caller's pair names a member joining its object.
+                for (const auto& [join, member] : conditionalMemberSites(function, members))
+                {
+                    auto range = parameterRangeJoin(join, analyses.getLoopInfo(function),
+                                                    analyses.getDominatorTree(function));
+                    if (!range || !completionCoversReturns(entry, range->second))
+                        continue;
+                    range->first.member = member;
+                    if (!llvm::is_contained(joining.ranges[&function], range->first))
                         joining.ranges[&function].push_back(range->first);
                 }
             }
@@ -2880,7 +3082,11 @@ namespace ctrace::concurrency::internal::analysis
                                                  const JoiningHelpers& helpers)
     {
         ThreadCompletionMap result;
-        const VectorHelpers joining = collectVectorHelpers(module, classifier, analyses, helpers);
+        const HeldMemberAnalysis held(module);
+        MemberJoins members{.held = held, .helpers = helpers, .byFunction = {}};
+        collectMemberJoins(module, members);
+        const VectorHelpers joining =
+            collectVectorHelpers(module, classifier, analyses, helpers, members);
         for (const llvm::Function& function : module)
         {
             std::vector<const llvm::CallBase*> creates;
@@ -2899,7 +3105,7 @@ namespace ctrace::concurrency::internal::analysis
                     fillCalls.push_back(call);
             if (creates.empty() && fillCalls.empty())
                 continue;
-            const std::vector<JoinSite> joins = joinSites(function, classifier, helpers);
+            const std::vector<JoinSite> joins = joinSites(function, classifier, helpers, &members);
             std::vector<const llvm::CallBase*> handOffs;
             for (const llvm::BasicBlock& block : function)
                 for (const llvm::Instruction& instruction : block)

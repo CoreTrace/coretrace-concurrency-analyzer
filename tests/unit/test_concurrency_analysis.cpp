@@ -339,6 +339,28 @@ namespace
                           "cpp_atomic_vs_non_atomic should report state");
     }
 
+    /// One std::for_each instantiation applies detach to one vector, then join to another: each
+    /// call resolves its own pointer-to-member, so main's write races with the detached vector's
+    /// reader alone, and not with the joined one's (c03).
+    bool testMemberPointerCallsKeepTheirOwnContext()
+    {
+        const std::optional<DiagnosticReport> report = analyzeFixture(
+            "tests/fixtures/concurrency/data-race/"
+            "cpp_vector_threads_for_each_mem_fn_contexts_race.cpp",
+            AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}}, {"-std=c++20"});
+        if (!report.has_value())
+            return false;
+
+        std::vector<std::pair<std::string, std::string>> pairs;
+        for (const Diagnostic& diagnostic : report->diagnostics)
+            for (const ctrace::concurrency::RelatedLocation& related : diagnostic.relatedLocations)
+                pairs.emplace_back(diagnostic.location.function, related.location.function);
+        const std::vector<std::pair<std::string, std::string>> expected = {
+            {"main", "detachedReader"}};
+        return assertTrue(pairs == expected,
+                          "the race is main against detachedReader alone, never joinedReader");
+    }
+
     bool testClassDataRaceReportsGlobalCounter()
     {
         const std::optional<DiagnosticReport> report =
@@ -3476,7 +3498,7 @@ namespace
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_virtual_member_pointer_race.cpp",
-             .intent = "a pointer to a virtual member calls the override, which detaches",
+             .intent = "a virtual member called through its pointer runs the override, which detaches",
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
@@ -4825,6 +4847,7 @@ int main()
     ok = testDataRaceBasicIsReported() && ok;
     ok = testDataRaceBasicReportsDirectAliasHighConfidence() && ok;
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
+    ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
     ok = testClassDataRaceReportsGlobalCounter() && ok;
     ok = testSharedObjectByRefReportsGlobalCounter() && ok;
     ok = testMutexProtectedFixtureHasNoDiagnostics() && ok;

@@ -65,6 +65,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/signal_handler_collector.cpp
     src/internal/analysis/thread_argument_escape_collector.cpp
     src/internal/analysis/thread_context_propagator.cpp
+    src/internal/analysis/held_member_analysis.cpp
     src/internal/analysis/thread_completion_analysis.cpp
     src/internal/analysis/contained_entry_analysis.cpp
     src/internal/analysis/thread_lifecycle_collector.cpp
