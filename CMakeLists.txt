@@ -65,6 +65,7 @@ set(CONCURRENCY_ANALYZER_SOURCES
     src/internal/analysis/signal_handler_collector.cpp
     src/internal/analysis/thread_argument_escape_collector.cpp
     src/internal/analysis/thread_context_propagator.cpp
+    src/internal/analysis/held_member_analysis.cpp
     src/internal/analysis/thread_completion_analysis.cpp
     src/internal/analysis/contained_entry_analysis.cpp
     src/internal/analysis/thread_lifecycle_collector.cpp
@@ -250,6 +251,11 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
 
     add_executable(coretrace_concurrency_analysis_tests
       tests/unit/test_concurrency_analysis.cpp
+    )
+
+    target_include_directories(coretrace_concurrency_analysis_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
     )
 
     target_compile_definitions(coretrace_concurrency_analysis_tests
