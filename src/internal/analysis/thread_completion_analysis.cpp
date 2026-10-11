@@ -1870,8 +1870,9 @@ namespace ctrace::concurrency::internal::analysis
             friend bool operator==(const MemberCondition&, const MemberCondition&) = default;
         };
 
-        /// The parameter a function joins, on every normal return, through a pointer-to-member it
-        /// is handed.
+        /// The parameter a function invokes a member on, on every normal return, through a
+        /// pointer-to-member it is handed or names itself. Whether that joins the parameter is told
+        /// where the pair is resolved, at each call.
         struct MemberJoin
         {
             unsigned object = 0;
@@ -1884,9 +1885,9 @@ namespace ctrace::concurrency::internal::analysis
         /// a recursion stepping the pair's offset would otherwise grow them without end.
         constexpr std::size_t kMaxMemberJoins = 8;
 
-        /// The joins each function of the unit makes through a pointer-to-member its callers hand
-        /// it. They stay in the unit: unlike `JoiningHelpers`, what they join depends on the
-        /// caller, and no other unit is told about them.
+        /// The members each function of the unit invokes on a parameter through a pointer-to-member.
+        /// They stay in the unit: unlike `JoiningHelpers`, what they join may depend on the caller,
+        /// and no other unit is told about them.
         struct MemberJoins
         {
             const HeldMemberAnalysis& held;
@@ -1983,9 +1984,10 @@ namespace ctrace::concurrency::internal::analysis
             return sites;
         }
 
-        /// Records, to a fixed point, the parameters each function joins on every normal return
-        /// through a pointer-to-member its callers hand it. A record is only ever added, and each
-        /// function holds a bounded number of them.
+        /// Records, to a fixed point, the parameters each function invokes a member on, on every
+        /// normal return, through a pointer-to-member. A pair already constant is recorded too: a
+        /// wrapper fixing the member is then resolved at its own callers, as a join written in
+        /// place is. A record is only ever added, and each function holds a bounded number of them.
         void collectMemberJoins(const llvm::Module& module, MemberJoins& members)
         {
             bool changed = true;
@@ -2006,7 +2008,7 @@ namespace ctrace::concurrency::internal::analysis
                         {
                             const std::optional<unsigned> object =
                                 members.held.parameterOf(*invocation.object);
-                            if (constantPair(invocation.member.pair) || !object ||
+                            if (!object ||
                                 !completionCoversReturns(entry, JoinSuccess{.after = call}))
                                 continue;
                             std::vector<MemberJoin>& joins = members.byFunction[&function];

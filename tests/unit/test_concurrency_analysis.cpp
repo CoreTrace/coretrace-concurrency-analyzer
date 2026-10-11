@@ -1,7 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
+#include "internal/analysis/held_member_analysis.hpp"
 
+#include <llvm/IR/Constants.h>
+#include <llvm/IR/InstIterator.h>
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 
@@ -359,6 +363,44 @@ namespace
             {"main", "detachedReader"}};
         return assertTrue(pairs == expected,
                           "the race is main against detachedReader alone, never joinedReader");
+    }
+
+    /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
+    /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
+    /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
+    /// adjustment apart whatever the completion analysis makes of the thread (#196).
+    bool testMemberPointerResolverRefusesAnAdjustment()
+    {
+        llvm::LLVMContext context;
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/concurrency/data-race/"
+                                        "cpp_thread_member_pointer_with_base_adjustment_race.cpp")
+                                .string();
+        request.extraCompileArgs = {"-std=c++20"};
+        request.format = IRFormat::BC;
+        CompileResult compiled = InMemoryIRCompiler().compile(request, context);
+        const llvm::Function* entry =
+            compiled.module != nullptr ? compiled.module->getFunction("main") : nullptr;
+        if (!assertTrue(entry != nullptr, "the base-adjustment control compiles"))
+            return false;
+
+        const ctrace::concurrency::internal::analysis::HeldMemberAnalysis held(*compiled.module);
+        std::optional<ctrace::concurrency::internal::analysis::MemberCall> member;
+        for (const llvm::Instruction& instruction : llvm::instructions(*entry))
+            if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+                if (auto found = held.memberCall(*call))
+                    member = found;
+        const auto pair = member ? held.pairOf(*member) : std::nullopt;
+        if (!assertTrue(pair.has_value(), "main's call through the pointer-to-member is resolved"))
+            return false;
+
+        auto unadjusted = *pair;
+        unadjusted[1].constant = llvm::ConstantInt::get(pair->at(1).constant->getType(), 0);
+        const llvm::Function* joined = held.calledWith(*member, unadjusted);
+        return assertTrue(held.calledWith(*member, *pair) == nullptr,
+                          "a non-zero adjustment of this is refused") &&
+               assertTrue(joined != nullptr && joined->getName().contains("thread4join"),
+                          "the same pair with no adjustment names std::thread::join");
     }
 
     bool testClassDataRaceReportsGlobalCounter()
@@ -3479,6 +3521,20 @@ namespace
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_joined_through_member_pointer_wrapper_no_fp.cpp",
+             .intent = "a wrapper handing &std::thread::join to a pointer-to-member call joins",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_joined_through_two_member_pointer_wrappers_no_fp.cpp",
+             .intent = "a wrapper of that wrapper joins too",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_detached_through_member_pointer_wrapper_race.cpp",
+             .intent = "a wrapper handing &std::thread::detach to that call leaves the thread running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_member_pointer_retargeted_through_alias_race.cpp",
              .intent = "a pointer-to-member retargeted through a second reference names detach",
              .dataRace = 1,
@@ -4848,6 +4904,7 @@ int main()
     ok = testDataRaceBasicReportsDirectAliasHighConfidence() && ok;
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
+    ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
     ok = testClassDataRaceReportsGlobalCounter() && ok;
     ok = testSharedObjectByRefReportsGlobalCounter() && ok;
     ok = testMutexProtectedFixtureHasNoDiagnostics() && ok;

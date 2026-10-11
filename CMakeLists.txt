@@ -253,6 +253,11 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
       tests/unit/test_concurrency_analysis.cpp
     )
 
+    target_include_directories(coretrace_concurrency_analysis_tests
+      PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+    )
+
     target_compile_definitions(coretrace_concurrency_analysis_tests
       PRIVATE
         ${CORETRACE_TEST_COMMON_DEFINITIONS}
