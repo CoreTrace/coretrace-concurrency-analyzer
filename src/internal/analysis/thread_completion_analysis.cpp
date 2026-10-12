@@ -2315,7 +2315,7 @@ namespace ctrace::concurrency::internal::analysis
             if (!container || !join.success.has_value() || element == nullptr ||
                 element->arg_size() != 1 ||
                 placeOf(element->getArgOperand(0), layout) != container ||
-                !servesOnly(*element, {join.call}) || !passesThrough(create, insertion, *element))
+                !servesOnly(*element, {join.call}) || !insertedBy(create, insertion, *element))
                 return std::nullopt;
             const bool last = vectorMethod(*element, "back");
             if (!last && !vectorMethod(*element, "front"))
@@ -2594,6 +2594,24 @@ namespace ctrace::concurrency::internal::analysis
             return move;
         }
 
+        /// Whether `call` is `emplace_back` on a sequence of `std::thread` that starts a thread, as
+        /// `starters` tells: handed what the new thread runs, it builds that thread in place, so the
+        /// thread is in the sequence from its start. One handed a thread already started, as
+        /// `push_back` hands its argument on, only moves it in.
+        bool emplacesThread(const llvm::CallBase& call,
+                            const std::unordered_set<const llvm::Function*>& starters)
+        {
+            if (!vectorMethod(call, "emplace_back") || !starters.contains(call.getCalledFunction()))
+                return false;
+            const std::optional<DemangledName> name =
+                demangleFunction(call.getCalledFunction()->getName());
+            const std::size_t open = name->context.find('<');
+            const std::size_t close = name->context.find(',', open);
+            return open != std::string::npos && close != std::string::npos &&
+                   isStdClass(std::string_view(name->context).substr(open + 1, close - open - 1),
+                              "thread");
+        }
+
         /// The `push_back` or `emplace_back` moving the thread `create` starts into a vector.
         const llvm::CallBase* insertionTaking(const llvm::CallBase& create,
                                               const ConcurrencySymbolClassifier& classifier)
@@ -2762,6 +2780,10 @@ namespace ctrace::concurrency::internal::analysis
                         return std::nullopt;
                     place = framePlaceOf(insertion->getArgOperand(0), layout);
                 }
+                // Building the thread in place starts it in the vector: no path can miss the
+                // insertion.
+                else if (call != nullptr && emplacesThread(*call, starters))
+                    place = framePlaceOf(call->getArgOperand(0), layout);
                 else if (call != nullptr && starters.contains(call->getCalledFunction()))
                 {
                     const std::vector<ContainerPlace> places =
@@ -3089,6 +3111,8 @@ namespace ctrace::concurrency::internal::analysis
         collectMemberJoins(module, members);
         const VectorHelpers joining =
             collectVectorHelpers(module, classifier, analyses, helpers, members);
+        const std::unordered_set<const llvm::Function*> starters =
+            threadStarters(module, classifier);
         for (const llvm::Function& function : module)
         {
             std::vector<const llvm::CallBase*> creates;
@@ -3101,11 +3125,16 @@ namespace ctrace::concurrency::internal::analysis
                             creates.push_back(call);
                     }
             std::vector<const llvm::CallBase*> fillCalls;
+            std::vector<const llvm::CallBase*> emplaces;
             for (const llvm::Instruction& instruction : llvm::instructions(function))
-                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                    call != nullptr && joining.fillers.contains(call->getCalledFunction()))
-                    fillCalls.push_back(call);
-            if (creates.empty() && fillCalls.empty())
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+                {
+                    if (joining.fillers.contains(call->getCalledFunction()))
+                        fillCalls.push_back(call);
+                    else if (emplacesThread(*call, starters))
+                        emplaces.push_back(call);
+                }
+            if (creates.empty() && fillCalls.empty() && emplaces.empty())
                 continue;
             const std::vector<JoinSite> joins = joinSites(function, classifier, helpers, &members);
             std::vector<const llvm::CallBase*> handOffs;
@@ -3144,6 +3173,13 @@ namespace ctrace::concurrency::internal::analysis
                     movedIn.push_back(
                         MovedIn{.start = create, .insertion = insertion, .container = *container});
             }
+            // An `emplace_back` building its thread in place starts it in the sequence: the call
+            // is its start and its insertion at once.
+            for (const llvm::CallBase* call : emplaces)
+                if (const std::optional<ContainerPlace> container =
+                        placeOf(call->getArgOperand(0), layout))
+                    movedIn.push_back(
+                        MovedIn{.start = call, .insertion = call, .container = *container});
             for (const llvm::CallBase* call : fillCalls)
                 for (const ContainerPlace& container : vectorsHandedTo(*call, joining.fillers))
                     if (llvm::isa<llvm::AllocaInst>(container.object))
@@ -3166,8 +3202,10 @@ namespace ctrace::concurrency::internal::analysis
                         proven ||
                         proves(insertedThreadsCompletion(start, *moved.insertion, moved.container,
                                                          join, loops, dominators, joining));
-                    // The element back() or front() reads is told among single insertions alone.
-                    proven = proven || (&start != moved.insertion &&
+                    // The element back() or front() reads is told among single insertions alone: a
+                    // creation moved in, or a thread built in place, but not a call filling the
+                    // vector with any number of them.
+                    proven = proven || (!llvm::is_contained(fillCalls, &start) &&
                                         proves(accessedElementCompletion(start, *moved.insertion,
                                                                          join, dominators)));
                 }

@@ -2274,7 +2274,7 @@ namespace
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join.cpp",
              .intent = "the worker races while its handle is left joinable",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "pthread_loop_create_single_join_reports_missing_join.c",
              .intent = "a loop creates one handle per iteration, joined only once",
@@ -2866,7 +2866,7 @@ namespace
              .threadLocalEscape = 1},
             {.path = "tests/fixtures/concurrency/thread-local/cpp_tls_destructor_race.cpp",
              .intent = "thread-local constructors and main race on active_count",
-             .dataRace = 1,
+             .dataRace = 2,
              .racingSymbol = "_ZL12active_count"},
 
             // --- rules that do not exist yet: pinned as silent -----------------------------
@@ -2901,14 +2901,14 @@ namespace
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/data_race_unjoined_helper_phases.c",
              .intent = "a helper that returns with a live thread cannot sequence its callers",
-             .dataRace = 1,
+             .dataRace = 3,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_detached_helper_phases.c",
              .intent = "detach resolves ownership but does not complete the worker",
-             .dataRace = 1},
+             .dataRace = 3},
             {.path = "tests/fixtures/concurrency/data-race/data_race_conditional_helper_join.c",
              .intent = "one unjoined path prevents a contained-entry summary",
-             .dataRace = 1,
+             .dataRace = 3,
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_incomplete_join_loop.c",
              .intent = "a shortened join range leaves a worker concurrent with the next phase; "
@@ -3557,6 +3557,44 @@ namespace
              .intent = "a virtual member called through its pointer runs the override, which detaches",
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            // --- a thread whose entry reaches its spawn as a parameter (#123) ---
+            {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
+             .intent = "a thread started on an entry handed as a parameter races with main",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter_two_frames.c",
+             .intent = "an entry handed on through two helpers still names the thread",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_joined_no_fp.c",
+             .intent = "a helper joining the thread it starts on a handed entry ends it"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_emplaced_between_race.cpp",
+             .intent = "threads emplace_back builds race with main's write before their joins",
+             .dataRace = 2,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_emplaced_joined_no_fp.cpp",
+             .intent = "a loop joining every thread emplace_back built ends them",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_joined_through_back_no_fp.cpp",
+             .intent = "joining back() ends the one thread emplace_back built",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_joined_through_front_no_fp.cpp",
+             .intent = "joining front() ends the one thread emplace_back built",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_emplaced_by_helper_no_fp.cpp",
+             .intent = "threads a helper emplaces in the vector it is handed are ended by the join loop",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_emplaced_in_returned_vector_no_fp.cpp",
+             .intent = "threads emplaced in a returned vector are ended by the caller's join loop",
              .requiresCxx20 = true},
             // --- a vector filled by a function with every thread it leaves running ---
             {.path = "tests/fixtures/concurrency/data-race/"
