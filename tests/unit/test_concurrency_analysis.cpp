@@ -3619,6 +3619,24 @@ namespace
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_with_allocator_building_another_thread_race.cpp",
+             .intent = "joining the element leaves running a second thread its allocator built",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_by_allocator_construct_loop_race.cpp",
+             .intent = "joining the element leaves running a thread its construction loop detached",
+             .dataRace = 2,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_with_traits_specialization_starting_thread_race.cpp",
+             .intent = "a thread an allocator_traits specialization starts outlives the element's join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_threads_emplaced_by_two_calls_race.cpp",
              .intent = "two threads emplace_back builds on one entry race with each other",
              .dataRace = 1,
