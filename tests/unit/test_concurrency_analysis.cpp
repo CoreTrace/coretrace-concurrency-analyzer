@@ -3663,6 +3663,31 @@ namespace
              .intent = "a helper writing while its thread on a handed entry runs races with it",
              .dataRace = 1,
              .racingSymbol = "shared"},
+            // --- a thread the copy of a std::thread argument starts (#200) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_argument_copy_starts_thread_joined_race.cpp",
+             .intent = "joining a std::thread leaves running a thread its argument's copy started",
+             .dataRace = 2,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_array_argument_copy_joined_race.cpp",
+             .intent = "the array's join loop leaves running threads the argument copies started",
+             .dataRace = 4,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_argument_copy_pushed_joined_race.cpp",
+             .intent = "the vector's join loop leaves running threads the argument copies started",
+             .dataRace = 4,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_lambda_argument_copy_starts_thread_joined_race.cpp",
+             .intent = "joining a std::thread on a lambda leaves running its argument copy's thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a vector filled by a function with every thread it leaves running ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_threads_added_by_helper_joined_no_fp.cpp",

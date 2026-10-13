@@ -659,7 +659,8 @@ namespace ctrace::concurrency::internal::analysis
                            const ThreadCompletionMap& completions,
                            const ConcurrencySymbolClassifier& classifier,
                            LlvmFunctionAnalysisProvider& analyses, bool includeExternalEntries)
-                : directCallSites_(directCallSites), completions_(completions), analyses_(analyses),
+                : directCallSites_(directCallSites), completions_(completions),
+                  classifier_(classifier), analyses_(analyses),
                   includeExternalEntries_(includeExternalEntries),
                   selfContainedConstructors_(selfContainedThreadConstructors(module, classifier))
             {
@@ -1143,7 +1144,8 @@ namespace ctrace::concurrency::internal::analysis
                 }
                 // A call proven to leave its threads in a vector this function joins ends them
                 // there, as a start proven so does.
-                if (const auto* call = llvm::dyn_cast_or_null<llvm::CallBase>(start))
+                if (const auto* call = llvm::dyn_cast_or_null<llvm::CallBase>(start);
+                    call != nullptr && completionCovers(function, *call, handle))
                 {
                     if (const auto completion = completions_.find(call);
                         completion != completions_.end() && completion->second.ended.has_value())
@@ -1152,6 +1154,30 @@ namespace ctrace::concurrency::internal::analysis
                 if (start != nullptr)
                     cutCorrelatedEdges(function, *start, kills.always);
                 return reaches_.emplace(key, flood(function, start, kills)).first->second;
+            }
+
+            /// Whether the proven completion of `call` ends a thread it leaves running in
+            /// `function`, held at `handle` there. A call that creates no thread is proven to leave
+            /// no thread but those its completion ends. A creation's completion ends the thread it
+            /// creates, held in the object it constructs: the caller names where a callee holds a
+            /// thread only through the parameter that thread was started into, so storage in that
+            /// object, or in a member such as the one holding libc++'s native handle, comes from
+            /// a start handed the object, the constructor's own. A thread the copy of an argument
+            /// starts is handed no such parameter: it is held elsewhere, or nowhere this function
+            /// can name, and may still run.
+            [[nodiscard]] bool completionCovers(const llvm::Function& function,
+                                                const llvm::CallBase& call,
+                                                const std::optional<std::string>& handle) const
+            {
+                const CallKind kind = classifier_.classify(call);
+                if (kind != CallKind::StdThreadCtor && kind != CallKind::PThreadCreate)
+                    return true;
+                if (!handle.has_value() || call.arg_empty())
+                    return false;
+                const std::optional<std::string> object =
+                    canonicalStorageGroupId(*call.getArgOperand(0));
+                return object.has_value() &&
+                       (*handle == *object || handle->starts_with(*object + "["));
             }
 
             /// The handle a thread started in `function` can be matched on there: none when the
@@ -1493,6 +1519,7 @@ namespace ctrace::concurrency::internal::analysis
 
             const std::vector<DirectCallSite>& directCallSites_;
             const ThreadCompletionMap& completions_;
+            const ConcurrencySymbolClassifier& classifier_;
             LlvmFunctionAnalysisProvider& analyses_;
             bool includeExternalEntries_ = false;
             std::unordered_set<const llvm::Function*> selfContainedConstructors_;
