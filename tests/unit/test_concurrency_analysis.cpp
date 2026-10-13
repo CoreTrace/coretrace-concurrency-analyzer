@@ -2922,7 +2922,7 @@ namespace
              .missingJoin = 1},
             {.path = "tests/fixtures/concurrency/data-race/data_race_overlapping_helper_context.c",
              .intent = "one sequential context cannot hide another live instance of the same entry",
-             .dataRace = 1},
+             .dataRace = 2},
             {.path = "tests/fixtures/concurrency/data-race/data_race_nested_joined_helpers.c",
              .intent = "entry bindings and completion propagate through nested helpers"},
             {.path = "tests/fixtures/concurrency/data-race/data_race_early_break_join_loop.c",
@@ -3596,6 +3596,55 @@ namespace
                      "cpp_vector_threads_emplaced_in_returned_vector_no_fp.cpp",
              .intent = "threads emplaced in a returned vector are ended by the caller's join loop",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_with_allocator_starting_thread_race.cpp",
+             .intent = "joining the element leaves running a thread its allocator started",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_with_custom_allocator_joined_no_fp.cpp",
+             .intent = "an allocator starting no thread keeps the element's join ending it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_with_custom_allocator_written_before_join_race.cpp",
+             .intent = "main's write before joining races beside an allocator of its own",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_thread_emplaced_argument_copy_starts_thread_race.cpp",
+             .intent = "joining the element leaves running a thread an argument's copy started",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_vector_threads_emplaced_by_two_calls_race.cpp",
+             .intent = "two threads emplace_back builds on one entry race with each other",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_two_joined_race.c",
+             .intent = "two threads a helper joins on a handed entry race before it returns",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_joined_in_sequence_no_fp.c",
+             .intent = "a helper joining each thread on a handed entry before the next runs none at once"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_beside_running_instance_race.c",
+             .intent = "a helper's thread on a handed entry races with its caller's running one",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_over_in_callee_no_fp.c",
+             .intent = "a helper joining the caller's thread before starting another runs none at once"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_helper_writes_while_running_race.c",
+             .intent = "a helper writing while its thread on a handed entry runs races with it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
             // --- a vector filled by a function with every thread it leaves running ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_threads_added_by_helper_joined_no_fp.cpp",
