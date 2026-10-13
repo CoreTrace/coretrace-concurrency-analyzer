@@ -1,0 +1,34 @@
+// SPDX-License-Identifier: Apache-2.0
+// The vector has an allocator of its own, which starts no thread: main writes before joining
+// back(), while the thread emplace_back built runs (#123).
+// Expected: one data race, main against worker.
+#include <cstddef>
+#include <memory>
+#include <thread>
+#include <vector>
+
+static int shared;
+
+static void worker()
+{
+    shared += 1;
+}
+
+template <class T> struct Alloc
+{
+    using value_type = T;
+    Alloc() = default;
+    template <class U> Alloc(const Alloc<U>&) {}
+    T* allocate(std::size_t n) { return std::allocator<T>{}.allocate(n); }
+    void deallocate(T* p, std::size_t n) { std::allocator<T>{}.deallocate(p, n); }
+    template <class U> bool operator==(const Alloc<U>&) const { return true; }
+};
+
+int main()
+{
+    std::vector<std::thread, Alloc<std::thread>> threads;
+    threads.emplace_back(worker);
+    shared += 1;
+    threads.back().join();
+    return shared;
+}
