@@ -27,6 +27,7 @@
 #include <set>
 #include <string_view>
 #include <tuple>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -655,7 +656,8 @@ namespace ctrace::concurrency::internal::analysis
                            const ConcurrencySymbolClassifier& classifier,
                            LlvmFunctionAnalysisProvider& analyses, bool includeExternalEntries)
                 : directCallSites_(directCallSites), completions_(completions), analyses_(analyses),
-                  includeExternalEntries_(includeExternalEntries)
+                  includeExternalEntries_(includeExternalEntries),
+                  selfContainedConstructors_(selfContainedThreadConstructors(module, classifier))
             {
                 for (const llvm::Function& function : module)
                 {
@@ -1177,6 +1179,17 @@ namespace ctrace::concurrency::internal::analysis
                 return false;
             }
 
+            /// Whether every thread the callee of `site` starts is the one the call counts as a
+            /// spawn of `function`: the callee is a `std::thread` constructor starting no other. A
+            /// constructor that may, as the copy of an argument may, has all its threads counted,
+            /// the spawn's own twice.
+            [[nodiscard]] bool countedBySpawn(const llvm::Function& function,
+                                              const DirectCallSite& site) const
+            {
+                return isSpawn(function, *site.call) &&
+                       selfContainedConstructors_.contains(functionOf(site.calleeFunctionId));
+            }
+
             /// The entry a thread a callee leaves running runs, as the caller names it: a named
             /// entry stays itself; an entry the callee took from a parameter is what `site`
             /// passes there, itself a parameter of the caller or a function. Nothing when the call
@@ -1275,7 +1288,7 @@ namespace ctrace::concurrency::internal::analysis
                 for (const DirectCallSite* site : data.calls)
                 {
                     const auto calleeLeaks = leaked_.find(functionOf(site->calleeFunctionId));
-                    if (calleeLeaks == leaked_.end() || isSpawn(function, *site->call))
+                    if (calleeLeaks == leaked_.end() || countedBySpawn(function, *site))
                         continue;
 
                     for (const ThreadInstance& instance : calleeLeaks->second)
@@ -1323,7 +1336,7 @@ namespace ctrace::concurrency::internal::analysis
                     for (const DirectCallSite* site : data.calls)
                     {
                         const auto calleeLeaks = leaked_.find(functionOf(site->calleeFunctionId));
-                        if (calleeLeaks == leaked_.end() || isSpawn(*function, *site->call))
+                        if (calleeLeaks == leaked_.end() || countedBySpawn(*function, *site))
                             continue;
                         for (const ThreadInstance& instance : calleeLeaks->second)
                         {
@@ -1354,6 +1367,7 @@ namespace ctrace::concurrency::internal::analysis
             const ThreadCompletionMap& completions_;
             LlvmFunctionAnalysisProvider& analyses_;
             bool includeExternalEntries_ = false;
+            std::unordered_set<const llvm::Function*> selfContainedConstructors_;
             std::unordered_map<std::string, const llvm::Function*> functionsById_;
             std::unordered_map<const llvm::Function*, FunctionThreads> functions_;
             std::unordered_map<const llvm::Function*, ThreadInstances> leaked_;

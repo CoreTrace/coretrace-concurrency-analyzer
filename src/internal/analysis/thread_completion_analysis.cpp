@@ -27,6 +27,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <set>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -2594,24 +2595,6 @@ namespace ctrace::concurrency::internal::analysis
             return move;
         }
 
-        /// Whether `call` is `emplace_back` on a sequence of `std::thread` that starts a thread, as
-        /// `starters` tells: handed what the new thread runs, it builds that thread in place, so the
-        /// thread is in the sequence from its start. One handed a thread already started, as
-        /// `push_back` hands its argument on, only moves it in.
-        bool emplacesThread(const llvm::CallBase& call,
-                            const std::unordered_set<const llvm::Function*>& starters)
-        {
-            if (!vectorMethod(call, "emplace_back") || !starters.contains(call.getCalledFunction()))
-                return false;
-            const std::optional<DemangledName> name =
-                demangleFunction(call.getCalledFunction()->getName());
-            const std::size_t open = name->context.find('<');
-            const std::size_t close = name->context.find(',', open);
-            return open != std::string::npos && close != std::string::npos &&
-                   isStdClass(std::string_view(name->context).substr(open + 1, close - open - 1),
-                              "thread");
-        }
-
         /// The `push_back` or `emplace_back` moving the thread `create` starts into a vector.
         const llvm::CallBase* insertionTaking(const llvm::CallBase& create,
                                               const ConcurrencySymbolClassifier& classifier)
@@ -2755,6 +2738,126 @@ namespace ctrace::concurrency::internal::analysis
             return starters;
         }
 
+        /// Whether every thread `function` may start, itself or through the functions it calls, is
+        /// started into the object its parameter `index` points to: each start, and each call that
+        /// may start one, is handed that object first. A `std::thread` constructor that does starts
+        /// no thread but the one it builds; one whose body may start another, as the copy of an
+        /// argument may, does not.
+        bool startsOnlyInto(const llvm::Function& function, unsigned index,
+                            const std::unordered_set<const llvm::Function*>& starters,
+                            const ConcurrencySymbolClassifier& classifier,
+                            std::set<std::pair<const llvm::Function*, unsigned>>& visiting)
+        {
+            if (index >= function.arg_size() || !visiting.emplace(&function, index).second)
+                return false;
+            const llvm::Argument* target = function.getArg(index);
+            for (const llvm::Instruction& instruction : llvm::instructions(function))
+            {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                if (call == nullptr)
+                    continue;
+                const llvm::Function* callee = call->getCalledFunction();
+                if (!startsThread(*call, classifier) && !starters.contains(callee))
+                    continue;
+                if (call->arg_empty() || object(call->getArgOperand(0)) != target)
+                    return false;
+                if (starters.contains(callee) &&
+                    !startsOnlyInto(*callee, 0, starters, classifier, visiting))
+                    return false;
+            }
+            return true;
+        }
+
+        bool startsOnlyInto(const llvm::Function& function, unsigned index,
+                            const std::unordered_set<const llvm::Function*>& starters,
+                            const ConcurrencySymbolClassifier& classifier)
+        {
+            std::set<std::pair<const llvm::Function*, unsigned>> visiting;
+            return startsOnlyInto(function, index, starters, classifier, visiting);
+        }
+
+        /// Whether `instruction` may run more than once in a call to its function: a path leads
+        /// from it back to it.
+        bool mayRepeat(const llvm::Instruction& instruction)
+        {
+            for (const llvm::BasicBlock* successor : llvm::successors(instruction.getParent()))
+                if (llvm::isPotentiallyReachable(&successor->front(), &instruction))
+                    return true;
+            return false;
+        }
+
+        /// Whether a call to `function` starts at most one thread, through a `std::thread`
+        /// construction whose constructor starts no thread but the one it builds: it starts no
+        /// thread otherwise, and the constructions and the calls that may start one exclude each
+        /// other, none reachable from another or from itself, each of those calls starting at most
+        /// one thread in turn. Nothing rests on the namespace of the functions on the way: an
+        /// allocator, a specialization of a standard template or the copy of an argument starting
+        /// a thread of its own, or a second construction, fails the proof.
+        bool startsAtMostOneThread(const llvm::Function& function,
+                                   const std::unordered_set<const llvm::Function*>& starters,
+                                   const ConcurrencySymbolClassifier& classifier,
+                                   std::unordered_map<const llvm::Function*, bool>& known)
+        {
+            if (const auto result = known.find(&function); result != known.end())
+                return result->second;
+            // A recursion is refused: its depth is unknown.
+            known.emplace(&function, false);
+            std::vector<const llvm::CallBase*> starts;
+            for (const llvm::Instruction& instruction : llvm::instructions(function))
+            {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                if (call == nullptr)
+                    continue;
+                const llvm::Function* callee = call->getCalledFunction();
+                if (startsThread(*call, classifier))
+                {
+                    if (classifier.classify(*call) != CallKind::StdThreadCtor ||
+                        (starters.contains(callee) &&
+                         !startsOnlyInto(*callee, 0, starters, classifier)))
+                        return false;
+                }
+                else if (!starters.contains(callee))
+                    continue;
+                else if (!startsAtMostOneThread(*callee, starters, classifier, known))
+                    return false;
+                starts.push_back(call);
+            }
+            for (const llvm::CallBase* start : starts)
+            {
+                if (mayRepeat(*start))
+                    return false;
+                for (const llvm::CallBase* other : starts)
+                    if (other != start && llvm::isPotentiallyReachable(start, other))
+                        return false;
+            }
+            return known[&function] = true;
+        }
+
+        /// Whether `call` is `emplace_back` on a sequence of `std::thread` that starts a thread, as
+        /// `starters` tells: handed what the new thread runs, it builds that thread in place, so the
+        /// thread is in the sequence from its start. One handed a thread already started, as
+        /// `push_back` hands its argument on, only moves it in. The call must start no other
+        /// thread: an allocator, or the copy of an argument, may start threads the sequence never
+        /// holds, which its join leaves running. The one construction it runs builds the element,
+        /// as the allocator requirements have `construct` build it from the arguments.
+        bool emplacesThread(const llvm::CallBase& call,
+                            const std::unordered_set<const llvm::Function*>& starters,
+                            const ConcurrencySymbolClassifier& classifier)
+        {
+            std::unordered_map<const llvm::Function*, bool> known;
+            if (!vectorMethod(call, "emplace_back") ||
+                !starters.contains(call.getCalledFunction()) ||
+                !startsAtMostOneThread(*call.getCalledFunction(), starters, classifier, known))
+                return false;
+            const std::optional<DemangledName> name =
+                demangleFunction(call.getCalledFunction()->getName());
+            const std::size_t open = name->context.find('<');
+            const std::size_t close = name->context.find(',', open);
+            return open != std::string::npos && close != std::string::npos &&
+                   isStdClass(std::string_view(name->context).substr(open + 1, close - open - 1),
+                              "thread");
+        }
+
         /// The vector `function` fills with every thread it leaves running, when there is one and
         /// a parameter reaches it: each thread it starts is moved into that vector on every path to
         /// a normal return, every other call that may start a thread fills that vector too, and
@@ -2782,7 +2885,7 @@ namespace ctrace::concurrency::internal::analysis
                 }
                 // Building the thread in place starts it in the vector: no path can miss the
                 // insertion.
-                else if (call != nullptr && emplacesThread(*call, starters))
+                else if (call != nullptr && emplacesThread(*call, starters, classifier))
                     place = framePlaceOf(call->getArgOperand(0), layout);
                 else if (call != nullptr && starters.contains(call->getCalledFunction()))
                 {
@@ -2899,6 +3002,23 @@ namespace ctrace::concurrency::internal::analysis
         }
 
     } // namespace
+
+    std::unordered_set<const llvm::Function*>
+    selfContainedThreadConstructors(const llvm::Module& module,
+                                    const ConcurrencySymbolClassifier& classifier)
+    {
+        const std::unordered_set<const llvm::Function*> starters =
+            threadStarters(module, classifier);
+        std::unordered_set<const llvm::Function*> constructors;
+        for (const llvm::Function& function : module)
+            for (const llvm::Instruction& instruction : llvm::instructions(function))
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                    call != nullptr && classifier.classify(*call) == CallKind::StdThreadCtor &&
+                    starters.contains(call->getCalledFunction()) &&
+                    startsOnlyInto(*call->getCalledFunction(), 0, starters, classifier))
+                    constructors.insert(call->getCalledFunction());
+        return constructors;
+    }
 
     bool JoinSuccess::covers(const llvm::Instruction& point,
                              const llvm::DominatorTree& dominators) const
@@ -3131,7 +3251,7 @@ namespace ctrace::concurrency::internal::analysis
                 {
                     if (joining.fillers.contains(call->getCalledFunction()))
                         fillCalls.push_back(call);
-                    else if (emplacesThread(*call, starters))
+                    else if (emplacesThread(*call, starters, classifier))
                         emplaces.push_back(call);
                 }
             if (creates.empty() && fillCalls.empty() && emplaces.empty())

@@ -5,6 +5,7 @@
 
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace llvm
@@ -101,6 +102,15 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] JoiningHelpers
     collectJoiningHelpers(const llvm::Module& module, const ConcurrencySymbolClassifier& classifier,
                           JoiningHelpers known = {});
+
+    /// The `std::thread` constructors this module defines whose body starts no thread but the
+    /// one they build: every start they make, themselves or through the functions they call, is
+    /// handed the object they construct. A spawn calling one of them counts every thread its body
+    /// starts; any other constructor may also start threads of their own, as the copy of an
+    /// argument may.
+    [[nodiscard]] std::unordered_set<const llvm::Function*>
+    selfContainedThreadConstructors(const llvm::Module& module,
+                                    const ConcurrencySymbolClassifier& classifier);
 
     [[nodiscard]] ThreadCompletionMap
     collectThreadCompletions(const llvm::Module& module,
