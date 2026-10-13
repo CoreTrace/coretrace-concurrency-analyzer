@@ -562,6 +562,10 @@ namespace ctrace::concurrency::internal::analysis
             return std::nullopt;
         }
 
+        /// Two entries a function runs at once, one started while the other may run, named in
+        /// that function's frame: its id, then the two entries.
+        using EntryOverlap = std::tuple<std::string, std::string, std::string>;
+
         /// A running thread as one function sees it: the entry it runs and, when that function
         /// can name it, the handle a join would take there.
         struct ThreadInstance
@@ -749,6 +753,57 @@ namespace ctrace::concurrency::internal::analysis
                         }
                     }
                 }
+            }
+
+            /// Settles the entries each function starts before it returns, itself or through the
+            /// functions it calls, named in its own frame, whether or not they still run then.
+            void settleStarts()
+            {
+                for (const auto& [function, data] : functions_)
+                    starts_[function];
+                bool changed = true;
+                while (changed)
+                {
+                    changed = false;
+                    for (const auto& [function, data] : functions_)
+                    {
+                        ThreadEntrySet& starts = starts_.at(function);
+                        for (const SpawnSite& spawn : data.sites.spawns)
+                            changed = starts.insert(spawn.entryFunctionId).second || changed;
+                        for (const DirectCallSite* site : data.calls)
+                        {
+                            const auto callee = starts_.find(functionOf(site->calleeFunctionId));
+                            if (callee == starts_.end())
+                                continue;
+                            for (const std::string& entry :
+                                 atCaller(*function, *site, callee->second))
+                                changed = starts.insert(entry).second || changed;
+                        }
+                    }
+                }
+            }
+
+            /// The entries `point` starts while `instance`, running in `function`, may still run,
+            /// named in the frame of `function`: a call starts them before it returns, at points
+            /// its callee has not joined that thread by.
+            [[nodiscard]] ThreadEntrySet startedWhileRunning(const llvm::Function& function,
+                                                             const llvm::Instruction& point,
+                                                             const ThreadInstance& instance) const
+            {
+                for (const DirectCallSite* site : functions_.at(&function).calls)
+                {
+                    if (site->call != &point)
+                        continue;
+                    const llvm::Function* callee = functionOf(site->calleeFunctionId);
+                    if (callee == nullptr || !functions_.contains(callee))
+                        return {};
+                    std::optional<std::string> handle;
+                    if (instance.handle.has_value())
+                        handle =
+                            handleAtCallee(*instance.handle, *site->call, site->calleeFunctionId);
+                    return atCaller(function, *site, startedWhileHeld(*callee, handle));
+                }
+                return {};
             }
 
             /// Every thread running at `point`, named in the frame of `function`.
@@ -1190,6 +1245,60 @@ namespace ctrace::concurrency::internal::analysis
                        selfContainedConstructors_.contains(functionOf(site.calleeFunctionId));
             }
 
+            /// `entries`, which the callee of `site` starts, named in the frame of `function`;
+            /// none when the call counts them as a spawn.
+            [[nodiscard]] ThreadEntrySet atCaller(const llvm::Function& function,
+                                                  const DirectCallSite& site,
+                                                  const ThreadEntrySet& entries) const
+            {
+                ThreadEntrySet named;
+                if (countedBySpawn(function, site))
+                    return named;
+                for (const std::string& entry : entries)
+                {
+                    if (const std::optional<std::string> atCaller =
+                            entryAtCaller(ThreadInstance{entry, std::nullopt}, site))
+                        named.insert(*atCaller);
+                }
+                return named;
+            }
+
+            /// The entries `function` starts, itself or through its calls, while a thread it was
+            /// entered with, held at `handle`, may still run: where it has not joined it yet.
+            /// A recursion falls back on every entry the function starts.
+            [[nodiscard]] ThreadEntrySet
+            startedWhileHeld(const llvm::Function& function,
+                             const std::optional<std::string>& handle) const
+            {
+                const auto key = std::pair{&function, handle.value_or("\n")};
+                if (const auto known = startedWhileHeld_.find(key);
+                    known != startedWhileHeld_.end())
+                    return known->second;
+                startedWhileHeld_.emplace(key, starts_.at(&function));
+                ThreadEntrySet started;
+                const Reach& reach = handleReach(function, nullptr, handle);
+                const FunctionThreads& data = functions_.at(&function);
+                for (const SpawnSite& spawn : data.sites.spawns)
+                {
+                    if (reach.contains(*spawn.instruction))
+                        started.insert(spawn.entryFunctionId);
+                }
+                for (const DirectCallSite* site : data.calls)
+                {
+                    const llvm::Function* callee = functionOf(site->calleeFunctionId);
+                    if (callee == nullptr || !functions_.contains(callee) ||
+                        !reach.contains(*site->call))
+                        continue;
+                    std::optional<std::string> calleeHandle;
+                    if (handle.has_value())
+                        calleeHandle = handleAtCallee(*handle, *site->call, site->calleeFunctionId);
+                    started.merge(
+                        atCaller(function, *site, startedWhileHeld(*callee, calleeHandle)));
+                }
+                startedWhileHeld_[key] = started;
+                return started;
+            }
+
             /// The entry a thread a callee leaves running runs, as the caller names it: a named
             /// entry stays itself; an entry the callee took from a parameter is what `site`
             /// passes there, itself a parameter of the caller or a function. Nothing when the call
@@ -1219,25 +1328,6 @@ namespace ctrace::concurrency::internal::analysis
             }
 
           public:
-            /// The entries a call settles for threads its callee starts on an entry taken from a
-            /// parameter: those the call passes as a function, which run once it has returned.
-            [[nodiscard]] ThreadEntrySet settledAt(const llvm::Function& function,
-                                                   const llvm::Instruction& point) const
-            {
-                ThreadEntrySet settled;
-                const auto* call = llvm::dyn_cast<llvm::CallBase>(&point);
-                const auto calls = introducedByCalls_.find(&function);
-                if (call == nullptr || calls == introducedByCalls_.end())
-                    return settled;
-                for (const IntroducedThread& introduced : calls->second)
-                {
-                    if (introduced.call == call && introduced.settlesParameter &&
-                        !isParameterEntry(introduced.instance.entryFunctionId))
-                        settled.insert(introduced.instance.entryFunctionId);
-                }
-                return settled;
-            }
-
             /// The entries `entries` may stand for: a function's parameter entry is every entry
             /// the calls to it pass there.
             [[nodiscard]] ThreadEntrySet concreteEntries(const ThreadEntrySet& entries) const
@@ -1267,6 +1357,45 @@ namespace ctrace::concurrency::internal::analysis
                     }
                 }
                 return concrete;
+            }
+
+            /// The entries running twice at once in some context, from `overlaps`: pairs of
+            /// entries a function runs together, one started while the other may run. A pair
+            /// naming a parameter's entry is followed through each call to the function, which
+            /// substitutes what it passes into both: it may overlap before the function returns.
+            [[nodiscard]] ThreadEntrySet
+            overlappingAtCallers(const std::set<EntryOverlap>& overlaps) const
+            {
+                ThreadEntrySet overlapping;
+                std::vector<EntryOverlap> pending(overlaps.begin(), overlaps.end());
+                std::set<EntryOverlap> seen(overlaps.begin(), overlaps.end());
+                while (!pending.empty())
+                {
+                    const auto [function, first, second] = std::move(pending.back());
+                    pending.pop_back();
+                    if (!isParameterEntry(first) && !isParameterEntry(second))
+                    {
+                        if (first == second)
+                            overlapping.insert(first);
+                        continue;
+                    }
+                    for (const DirectCallSite& site : directCallSites_)
+                    {
+                        if (site.call == nullptr || site.calleeFunctionId != function)
+                            continue;
+                        const std::optional<std::string> firstAtCaller =
+                            entryAtCaller(ThreadInstance{first, std::nullopt}, site);
+                        const std::optional<std::string> secondAtCaller =
+                            entryAtCaller(ThreadInstance{second, std::nullopt}, site);
+                        if (!firstAtCaller.has_value() || !secondAtCaller.has_value())
+                            continue;
+                        EntryOverlap atCaller{site.callerFunctionId, *firstAtCaller,
+                                              *secondAtCaller};
+                        if (seen.insert(atCaller).second)
+                            pending.push_back(std::move(atCaller));
+                    }
+                }
+                return overlapping;
             }
 
           private:
@@ -1346,7 +1475,6 @@ namespace ctrace::concurrency::internal::analysis
                             IntroducedThread introduced{
                                 .call = site->call,
                                 .instance = {*entry, std::nullopt},
-                                .settlesParameter = isParameterEntry(instance.entryFunctionId),
                             };
                             if (instance.handle.has_value())
                                 introduced.storage = handleAtCaller(
@@ -1372,6 +1500,9 @@ namespace ctrace::concurrency::internal::analysis
             std::unordered_map<const llvm::Function*, FunctionThreads> functions_;
             std::unordered_map<const llvm::Function*, ThreadInstances> leaked_;
             std::unordered_map<const llvm::Function*, ThreadInstances> inherited_;
+            std::unordered_map<const llvm::Function*, ThreadEntrySet> starts_;
+            mutable std::map<std::pair<const llvm::Function*, std::string>, ThreadEntrySet>
+                startedWhileHeld_;
             /// A thread a call leaves running in its caller: the instance as the caller names it,
             /// and the storage holding it there, which a join ends it through even when that
             /// storage receives more than one thread and so names none of them.
@@ -1380,8 +1511,6 @@ namespace ctrace::concurrency::internal::analysis
                 const llvm::Instruction* call = nullptr;
                 ThreadInstance instance;
                 std::optional<std::string> storage;
-                /// The callee took the thread's entry from a parameter, which this call passes.
-                bool settlesParameter = false;
             };
             std::unordered_map<const llvm::Function*, std::vector<IntroducedThread>>
                 introducedByCalls_;
@@ -1456,6 +1585,8 @@ namespace ctrace::concurrency::internal::analysis
         }
 
         running.settleInheritance();
+        running.settleStarts();
+        std::set<EntryOverlap> overlaps;
         for (const llvm::Function& function : module)
         {
             if (function.isDeclaration() || !running.mayHoldThreads(function))
@@ -1484,15 +1615,23 @@ namespace ctrace::concurrency::internal::analysis
                     live.insert(started.begin(), started.end());
                     const ThreadEntrySet liveEntries = running.concreteEntries(entriesOf(live));
                     // An entry a spawn takes from a parameter is the one each call passes: the
-                    // check is made at the call that settles it, where it is known.
-                    if (const auto spawned = spawnedEntries.find(&instruction);
-                        spawned != spawnedEntries.end() && !isParameterEntry(*spawned->second) &&
+                    // check is made at the calls, where it is known. A thread this function
+                    // starts, itself or through a call, while another it started may run is
+                    // paired with it in this frame, whether or not either outlasts the function,
+                    // and each call to it substitutes what it passes into both. Threads running in
+                    // a caller meet the call there, through what it starts before joining them.
+                    const auto spawned = spawnedEntries.find(&instruction);
+                    if (spawned != spawnedEntries.end() && !isParameterEntry(*spawned->second) &&
                         liveEntries.contains(*spawned->second))
                         result.overlappingSpawnEntries.insert(*spawned->second);
-                    for (const std::string& entry : running.settledAt(function, instruction))
+                    for (const ThreadInstance& instance : started)
                     {
-                        if (liveEntries.contains(entry))
-                            result.overlappingSpawnEntries.insert(entry);
+                        ThreadEntrySet starting =
+                            running.startedWhileRunning(function, instruction, instance);
+                        if (spawned != spawnedEntries.end())
+                            starting.insert(*spawned->second);
+                        for (const std::string& entry : starting)
+                            overlaps.emplace(functionId(function), entry, instance.entryFunctionId);
                     }
                     if (!started.empty())
                         result.startedEntriesAtInstruction.emplace(
@@ -1503,6 +1642,8 @@ namespace ctrace::concurrency::internal::analysis
             }
         }
 
+        const ThreadEntrySet overlapping = running.overlappingAtCallers(overlaps);
+        result.overlappingSpawnEntries.insert(overlapping.begin(), overlapping.end());
         return result;
     }
 } // namespace ctrace::concurrency::internal::analysis
