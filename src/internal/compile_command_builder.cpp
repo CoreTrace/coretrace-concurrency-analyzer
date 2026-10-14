@@ -64,8 +64,27 @@ namespace ctrace::concurrency::internal
         // of the analyzed code must not stop its analysis, so no warning may become an error:
         // `-Werror` and its `-Werror=<warning>` and `-Werror-<warning>` forms, which `-Wno-error`
         // would not undo, and `-pedantic-errors`. Real errors still fail the compilation.
-        std::erase_if(args, [](const std::string& arg)
-                      { return arg.starts_with("-Werror") || arg == "-pedantic-errors"; });
+        auto turnsWarningsIntoErrors = [](const std::string& arg)
+        { return arg.starts_with("-Werror") || arg == "-pedantic-errors"; };
+
+        // `-Xclang` hands the argument after it to the frontend: the pair goes, or stays, as one,
+        // so that no `-Xclang` is left to take the next argument instead.
+        std::size_t writeIndex = 0;
+        for (std::size_t readIndex = 0; readIndex < args.size(); ++readIndex)
+        {
+            const bool handsOn = args[readIndex] == "-Xclang" && readIndex + 1 < args.size();
+            const std::size_t width = handsOn ? 2 : 1;
+            if (!turnsWarningsIntoErrors(args[readIndex + width - 1]))
+            {
+                for (std::size_t offset = 0; offset < width; ++offset, ++writeIndex)
+                {
+                    if (writeIndex != readIndex + offset)
+                        args[writeIndex] = std::move(args[readIndex + offset]);
+                }
+            }
+            readIndex += width - 1;
+        }
+        args.resize(writeIndex);
     }
 
     std::vector<std::string> CompileCommandBuilder::buildLL(const CompileRequest& request)
