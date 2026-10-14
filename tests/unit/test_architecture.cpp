@@ -890,6 +890,34 @@ entry:
         }
         return ok;
     }
+    /// An option `-Xclang` hands to the frontend goes with it: dropping one of the pair alone
+    /// would leave `-Xclang` taking the next argument instead. Other pairs are kept as given.
+    bool testCompileCommandBuilderDropsWarningsAsErrorsHandedToTheFrontend()
+    {
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/hello.c").string();
+        request.extraCompileArgs = {
+            "-Xclang", "-Werror",          "-Xclang", "-disable-O0-optnone",
+            "-Xclang", "-pedantic-errors", "-Xclang", "-Werror=unused-variable"};
+
+        bool ok = true;
+        for (const auto& [mode, args] : {std::pair{"LL", CompileCommandBuilder::buildLL(request)},
+                                         std::pair{"BC", CompileCommandBuilder::buildBC(request)}})
+        {
+            const std::string label = std::string(mode) + " args ";
+            const auto handed = std::find(args.begin(), args.end(), "-Xclang");
+            ok = assertTrue(countToken(args, "-Xclang") == 1,
+                            label + "should keep only the -Xclang handing on a kept option") &&
+                 assertTrue(handed != args.end() && std::next(handed) != args.end() &&
+                                *std::next(handed) == "-disable-O0-optnone",
+                            label + "should still hand -disable-O0-optnone to the frontend") &&
+                 assertTrue(!hasToken(args, "-Werror") && !hasToken(args, "-pedantic-errors") &&
+                                !hasToken(args, "-Werror=unused-variable"),
+                            label + "should drop the options -Xclang handed on") &&
+                 ok;
+        }
+        return ok;
+    }
 } // namespace
 
 int main()
@@ -918,6 +946,7 @@ int main()
     ok = testCompileCommandBuilderAvoidsDuplicateInputFile() && ok;
     ok = testCompileCommandBuilderStripsAttachedOutputFlags() && ok;
     ok = testCompileCommandBuilderDropsWarningsAsErrors() && ok;
+    ok = testCompileCommandBuilderDropsWarningsAsErrorsHandedToTheFrontend() && ok;
 
     if (!ok)
         return 1;

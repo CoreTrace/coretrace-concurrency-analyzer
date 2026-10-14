@@ -862,16 +862,19 @@ namespace
         return ok;
     }
 
-    /// A compile database holding one entry for `source`, compiled with `option`.
+    /// A compile database holding one entry for `source`, compiled with `options`.
     std::filesystem::path writeSingleUnitDatabase(const std::filesystem::path& directory,
                                                   const std::filesystem::path& source,
-                                                  std::string_view option)
+                                                  const std::vector<std::string>& options)
     {
         const std::filesystem::path database = directory / "compile_commands.json";
         std::ofstream out(database);
         out << "[{\"directory\": \"" << directory.string() << "\", \"file\": \"" << source.string()
             << "\", \"arguments\": [\"clang\", \"-c\", \"" << source.string()
-            << "\", \"-o\", \"unit.o\", \"" << option << "\"]}]\n";
+            << "\", \"-o\", \"unit.o\"";
+        for (const std::string& option : options)
+            out << ", \"" << option << "\"";
+        out << "]}]\n";
         return database;
     }
 
@@ -913,16 +916,29 @@ namespace
         };
 
         bool ok = true;
-        for (const std::string option : {"-Werror", "-Werror=#warnings", "-pedantic-errors"})
+        // An option `-Xclang` hands to the frontend goes with it, and the pair after it is kept.
+        const std::vector<std::vector<std::string>> optionSets = {
+            {"-Werror"},
+            {"-Werror=#warnings"},
+            {"-pedantic-errors"},
+            {"-Xclang", "-Werror", "-Xclang", "-disable-O0-optnone"},
+        };
+        for (const std::vector<std::string>& options : optionSets)
         {
+            std::string option;
+            std::vector<std::string> single = {warned.string(), "--analyze"};
+            for (const std::string& each : options)
+            {
+                option += (option.empty() ? "" : " ") + each;
+                single.push_back("--compile-arg=" + each);
+            }
             const RunResult project = runAnalyzer(
                 withReport({"--compile-commands=" +
-                                writeSingleUnitDatabase(directory, warned, option).string(),
+                                writeSingleUnitDatabase(directory, warned, options).string(),
                             "--no-cache"}));
-            const RunResult single =
-                runAnalyzer(withReport({warned.string(), "--analyze", "--compile-arg=" + option}));
+            const RunResult fromArgs = runAnalyzer(withReport(std::move(single)));
             for (const auto& [path, result] :
-                 {std::pair{"the compile database", project}, std::pair{"--compile-arg", single}})
+                 {std::pair{"the compile database", project}, std::pair{"--compile-arg", fromArgs}})
             {
                 const std::string label = option + " from " + path;
                 ok = assertTrue(result.exitCode == 0,
@@ -934,9 +950,10 @@ namespace
             }
         }
 
-        const RunResult project = runAnalyzer(withReport(
-            {"--compile-commands=" + writeSingleUnitDatabase(directory, broken, "-Werror").string(),
-             "--no-cache"}));
+        const RunResult project = runAnalyzer(
+            withReport({"--compile-commands=" +
+                            writeSingleUnitDatabase(directory, broken, {"-Werror"}).string(),
+                        "--no-cache"}));
         ok = assertTrue(project.exitCode != 0,
                         "a syntax error in a database unit should fail the analysis\noutput:\n" +
                             project.output) &&
