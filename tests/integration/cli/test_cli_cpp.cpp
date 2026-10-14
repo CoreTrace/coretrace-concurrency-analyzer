@@ -862,6 +862,105 @@ namespace
         return ok;
     }
 
+    /// A compile database holding one entry for `source`, compiled with `option`.
+    std::filesystem::path writeSingleUnitDatabase(const std::filesystem::path& directory,
+                                                  const std::filesystem::path& source,
+                                                  std::string_view option)
+    {
+        const std::filesystem::path database = directory / "compile_commands.json";
+        std::ofstream out(database);
+        out << "[{\"directory\": \"" << directory.string() << "\", \"file\": \"" << source.string()
+            << "\", \"arguments\": [\"clang\", \"-c\", \"" << source.string()
+            << "\", \"-o\", \"unit.o\", \"" << option << "\"]}]\n";
+        return database;
+    }
+
+    /// An option turning warnings into errors does not stop the analysis of code that warns,
+    /// whether it comes from the compile database or from `--compile-arg`: the analyzer's own
+    /// Clang and standard library may warn where the project's compiler did not (#199). A real
+    /// error still fails the unit, and the analysis is not reported as done.
+    bool testWarningsAsErrorsDoNotStopTheAnalysis()
+    {
+        const std::filesystem::path directory = makeTempDir("ctrace-cli-werror");
+        if (!assertTrue(!directory.empty(), "project directory should be created"))
+            return false;
+        const std::filesystem::path warned = directory / "warned.c";
+        {
+            std::ofstream out(warned);
+            out << "#include <pthread.h>\n"
+                << "#warning \"the analyzed code warns\"\n"
+                << "static int shared;\n"
+                << "static void* worker(void* argument) { (void)argument; shared += 1; return 0; "
+                   "}\n"
+                << "int main(void)\n{\n"
+                << "    pthread_t thread;\n"
+                << "    pthread_create(&thread, 0, worker, 0);\n"
+                << "    shared += 1;\n"
+                << "    pthread_join(thread, 0);\n"
+                << "    return shared;\n}\n";
+        }
+        const std::filesystem::path broken = directory / "broken.c";
+        {
+            std::ofstream out(broken);
+            out << "int main(void) { return 0 }\n";
+        }
+
+        const std::vector<std::string> report = {"--fail-on=none", "--format=json"};
+        auto withReport = [&](std::vector<std::string> args)
+        {
+            args.insert(args.end(), report.begin(), report.end());
+            return args;
+        };
+
+        bool ok = true;
+        for (const std::string option : {"-Werror", "-Werror=#warnings", "-pedantic-errors"})
+        {
+            const RunResult project = runAnalyzer(
+                withReport({"--compile-commands=" +
+                                writeSingleUnitDatabase(directory, warned, option).string(),
+                            "--no-cache"}));
+            const RunResult single =
+                runAnalyzer(withReport({warned.string(), "--analyze", "--compile-arg=" + option}));
+            for (const auto& [path, result] :
+                 {std::pair{"the compile database", project}, std::pair{"--compile-arg", single}})
+            {
+                const std::string label = option + " from " + path;
+                ok = assertTrue(result.exitCode == 0,
+                                label + " should not stop the analysis\noutput:\n" +
+                                    result.output) &&
+                     assertContains(result.output, "DataRaceGlobal", label) &&
+                     assertNotContains(result.output, "CompilerDiagnostic", label) &&
+                     assertNotContains(result.output, "could be compiled", label) && ok;
+            }
+        }
+
+        const RunResult project = runAnalyzer(withReport(
+            {"--compile-commands=" + writeSingleUnitDatabase(directory, broken, "-Werror").string(),
+             "--no-cache"}));
+        ok = assertTrue(project.exitCode != 0,
+                        "a syntax error in a database unit should fail the analysis\noutput:\n" +
+                            project.output) &&
+             assertContains(project.output, "could be compiled",
+                            "syntax error in a database unit") &&
+             assertNotContains(project.output, "DataRaceGlobal",
+                               "syntax error in a database unit") &&
+             ok;
+        const RunResult single =
+            runAnalyzer(withReport({broken.string(), "--analyze", "--compile-arg=-Werror"}));
+        ok = assertTrue(single.exitCode != 0,
+                        "a syntax error in the analyzed file should fail the analysis\noutput:\n" +
+                            single.output) &&
+             assertContains(single.output, "CompilerDiagnostic",
+                            "syntax error in the analyzed file") &&
+             assertNotContains(single.output, "DataRaceGlobal",
+                               "syntax error in the analyzed file") &&
+             ok;
+
+        std::error_code ec;
+        std::filesystem::remove_all(directory, ec);
+        return ok;
+    }
+
     /// A project whose compile database sits in its own directory, with the cache beside it:
     /// the two units of cross-tu-data-race, which race only when read together, and a generated
     /// unit holding more than a megabyte of bitcode, so that `bitcode-mb` tells bytes kept in
@@ -1121,6 +1220,7 @@ int main()
     ok = testInputValidationFailuresAndBackendDiagnostics() && ok;
     ok = testPermissionRelatedInputFailures() && ok;
     ok = testCompilationNeedsNoTemporaryBitcodeFile() && ok;
+    ok = testWarningsAsErrorsDoNotStopTheAnalysis() && ok;
     ok = testCachedProjectKeepsNoBitcodeInMemory() && ok;
     ok = testNoCacheNeitherReadsNorWritesTheCache() && ok;
 

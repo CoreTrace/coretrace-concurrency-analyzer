@@ -18,6 +18,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include <unistd.h>
@@ -855,6 +856,40 @@ entry:
 
         return llOk && bcOk;
     }
+    /// Options turning warnings into errors are dropped: the analyzer compiles with its own Clang
+    /// and standard library, which may warn where the project's compiler did not, and a warning of
+    /// the analyzed code must not stop its analysis. Warnings themselves, and options that only
+    /// relax them, are kept.
+    bool testCompileCommandBuilderDropsWarningsAsErrors()
+    {
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/hello.c").string();
+        request.extraCompileArgs = {"-Wall",
+                                    "-Werror",
+                                    "-Werror=deprecated-declarations",
+                                    "-Werror-implicit-function-declaration",
+                                    "-pedantic-errors",
+                                    "-Wno-error=unused-variable",
+                                    "-Wfatal-errors"};
+
+        bool ok = true;
+        for (const auto& [mode, args] : {std::pair{"LL", CompileCommandBuilder::buildLL(request)},
+                                         std::pair{"BC", CompileCommandBuilder::buildBC(request)}})
+        {
+            const std::string label = std::string(mode) + " args ";
+            for (const std::string_view dropped :
+                 {"-Werror", "-Werror=deprecated-declarations",
+                  "-Werror-implicit-function-declaration", "-pedantic-errors"})
+                ok = assertTrue(!hasToken(args, dropped),
+                                label + "should drop " + std::string(dropped)) &&
+                     ok;
+            for (const std::string_view kept :
+                 {"-Wall", "-Wno-error=unused-variable", "-Wfatal-errors"})
+                ok = assertTrue(hasToken(args, kept), label + "should keep " + std::string(kept)) &&
+                     ok;
+        }
+        return ok;
+    }
 } // namespace
 
 int main()
@@ -882,6 +917,7 @@ int main()
     ok = testIRLoaderErrorMapping() && ok;
     ok = testCompileCommandBuilderAvoidsDuplicateInputFile() && ok;
     ok = testCompileCommandBuilderStripsAttachedOutputFlags() && ok;
+    ok = testCompileCommandBuilderDropsWarningsAsErrors() && ok;
 
     if (!ok)
         return 1;
