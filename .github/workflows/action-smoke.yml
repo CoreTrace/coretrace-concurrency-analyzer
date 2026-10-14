@@ -93,6 +93,33 @@ jobs:
           [[ "${errors}" -ge 1 ]] \
             || { echo "::error::expected at least one error result in the SARIF"; exit 1; }
 
+      # ---- a unit that includes Clang's headers is analyzed --------------
+      # A Clang-based tool includes Clang's headers, so the image has to carry
+      # them next to LLVM's (#204). Without them the unit is skipped, the run
+      # produces no verdict, and this step fails.
+      - name: Generate a compilation database for a unit using Clang's headers
+        run: |
+          file="${GITHUB_WORKSPACE}/tests/fixtures/clang-headers/uses_clang_headers.cpp"
+          jq -n --arg d "$(dirname "${file}")" --arg f "${file}" \
+            '[{directory: $d, file: $f,
+               command: ("/usr/bin/clang++-20 -std=c++17 -I/usr/lib/llvm-20/include -c " + $f + " -o /dev/null")}]' \
+            > clang_headers_commands.json
+
+      - name: Analyze the unit using Clang's headers
+        id: clang-headers
+        uses: ./
+        with:
+          compile-commands: clang_headers_commands.json
+          fail-on: none
+          sarif-file: clang-headers.sarif
+          image: coretrace-concurrency-analyzer:ci
+          upload-sarif: "false"
+
+      - name: Check that the unit using Clang's headers was analyzed
+        run: |
+          jq -e '.runs[0].tool.driver.name' clang-headers.sarif > /dev/null \
+            || { echo "::error::no report for the unit using Clang's headers"; exit 1; }
+
       # ---- cross-TU resolves inside the container ----------------------
       # Written here rather than committed, because the point is that it carries
       # this runner's absolute paths and still resolves inside the container --
