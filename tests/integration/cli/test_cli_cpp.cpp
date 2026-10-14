@@ -862,6 +862,122 @@ namespace
         return ok;
     }
 
+    /// A compile database holding one entry for `source`, compiled with `options`.
+    std::filesystem::path writeSingleUnitDatabase(const std::filesystem::path& directory,
+                                                  const std::filesystem::path& source,
+                                                  const std::vector<std::string>& options)
+    {
+        const std::filesystem::path database = directory / "compile_commands.json";
+        std::ofstream out(database);
+        out << "[{\"directory\": \"" << directory.string() << "\", \"file\": \"" << source.string()
+            << "\", \"arguments\": [\"clang\", \"-c\", \"" << source.string()
+            << "\", \"-o\", \"unit.o\"";
+        for (const std::string& option : options)
+            out << ", \"" << option << "\"";
+        out << "]}]\n";
+        return database;
+    }
+
+    /// An option turning warnings into errors does not stop the analysis of code that warns,
+    /// whether it comes from the compile database or from `--compile-arg`: the analyzer's own
+    /// Clang and standard library may warn where the project's compiler did not (#199). A real
+    /// error still fails the unit, and the analysis is not reported as done.
+    bool testWarningsAsErrorsDoNotStopTheAnalysis()
+    {
+        const std::filesystem::path directory = makeTempDir("ctrace-cli-werror");
+        if (!assertTrue(!directory.empty(), "project directory should be created"))
+            return false;
+        const std::filesystem::path warned = directory / "warned.c";
+        {
+            std::ofstream out(warned);
+            out << "#include <pthread.h>\n"
+                << "#warning \"the analyzed code warns\"\n"
+                << "static int shared;\n"
+                << "static void* worker(void* argument) { (void)argument; shared += 1; return 0; "
+                   "}\n"
+                << "int main(void)\n{\n"
+                << "    pthread_t thread;\n"
+                << "    pthread_create(&thread, 0, worker, 0);\n"
+                << "    shared += 1;\n"
+                << "    pthread_join(thread, 0);\n"
+                << "    return shared;\n}\n";
+        }
+        const std::filesystem::path broken = directory / "broken.c";
+        {
+            std::ofstream out(broken);
+            out << "int main(void) { return 0 }\n";
+        }
+
+        const std::vector<std::string> report = {"--fail-on=none", "--format=json"};
+        auto withReport = [&](std::vector<std::string> args)
+        {
+            args.insert(args.end(), report.begin(), report.end());
+            return args;
+        };
+
+        bool ok = true;
+        // An option `-Xclang` hands to the frontend goes with it, and the pair after it is kept.
+        const std::vector<std::vector<std::string>> optionSets = {
+            {"-Werror"},
+            {"-Werror=#warnings"},
+            {"-pedantic-errors"},
+            {"-Xclang", "-Werror", "-Xclang", "-disable-O0-optnone"},
+        };
+        for (const std::vector<std::string>& options : optionSets)
+        {
+            std::string option;
+            std::vector<std::string> single = {warned.string(), "--analyze"};
+            for (const std::string& each : options)
+            {
+                option += (option.empty() ? "" : " ") + each;
+                single.push_back("--compile-arg=" + each);
+            }
+            const RunResult project = runAnalyzer(
+                withReport({"--compile-commands=" +
+                                writeSingleUnitDatabase(directory, warned, options).string(),
+                            "--no-cache"}));
+            const RunResult fromArgs = runAnalyzer(withReport(std::move(single)));
+            for (const auto& [path, result] :
+                 {std::pair{"the compile database", project}, std::pair{"--compile-arg", fromArgs}})
+            {
+                const std::string label = option + " from " + path;
+                ok = assertTrue(result.exitCode == 0,
+                                label + " should not stop the analysis\noutput:\n" +
+                                    result.output) &&
+                     assertContains(result.output, "DataRaceGlobal", label) &&
+                     assertNotContains(result.output, "CompilerDiagnostic", label) &&
+                     assertNotContains(result.output, "could be compiled", label) && ok;
+            }
+        }
+
+        const RunResult project = runAnalyzer(
+            withReport({"--compile-commands=" +
+                            writeSingleUnitDatabase(directory, broken, {"-Werror"}).string(),
+                        "--no-cache"}));
+        ok = assertTrue(project.exitCode != 0,
+                        "a syntax error in a database unit should fail the analysis\noutput:\n" +
+                            project.output) &&
+             assertContains(project.output, "could be compiled",
+                            "syntax error in a database unit") &&
+             assertNotContains(project.output, "DataRaceGlobal",
+                               "syntax error in a database unit") &&
+             ok;
+        const RunResult single =
+            runAnalyzer(withReport({broken.string(), "--analyze", "--compile-arg=-Werror"}));
+        ok = assertTrue(single.exitCode != 0,
+                        "a syntax error in the analyzed file should fail the analysis\noutput:\n" +
+                            single.output) &&
+             assertContains(single.output, "CompilerDiagnostic",
+                            "syntax error in the analyzed file") &&
+             assertNotContains(single.output, "DataRaceGlobal",
+                               "syntax error in the analyzed file") &&
+             ok;
+
+        std::error_code ec;
+        std::filesystem::remove_all(directory, ec);
+        return ok;
+    }
+
     /// A project whose compile database sits in its own directory, with the cache beside it:
     /// the two units of cross-tu-data-race, which race only when read together, and a generated
     /// unit holding more than a megabyte of bitcode, so that `bitcode-mb` tells bytes kept in
@@ -1121,6 +1237,7 @@ int main()
     ok = testInputValidationFailuresAndBackendDiagnostics() && ok;
     ok = testPermissionRelatedInputFailures() && ok;
     ok = testCompilationNeedsNoTemporaryBitcodeFile() && ok;
+    ok = testWarningsAsErrorsDoNotStopTheAnalysis() && ok;
     ok = testCachedProjectKeepsNoBitcodeInMemory() && ok;
     ok = testNoCacheNeitherReadsNorWritesTheCache() && ok;
 

@@ -57,10 +57,41 @@ namespace ctrace::concurrency::internal
         args.emplace_back("-O0");
     }
 
+    void CompileCommandBuilder::removeWarningsAsErrors(std::vector<std::string>& args)
+    {
+        // The analyzer compiles with its own Clang and standard library, which may warn where the
+        // project's compiler did not: LLVM's libc++ deprecates what an SDK's does not. A warning
+        // of the analyzed code must not stop its analysis, so no warning may become an error:
+        // `-Werror` and its `-Werror=<warning>` and `-Werror-<warning>` forms, which `-Wno-error`
+        // would not undo, and `-pedantic-errors`. Real errors still fail the compilation.
+        auto turnsWarningsIntoErrors = [](const std::string& arg)
+        { return arg.starts_with("-Werror") || arg == "-pedantic-errors"; };
+
+        // `-Xclang` hands the argument after it to the frontend: the pair goes, or stays, as one,
+        // so that no `-Xclang` is left to take the next argument instead.
+        std::size_t writeIndex = 0;
+        for (std::size_t readIndex = 0; readIndex < args.size(); ++readIndex)
+        {
+            const bool handsOn = args[readIndex] == "-Xclang" && readIndex + 1 < args.size();
+            const std::size_t width = handsOn ? 2 : 1;
+            if (!turnsWarningsIntoErrors(args[readIndex + width - 1]))
+            {
+                for (std::size_t offset = 0; offset < width; ++offset, ++writeIndex)
+                {
+                    if (writeIndex != readIndex + offset)
+                        args[writeIndex] = std::move(args[readIndex + offset]);
+                }
+            }
+            readIndex += width - 1;
+        }
+        args.resize(writeIndex);
+    }
+
     std::vector<std::string> CompileCommandBuilder::buildLL(const CompileRequest& request)
     {
         std::vector<std::string> args = request.extraCompileArgs;
         forceUnoptimizedCodegen(args);
+        removeWarningsAsErrors(args);
         removeOutputPathArgs(args);
         appendIfMissing(args, "-emit-llvm");
         appendIfMissing(args, "-S");
@@ -74,6 +105,7 @@ namespace ctrace::concurrency::internal
     {
         std::vector<std::string> args = request.extraCompileArgs;
         forceUnoptimizedCodegen(args);
+        removeWarningsAsErrors(args);
         args.erase(std::remove(args.begin(), args.end(), "-S"), args.end());
         removeOutputPathArgs(args);
         appendIfMissing(args, "-emit-llvm");
