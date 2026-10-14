@@ -23,5 +23,7 @@ namespace ctrace::concurrency::internal
         static void removeOutputPathArgs(std::vector<std::string>& args);
         /// Pins the optimization level the analysis is run at, whatever the caller asked for.
         static void forceUnoptimizedCodegen(std::vector<std::string>& args);
+        /// Drops the options turning warnings into errors, whatever the caller asked for.
+        static void removeWarningsAsErrors(std::vector<std::string>& args);
     };
 } // namespace ctrace::concurrency::internal

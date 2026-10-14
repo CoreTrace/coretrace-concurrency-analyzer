@@ -57,10 +57,22 @@ namespace ctrace::concurrency::internal
         args.emplace_back("-O0");
     }
 
+    void CompileCommandBuilder::removeWarningsAsErrors(std::vector<std::string>& args)
+    {
+        // The analyzer compiles with its own Clang and standard library, which may warn where the
+        // project's compiler did not: LLVM's libc++ deprecates what an SDK's does not. A warning
+        // of the analyzed code must not stop its analysis, so no warning may become an error:
+        // `-Werror` and its `-Werror=<warning>` and `-Werror-<warning>` forms, which `-Wno-error`
+        // would not undo, and `-pedantic-errors`. Real errors still fail the compilation.
+        std::erase_if(args, [](const std::string& arg)
+                      { return arg.starts_with("-Werror") || arg == "-pedantic-errors"; });
+    }
+
     std::vector<std::string> CompileCommandBuilder::buildLL(const CompileRequest& request)
     {
         std::vector<std::string> args = request.extraCompileArgs;
         forceUnoptimizedCodegen(args);
+        removeWarningsAsErrors(args);
         removeOutputPathArgs(args);
         appendIfMissing(args, "-emit-llvm");
         appendIfMissing(args, "-S");
@@ -74,6 +86,7 @@ namespace ctrace::concurrency::internal
     {
         std::vector<std::string> args = request.extraCompileArgs;
         forceUnoptimizedCodegen(args);
+        removeWarningsAsErrors(args);
         args.erase(std::remove(args.begin(), args.end(), "-S"), args.end());
         removeOutputPathArgs(args);
         appendIfMissing(args, "-emit-llvm");
