@@ -426,9 +426,10 @@ namespace ctrace::concurrency::internal::analysis
                                            kind == CallKind::StdThreadJoin ||
                                            kind == CallKind::StdThreadDtor ||
                                            llvm::isa<llvm::IntrinsicInst>(call);
-                        const bool stores =
-                            kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor ||
-                            buildsEmptyThread(*call) || (fills != nullptr && fills->contains(call));
+                        const bool stores = call == &writer || kind == CallKind::PThreadCreate ||
+                                            kind == CallKind::StdThreadCtor ||
+                                            buildsEmptyThread(*call) ||
+                                            (fills != nullptr && fills->contains(call));
                         if (!reads && (kept || !stores))
                             return false;
                     }
@@ -3350,9 +3351,10 @@ namespace ctrace::concurrency::internal::analysis
                     }
                     if (loops.getLoopFor(create->getParent()) != nullptr)
                         continue;
-                    const auto first = canonicalStorageGroupId(*create->getArgOperand(0));
+                    const llvm::CallBase& writer = handleWriter(*create, classifier);
+                    const auto first = canonicalStorageGroupId(*writer.getArgOperand(0));
                     const auto second = canonicalStorageGroupId(join.handle());
-                    const auto* createAddress = handleAddress(*create->getArgOperand(0), false);
+                    const auto* createAddress = handleAddress(*writer.getArgOperand(0), false);
                     const auto* joinAddress = handleAddress(join.handle(), join.byValue);
                     // Wildcard storage-group indices cannot establish handle identity.
                     bool sameAddress = createAddress && createAddress == joinAddress;
@@ -3365,12 +3367,13 @@ namespace ctrace::concurrency::internal::analysis
                     bool overwritten = false;
                     for (const auto* other : creates)
                         if (other != create && !other->arg_empty() &&
-                            canonicalStorageGroupId(*other->getArgOperand(0)) == first)
+                            canonicalStorageGroupId(
+                                *handleWriter(*other, classifier).getArgOperand(0)) == first)
                             overwritten = true;
                     if (!overwritten && sameAddress && first && first == second &&
-                        arrayStorageUnchanged(*create, *join.call, nullptr, dominators,
+                        arrayStorageUnchanged(writer, *join.call, nullptr, dominators,
                                               classifier) &&
-                        dominators.dominates(create, join.call) &&
+                        dominators.dominates(&writer, join.call) &&
                         completionCoversReturns(*create, *join.call))
                     {
                         ThreadCompletion completion;
