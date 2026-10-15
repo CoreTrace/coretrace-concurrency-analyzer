@@ -8,7 +8,83 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
-## Unreleased
+## v0.8.0
+
+Thread lifecycles are followed much further. A thread is now proven ended by
+many more of the ways programs join it (#123), and seen running where it was
+missed before; locks a helper takes through its parameters are ordered at each
+call (#114). Four changes in behaviour come with them.
+
+- **New reports possible: `data-race` and `deadlock-lock-order`.** Real races
+  and deadlocks v0.7.1 missed are now reported, as errors, so a run gated with
+  `--fail-on=error` can fail where v0.7.1 passed:
+  - a thread whose entry is a parameter of the function starting it, as a
+    helper `start(void* (*entry)(void*))` or
+    `std::vector<std::thread>::emplace_back(worker)` has, now runs in that
+    function's callers, and two threads a helper runs at once on the entry it
+    is handed race with each other (#123);
+  - two instances of an entry started through calls, as a helper called twice
+    or in a loop starts them, are seen running together (#126); a thread
+    started on a branch, or in an earlier round of a loop, runs wherever it may
+    reach, not only where its start dominates (#113, in part);
+  - a thread that the copy of a `std::thread` argument, or a vector's
+    allocator, starts keeps running past the join of that `std::thread` (#200);
+  - a join that may fail no longer ends its thread: the thread has ended only
+    past a successful join (#121, #122), and not along the unwind edge of an
+    invoked `join()` (#183);
+  - the owner's accesses to an object it handed to a thread, directly or
+    through a local pointer copy, are checked against that thread (#103,
+    #102), and a write reached in two contexts that may run at once is paired
+    with itself (#155);
+  - a deadlock whose locks a helper takes through its parameters, as
+    `transfer(&alice, &bob)` against `transfer(&bob, &alice)`, is reported
+    (#114), with the threads running where the helper locks (#124); a cycle
+    hidden behind an order the search rejected first is found (#127).
+- **Fewer false reports: threads end where they are joined.** `data-race`,
+  `missing-join` and the thread-lifetime rules no longer report a thread joined:
+  - by a loop over a handle array, however the spawn loops filled it: their
+    union, up to the count of created handles, one by one at constant slots, or
+    walked by pointer (#151, #157, #161), and each thread handed its own
+    element no longer races with the others (#108);
+  - through a `std::vector`, `std::list` or `std::deque` it was moved or
+    emplaced into, by a loop over it with an index, iterators, `it->join()` or
+    reverse iterators, below a constant or in batches; through `back()` or
+    `front()`; by popping it empty; by `std::for_each`; by a function it is
+    handed to, or the destructor of the object holding it; or by the caller of
+    a function that filled or returned it (#162, #123, #190, #192);
+  - through a pointer-to-member such as `&std::thread::join`, on the thread or
+    on a variable it was moved into (#123, #196);
+  - in another function than the one that started it (#99, in part).
+- **Fewer false deadlocks.** Guards built with `std::adopt_lock`, locks taken
+  in address order (#114, #138), and two orders a gate lock serializes, the
+  gate taken through a helper's parameter (#136), are no longer reported.
+- **A unit whose compile command turns warnings into errors is analysed.**
+  `-Werror`, `-Werror=<warning>`, `-Werror-<warning>` and `-pedantic-errors`,
+  with the `-Xclang` handing any of them on, are dropped from the commands the
+  analyzer compiles with, whether they come from the compile database or from
+  `--compile-arg`: its own Clang and libc++ may warn where the project's
+  compiler did not (#199). Real errors still fail the unit. A unit that failed
+  for that reason is now analysed, and may report.
+
+Fixes:
+
+- The release image installs Clang's headers (`libclang-20-dev`), so a
+  project whose sources include them, as a Clang-based tool's do, is analysed
+  in the container instead of having its units skipped (#204). The image is
+  about 60 MB larger.
+- Accesses are placed more precisely, which removes false races and finds
+  missed ones: a helper handed a member keeps its offset and extent, an element
+  pointer designates its whole array, and a call's effect is inferred from what
+  the callee does to each argument (#99); a pointer to an aggregate's first
+  field designates that field (#110); an access through a local pointer copy
+  keeps its path (#102); an array element a helper receives as an index is
+  placed at the index each call passes (#159).
+- The data-race analysis terminates on a recursion that advances a pointer
+  (#117).
+- A race on an object the owner handed to a thread is reported on "an object
+  shared with a thread", not on a global (#111).
+
+Performance and memory (#51):
 
 - Compiling to bitcode no longer goes through a temporary file: the compiler
   hands the bitcode over in memory, byte for byte what the file held, in every

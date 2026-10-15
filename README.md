@@ -62,7 +62,7 @@ The same report is available as **JSON** and **SARIF**, so it lands directly in 
 
 ```bash
 docker run --rm -v "$PWD:/work" \
-  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.7.1 file.c --analyze
+  ghcr.io/coretrace/coretrace-concurrency-analyzer:v0.8.0 file.c --analyze
 ```
 
 **On a whole project** — reuse the compilation database your build already produces:
@@ -138,7 +138,7 @@ ctrace::concurrency::SingleTUConcurrencyAnalyzer analyzer;
 auto report = analyzer.analyze(*result.module);
 ```
 
-Embed it with CMake `FetchContent` (tag `v0.7.1`); a complete consumer lives in
+Embed it with CMake `FetchContent` (tag `v0.8.0`); a complete consumer lives in
 [`extern-project/`](extern-project/). API reference: [docs/api.md](docs/api.md).
 
 ## Building
