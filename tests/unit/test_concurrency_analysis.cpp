@@ -3473,6 +3473,16 @@ namespace
              .intent = "a helper calling the pointer-to-member it is handed joins with &std::thread::join",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_moved_joined_through_member_pointer_helper_no_fp.cpp",
+             .intent = "a thread moved into its variable is joined through a pointer-to-member (#196)",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_moved_written_before_member_pointer_join_race.cpp",
+             .intent = "a moved thread joined through a pointer-to-member after main writes races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_vector_threads_written_before_for_each_mem_fn_race.cpp",
              .intent = "main's write before std::for_each joins through std::mem_fn races",
              .dataRace = 1,
