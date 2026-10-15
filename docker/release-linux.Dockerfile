@@ -11,6 +11,9 @@
 # analyses them, and the compiler backend was told at configure time where
 # clang lives. libstdc++-14-dev is there for the same reason -- analysing C++
 # means parsing its standard headers, so they have to exist in the image.
+# libclang-20-dev too: a Clang-based tool includes Clang's headers, next to
+# LLVM's, which the image already has. Installed with clang-20, it comes from
+# the same apt.llvm.org snapshot, so the headers match the compiler (#204).
 ARG BASE_IMAGE=ubuntu:24.04
 
 FROM ${BASE_IMAGE} AS build
@@ -69,7 +72,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY docker/wgetrc /etc/wgetrc
 RUN wget -nv https://apt.llvm.org/llvm.sh && chmod +x llvm.sh && ./llvm.sh 20 \
  && apt-get update && apt-get install -y --no-install-recommends \
-        clang-20 libstdc++-14-dev \
+        clang-20 libclang-20-dev libstdc++-14-dev \
  && apt-get purge -y --auto-remove gnupg software-properties-common wget \
  && rm -rf /var/lib/apt/lists/* llvm.sh
 
