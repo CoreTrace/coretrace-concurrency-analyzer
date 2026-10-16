@@ -55,6 +55,16 @@ namespace ctrace::concurrency::internal::analysis
         friend bool operator==(const MemberCall&, const MemberCall&) = default;
     };
 
+    /// What a call may do to the memory one of its pointer arguments points to.
+    struct ArgumentEffect
+    {
+        /// The call may keep the pointer past its return, after which anything may write through
+        /// it.
+        bool keeps = true;
+        /// The call may write some byte of what the argument points to.
+        bool writes = true;
+    };
+
     /// Which member function a call through a pointer-to-member invokes, on which object, in each
     /// context it is called from. It names targets and objects only: whether an invocation joins a
     /// thread is for the thread completion analysis to decide.
@@ -93,6 +103,14 @@ namespace ctrace::concurrency::internal::analysis
         /// function, or `this` is not the object.
         [[nodiscard]] const llvm::Function* calledWith(const MemberCall& member,
                                                        const HeldPair& pair) const;
+        /// What `call` may do to the memory its pointer argument `argument` points to. A function
+        /// this module defines is read from its effects, a write it cannot place counting as one
+        /// through the argument. Any other call writes through the argument unless LLVM states it
+        /// only reads memory there, and keeps it unless LLVM states it does not capture it: the
+        /// two statements are independent, so a call that only reads may keep the pointer, and
+        /// one that does not keep it may write through it. A pointer the call returns is not
+        /// counted: it may be the argument, and the caller follows it as such.
+        [[nodiscard]] ArgumentEffect effectOn(const llvm::CallBase& call, unsigned argument) const;
 
       private:
         struct Impl;

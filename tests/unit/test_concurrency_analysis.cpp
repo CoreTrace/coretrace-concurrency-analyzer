@@ -403,6 +403,71 @@ namespace
                           "the same pair with no adjustment names std::thread::join");
     }
 
+    /// What a call may do to the object it is handed, as the storage proof reads it (#206):
+    /// writing through it and keeping it are told apart, from what LLVM states about a declaration
+    /// and from the effects of a definition, a write it cannot place counting as one through it.
+    bool testArgumentEffectsTellWritesFromKeeping()
+    {
+        llvm::LLVMContext context;
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/argument_effects.c").string();
+        request.format = IRFormat::BC;
+        CompileResult compiled = InMemoryIRCompiler().compile(request, context);
+        const llvm::Function* exercise =
+            compiled.module != nullptr ? compiled.module->getFunction("exercise") : nullptr;
+        if (!assertTrue(exercise != nullptr, "the argument effects fixture compiles"))
+            return false;
+
+        const ctrace::concurrency::internal::analysis::HeldMemberAnalysis held(*compiled.module);
+        const auto effectIs = [&](llvm::StringRef callee, unsigned argument, bool keeps,
+                                  bool writes, const std::string& message)
+        {
+            for (const llvm::Instruction& instruction : llvm::instructions(*exercise))
+                if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction))
+                    if (const llvm::Function* called = call->getCalledFunction();
+                        called != nullptr && called->getName() == callee)
+                    {
+                        const auto effect = held.effectOn(*call, argument);
+                        return assertTrue(effect.keeps == keeps && effect.writes == writes,
+                                          message);
+                    }
+            return assertTrue(false, message + " (no call to " + callee.str() + ")");
+        };
+
+        bool ok = true;
+        ok = effectIs("touch", 0, false, true,
+                      "a declaration not capturing its argument may still write through it") &&
+             ok;
+        ok = effectIs("keep", 0, true, true,
+                      "a declaration LLVM states nothing about keeps and writes its argument") &&
+             ok;
+        ok = effectIs("peek", 0, true, false,
+                      "a declaration only reading memory may still keep its argument") &&
+             ok;
+        ok = effectIs("peek_in_place", 0, false, false,
+                      "a declaration only reading and not capturing does neither") &&
+             ok;
+        ok = effectIs("sum", 0, false, false, "a definition only reading does neither") && ok;
+        ok = effectIs("save", 0, true, false,
+                      "a definition storing its argument keeps it without writing through it") &&
+             ok;
+        ok = effectIs("same", 0, false, false,
+                      "a definition returning its argument leaves what it returns to its caller") &&
+             ok;
+        ok = effectIs("tally", 0, false, true,
+                      "a write a definition cannot place counts as one through its argument") &&
+             ok;
+        ok = effectIs("forward", 1, true, true,
+                      "an argument past a definition's parameters is kept and written") &&
+             ok;
+        ok = effectIs("llvm.memcpy.p0.p0.i64", 0, false, true, "a copy writes its destination") &&
+             ok;
+        ok = effectIs("llvm.memcpy.p0.p0.i64", 1, false, false,
+                      "a copy neither writes nor keeps its source") &&
+             ok;
+        return ok;
+    }
+
     bool testClassDataRaceReportsGlobalCounter()
     {
         const std::optional<DiagnosticReport> report =
@@ -5168,6 +5233,7 @@ int main()
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
     ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
+    ok = testArgumentEffectsTellWritesFromKeeping() && ok;
     ok = testClassDataRaceReportsGlobalCounter() && ok;
     ok = testSharedObjectByRefReportsGlobalCounter() && ok;
     ok = testMutexProtectedFixtureHasNoDiagnostics() && ok;

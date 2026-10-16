@@ -1017,6 +1017,24 @@ namespace ctrace::concurrency::internal::analysis
         return word->parameter;
     }
 
+    ArgumentEffect HeldMemberAnalysis::effectOn(const llvm::CallBase& call, unsigned argument) const
+    {
+        if (marksOnly(call))
+            return ArgumentEffect{.keeps = false, .writes = false};
+        if (const auto* intrinsic = llvm::dyn_cast<llvm::MemIntrinsic>(&call))
+            return ArgumentEffect{.keeps = false,
+                                  .writes = &call.getArgOperandUse(argument) ==
+                                            &intrinsic->getRawDestUse()};
+        const bool keeps = impl_->keeps(call, argument);
+        if (const FunctionEffects* callee = impl_->effectsOfCallee(call))
+            return ArgumentEffect{.keeps = keeps,
+                                  .writes = callee->elsewhere ||
+                                            argument >= callee->parameters.size() ||
+                                            !callee->parameters[argument].written.empty()};
+        return ArgumentEffect{.keeps = keeps,
+                              .writes = !call.onlyReadsMemory() && !call.onlyReadsMemory(argument)};
+    }
+
     const llvm::Function* HeldMemberAnalysis::calledWith(const MemberCall& member,
                                                          const HeldPair& pair) const
     {
