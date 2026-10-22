@@ -3805,6 +3805,42 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_written_before_member_pointer_join_race.cpp",
+             .intent = "a member function joining only after main writes races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_on_one_path_race.cpp",
+             .intent = "a member function joining on one path only leaves the reader running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_swapping_before_join_race.cpp",
+             .intent = "a member function swapping the thread away before its join races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_detaching_through_member_pointer_race.cpp",
+             .intent = "a member function detaching the thread leaves it running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_other_base_member_function_joined_by_member_pointer_race.cpp",
+             .intent = "the other base's member function joins that base's thread only",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_variable_slot_race.cpp",
+             .intent = "a member function joining a slot a member selects is not a known join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
