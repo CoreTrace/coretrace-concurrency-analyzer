@@ -3781,6 +3781,18 @@ namespace
                      "cpp_thread_member_function_joined_through_forwarded_member_pointer_no_fp.cpp",
              .intent = "that pointer-to-member forwarded to the wrapper still joins",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_through_helper_no_fp.cpp",
+             .intent = "the member's offset composes with the join of a helper it is handed to",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_sub_object_member_function_joined_by_member_pointer_no_fp.cpp",
+             .intent = "a sub-object's offset composes with the one its member function joins at",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_sub_object_no_fp.cpp",
+             .intent = "offsets compose through the member function of a sub-object it calls",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
