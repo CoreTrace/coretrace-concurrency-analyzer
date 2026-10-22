@@ -165,6 +165,10 @@ namespace ctrace::concurrency::internal::analysis
             /// The thread, when it is not the operand itself: a call through a pointer-to-member is
             /// handed the object adjusted by the pair, the adjustment being proven nil.
             const llvm::Value* object = nullptr;
+            /// Bytes past `handle()` where the handle joined lies, when the call joins a member of
+            /// the object it is handed. Sites with a nonzero offset are listed only to the analyses
+            /// asking for them: every other one reads `handle()` as the handle itself.
+            std::int64_t offset = 0;
 
             [[nodiscard]] const llvm::Value& handle() const
             {
@@ -2027,17 +2031,28 @@ namespace ctrace::concurrency::internal::analysis
                    isStdClass(name->context, "thread");
         }
 
-        bool joinsItsObject(const llvm::Function& function, const JoiningHelpers& helpers)
+        /// The offsets, past the address of the object `function` is called on, of the handles it
+        /// joins on every normal return: 0 for `std::thread::join`, and each offset at which it
+        /// joins its first parameter.
+        llvm::SmallVector<std::int64_t, 2> objectJoinOffsets(const llvm::Function& function,
+                                                             const JoiningHelpers& helpers)
         {
             if (isThreadJoin(function))
-                return true;
-            const auto helper = helpers.find(&function);
-            if (helper == helpers.end())
-                return false;
-            for (const JoinedParameter& parameter : helper->second)
-                if (parameter.index == 0 && parameter.ended)
-                    return true;
-            return false;
+                return {0};
+            llvm::SmallVector<std::int64_t, 2> offsets;
+            if (const auto helper = helpers.find(&function); helper != helpers.end())
+                for (const JoinedParameter& parameter : helper->second)
+                    if (parameter.index == 0 && parameter.ended &&
+                        !llvm::is_contained(offsets, parameter.offset))
+                        offsets.push_back(parameter.offset);
+            return offsets;
+        }
+
+        /// Whether calling `function` joins the handle at the address of the object it is called
+        /// on.
+        bool joinsItsObject(const llvm::Function& function, const JoiningHelpers& helpers)
+        {
+            return llvm::is_contained(objectJoinOffsets(function, helpers), 0);
         }
 
         /// Whether the member `member` names, with its pair resolved at `call`, joins its object.
@@ -2703,10 +2718,13 @@ namespace ctrace::concurrency::internal::analysis
                        : create;
         }
 
+        /// The joins `function` makes. One joining a member of the object its operand points to,
+        /// at a nonzero offset, is listed only when `atOffsets` asks for it.
         std::vector<JoinSite> joinSites(const llvm::Function& function,
                                         const ConcurrencySymbolClassifier& classifier,
                                         const JoiningHelpers& helpers,
-                                        const MemberJoins* members = nullptr)
+                                        const MemberJoins* members = nullptr,
+                                        bool atOffsets = false)
         {
             std::vector<JoinSite> sites;
             for (const llvm::BasicBlock& block : function)
@@ -2732,18 +2750,22 @@ namespace ctrace::concurrency::internal::analysis
                              memberInvocations(*call, *members))
                             if (constantPair(invocation.member.pair))
                                 if (const llvm::Function* called = members->held.calledWith(
-                                        invocation.member.call, invocation.member.pair);
-                                    called != nullptr && joinsItsObject(*called, members->helpers))
-                                    sites.push_back({.call = call,
-                                                     .operand = invocation.operand,
-                                                     .success = JoinSuccess{.after = call},
-                                                     .object = invocation.object});
+                                        invocation.member.call, invocation.member.pair))
+                                    for (const std::int64_t offset :
+                                         objectJoinOffsets(*called, members->helpers))
+                                        if (offset == 0 || atOffsets)
+                                            sites.push_back({.call = call,
+                                                             .operand = invocation.operand,
+                                                             .success = JoinSuccess{.after = call},
+                                                             .object = invocation.object,
+                                                             .offset = offset});
                     const auto helper = helpers.find(call->getCalledFunction());
                     if (helper == helpers.end())
                         continue;
                     for (const JoinedParameter& parameter : helper->second)
                     {
-                        if (parameter.index >= call->arg_size())
+                        if (parameter.index >= call->arg_size() ||
+                            (parameter.offset != 0 && !atOffsets))
                             continue;
                         std::optional<JoinSuccess> success;
                         if (parameter.ended)
@@ -2754,7 +2776,8 @@ namespace ctrace::concurrency::internal::analysis
                                          .operand = parameter.index,
                                          .byValue = parameter.byValue,
                                          .reportsStatus = parameter.reported,
-                                         .success = success});
+                                         .success = success,
+                                         .offset = parameter.offset});
                     }
                 }
             return sites;
@@ -2865,7 +2888,8 @@ namespace ctrace::concurrency::internal::analysis
                 return aliases;
             };
             std::vector<const llvm::CallBase*> joins;
-            for (const JoinSite& site : joinSites(function, classifier, members.helpers, &members))
+            for (const JoinSite& site :
+                 joinSites(function, classifier, members.helpers, &members, /*atOffsets=*/true))
             {
                 if (!handedTo(site))
                     continue;
