@@ -3906,6 +3906,22 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_helper_swapping_before_its_join_race.cpp",
+             .intent = "so does a swap before the helper's join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_swapping_between_joins_race.cpp",
+             .intent = "a swap between the member function's two joins races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_helper_joining_other_member_first_no_fp.cpp",
+             .intent = "joining the other member in a helper, then its own, ends both threads",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
