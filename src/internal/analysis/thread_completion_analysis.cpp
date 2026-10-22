@@ -3032,7 +3032,8 @@ namespace ctrace::concurrency::internal::analysis
         /// does when that function joins the parameter unchanged. `aliases` are the operands of
         /// `join` handed a pointer into the thread's storage besides its handle: what the function
         /// does through each of them is proven too. A join call changes nothing but the handle it
-        /// empties, which then holds no thread.
+        /// empties, which then holds no thread, unless another of its operands points into the
+        /// storage: `pthread_join` writes the thread's result there, which refuses.
         JoinProof waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
                                           llvm::ArrayRef<const llvm::CallBase*> callers,
                                           const MemberJoins& members,
@@ -3041,7 +3042,10 @@ namespace ctrace::concurrency::internal::analysis
         {
             const CallKind kind = classifier.classify(*join.call);
             if (kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin)
-                return JoinProof::Unchanged;
+                return llvm::all_of(aliases,
+                                    [&](unsigned operand) { return operand == join.operand; })
+                           ? JoinProof::Unchanged
+                           : JoinProof::Refused;
             if (callers.size() >= kMaxJoinDepth)
                 return JoinProof::Refused;
             std::vector<const llvm::CallBase*> through(callers.begin(), callers.end());
