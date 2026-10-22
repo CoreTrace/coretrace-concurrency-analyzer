@@ -454,11 +454,22 @@ namespace ctrace::concurrency::internal::analysis
             std::unordered_map<const llvm::Function*, std::vector<MemberJoin>> byFunction;
         };
 
-        bool waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
-                                     llvm::ArrayRef<const llvm::CallBase*> callers,
-                                     const MemberJoins& members,
-                                     LlvmFunctionAnalysisProvider& analyses,
-                                     const ConcurrencySymbolClassifier& classifier);
+        /// What a join is proven to do to the storage of the thread it waits for: nothing it does
+        /// before its joins may change the storage, or the proof is refused. Past its last join it
+        /// may still change it, which matters to a caller making another join after it: a write
+        /// there may precede that join.
+        enum class JoinProof
+        {
+            Refused,
+            Unchanged,
+            ChangedAfter,
+        };
+
+        JoinProof waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
+                                          llvm::ArrayRef<const llvm::CallBase*> callers,
+                                          const MemberJoins& members,
+                                          LlvmFunctionAnalysisProvider& analyses,
+                                          const ConcurrencySymbolClassifier& classifier);
 
         /// Whether `point` may run after `writer` and before `join`: `writer` may reach it, and it
         /// may reach `join`.
@@ -569,9 +580,11 @@ namespace ctrace::concurrency::internal::analysis
                         return false;
                 }
             }
+            // A change the join makes past its own joins follows every one of them, the join of the
+            // handle proven among them.
             if (!judged.empty() &&
-                (handedToThread ||
-                 !waitsForUnchangedHandle(join, joinAliases, {}, members, analyses, classifier)))
+                (handedToThread || waitsForUnchangedHandle(join, joinAliases, {}, members, analyses,
+                                                           classifier) == JoinProof::Refused))
                 return false;
             for (const auto& [call, argument] : judged)
             {
@@ -2850,25 +2863,30 @@ namespace ctrace::concurrency::internal::analysis
         /// parameters `parameters` hand it, each pointing into that thread's storage, as the
         /// thread was when the call was made. It must join it, and every join it makes on it must
         /// itself wait so; before any of them, nothing it does may write the storage through any
-        /// of those parameters or let its address escape. A pointer a call handed one of them
-        /// returns is followed as they are. A use it cannot follow, a pair it is handed that its
-        /// callers do not resolve, or a declaration refuses.
-        bool joinsWithoutChanging(const llvm::Function& function,
-                                  llvm::ArrayRef<unsigned> parameters,
-                                  llvm::ArrayRef<const llvm::CallBase*> callers,
-                                  const MemberJoins& members,
-                                  LlvmFunctionAnalysisProvider& analyses,
-                                  const ConcurrencySymbolClassifier& classifier)
+        /// of those parameters or let its address escape. A join it makes that may still change
+        /// the storage past its own joins counts as such a change wherever it may precede another
+        /// join, its own next round included. "Before" and "past" follow the control flow,
+        /// exception edges included: a change on a path through a landing pad that rejoins a
+        /// normal return is placed as any other. A pointer a call handed one of them returns is
+        /// followed as they are. A use it cannot follow, a pair it is handed that its callers do
+        /// not resolve, or a declaration refuses. Anything left past every join is told apart:
+        /// the joins a caller makes after this call are not covered by it.
+        JoinProof joinsWithoutChanging(const llvm::Function& function,
+                                       llvm::ArrayRef<unsigned> parameters,
+                                       llvm::ArrayRef<const llvm::CallBase*> callers,
+                                       const MemberJoins& members,
+                                       LlvmFunctionAnalysisProvider& analyses,
+                                       const ConcurrencySymbolClassifier& classifier)
         {
             if (function.isDeclaration())
-                return false;
+                return JoinProof::Refused;
             // The pointers into the storage, through the slots unoptimized code keeps them in,
             // and what each of their uses does.
             std::vector<const llvm::Value*> pending;
             for (const unsigned parameter : parameters)
             {
                 if (parameter >= function.arg_size())
-                    return false;
+                    return JoinProof::Refused;
                 pending.push_back(function.getArg(parameter));
             }
             llvm::SmallPtrSet<const llvm::Value*, 16> pointers;
@@ -2881,7 +2899,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (!pointers.insert(pointer).second)
                     continue;
                 if (pointers.size() > kMaxParameterPointers)
-                    return false;
+                    return JoinProof::Refused;
                 for (const llvm::Use& use : pointer->uses())
                 {
                     const llvm::User* user = use.getUser();
@@ -2909,7 +2927,7 @@ namespace ctrace::concurrency::internal::analysis
                             pending.push_back(call);
                     }
                     else if (!llvm::isa<llvm::LoadInst, llvm::ICmpInst>(user))
-                        return false;
+                        return JoinProof::Refused;
                 }
             }
             const auto handedTo = [&](const JoinSite& site)
@@ -2929,15 +2947,24 @@ namespace ctrace::concurrency::internal::analysis
                 return aliases;
             };
             std::vector<const llvm::CallBase*> joins;
+            // The joins that may still change the storage past their own joins.
+            std::vector<const llvm::CallBase*> changingJoins;
+            const auto record = [&](const llvm::CallBase& call, JoinProof proof)
+            {
+                joins.push_back(&call);
+                if (proof == JoinProof::ChangedAfter)
+                    changingJoins.push_back(&call);
+                return proof != JoinProof::Refused;
+            };
             for (const JoinSite& site :
                  joinSites(function, classifier, members.helpers, &members, /*atOffsets=*/true))
             {
                 if (!handedTo(site))
                     continue;
-                if (!waitsForUnchangedHandle(site, aliasesAt(*site.call), callers, members,
-                                             analyses, classifier))
-                    return false;
-                joins.push_back(site.call);
+                if (!record(*site.call,
+                            waitsForUnchangedHandle(site, aliasesAt(*site.call), callers, members,
+                                                    analyses, classifier)))
+                    return JoinProof::Refused;
             }
             // A pair the function is handed names what its callers resolve it to.
             for (const llvm::Instruction& instruction : llvm::instructions(function))
@@ -2947,16 +2974,16 @@ namespace ctrace::concurrency::internal::analysis
                         if (constantPair(invocation.member.pair) ||
                             !pointers.contains(invocation.object))
                             continue;
-                        if (!waitsForUnchangedHandle(JoinSite{.call = call,
-                                                              .operand = invocation.operand,
-                                                              .object = invocation.object},
-                                                     aliasesAt(*call), callers, members, analyses,
-                                                     classifier))
-                            return false;
-                        joins.push_back(call);
+                        if (!record(*call,
+                                    waitsForUnchangedHandle(JoinSite{.call = call,
+                                                                     .operand = invocation.operand,
+                                                                     .object = invocation.object},
+                                                            aliasesAt(*call), callers, members,
+                                                            analyses, classifier)))
+                            return JoinProof::Refused;
                     }
             if (joins.empty())
-                return false;
+                return JoinProof::Refused;
             const llvm::DominatorTree& dominators = analyses.getDominatorTree(function);
             const auto beforeAJoin = [&](const llvm::Instruction& point)
             {
@@ -2964,16 +2991,38 @@ namespace ctrace::concurrency::internal::analysis
                     joins, [&](const llvm::CallBase* join)
                     { return llvm::isPotentiallyReachable(&point, join, nullptr, &dominators); });
             };
+            // A join changing the storage past its own joins does so before any other join it may
+            // reach, and in a loop before its own next round.
+            const llvm::LoopInfo& loops = analyses.getLoopInfo(function);
+            for (const llvm::CallBase* changing : changingJoins)
+                if (loops.getLoopFor(changing->getParent()) != nullptr ||
+                    llvm::any_of(joins,
+                                 [&](const llvm::CallBase* join)
+                                 {
+                                     return join != changing &&
+                                            llvm::isPotentiallyReachable(changing, join, nullptr,
+                                                                         &dominators);
+                                 }))
+                    return JoinProof::Refused;
+            bool changedAfter = !changingJoins.empty();
             for (const auto& [call, argument] : calls)
             {
                 if (llvm::is_contained(joins, call))
                     continue;
                 const ArgumentEffect effect = members.held.effectOn(*call, argument);
-                if ((effect.keeps || effect.writes) && beforeAJoin(*call))
-                    return false;
+                if (!effect.keeps && !effect.writes)
+                    continue;
+                if (beforeAJoin(*call))
+                    return JoinProof::Refused;
+                changedAfter = true;
             }
-            return llvm::none_of(changes, [&](const llvm::Instruction* change)
-                                 { return beforeAJoin(*change); });
+            for (const llvm::Instruction* change : changes)
+            {
+                if (beforeAJoin(*change))
+                    return JoinProof::Refused;
+                changedAfter = true;
+            }
+            return changedAfter ? JoinProof::ChangedAfter : JoinProof::Unchanged;
         }
 
         /// Whether `join`, made in the function the last of `callers` calls or, without any, in the
@@ -2982,18 +3031,19 @@ namespace ctrace::concurrency::internal::analysis
         /// there is std::thread::join, or joins its object unchanged; a call to any other function
         /// does when that function joins the parameter unchanged. `aliases` are the operands of
         /// `join` handed a pointer into the thread's storage besides its handle: what the function
-        /// does through each of them is proven too.
-        bool waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
-                                     llvm::ArrayRef<const llvm::CallBase*> callers,
-                                     const MemberJoins& members,
-                                     LlvmFunctionAnalysisProvider& analyses,
-                                     const ConcurrencySymbolClassifier& classifier)
+        /// does through each of them is proven too. A join call changes nothing but the handle it
+        /// empties, which then holds no thread.
+        JoinProof waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
+                                          llvm::ArrayRef<const llvm::CallBase*> callers,
+                                          const MemberJoins& members,
+                                          LlvmFunctionAnalysisProvider& analyses,
+                                          const ConcurrencySymbolClassifier& classifier)
         {
             const CallKind kind = classifier.classify(*join.call);
             if (kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin)
-                return true;
+                return JoinProof::Unchanged;
             if (callers.size() >= kMaxJoinDepth)
-                return false;
+                return JoinProof::Refused;
             std::vector<const llvm::CallBase*> through(callers.begin(), callers.end());
             through.push_back(join.call);
             std::vector<unsigned> handed(aliases.begin(), aliases.end());
@@ -3006,13 +3056,17 @@ namespace ctrace::concurrency::internal::analysis
                     pair ? memberThrough(MemberCondition{.pair = *pair, .call = *direct}, callers,
                                          members)
                          : nullptr;
-                return member != nullptr && (isThreadJoin(*member) ||
-                                             joinsWithoutChanging(*member, handed, through, members,
-                                                                  analyses, classifier));
+                if (member == nullptr)
+                    return JoinProof::Refused;
+                if (isThreadJoin(*member))
+                    return JoinProof::Unchanged;
+                return joinsWithoutChanging(*member, handed, through, members, analyses,
+                                            classifier);
             }
             const llvm::Function* callee = join.call->getCalledFunction();
-            return callee != nullptr &&
-                   joinsWithoutChanging(*callee, handed, through, members, analyses, classifier);
+            if (callee == nullptr)
+                return JoinProof::Refused;
+            return joinsWithoutChanging(*callee, handed, through, members, analyses, classifier);
         }
 
         /// Records that `function` joins every thread of the vector at `container`, past
