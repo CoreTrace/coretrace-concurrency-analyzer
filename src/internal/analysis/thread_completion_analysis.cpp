@@ -451,6 +451,10 @@ namespace ctrace::concurrency::internal::analysis
         {
             const HeldMemberAnalysis& held;
             const JoiningHelpers& helpers;
+            /// The functions not established to start no thread. A member among them joins nothing
+            /// a caller can rely on: the analyses that follow a call do not follow one through a
+            /// pointer-to-member, so a thread it starts would go unseen once its join is known.
+            const std::unordered_set<const llvm::Function*>& possibleStarters;
             std::unordered_map<const llvm::Function*, std::vector<MemberJoin>> byFunction;
         };
 
@@ -2116,7 +2120,8 @@ namespace ctrace::concurrency::internal::analysis
             const std::optional<HeldPair> pair = members.held.atCall(member.pair, call);
             const llvm::Function* called =
                 pair && constantPair(*pair) ? members.held.calledWith(member.call, *pair) : nullptr;
-            return called != nullptr && joinsItsObject(*called, members.helpers);
+            return called != nullptr && !members.possibleStarters.contains(called) &&
+                   joinsItsObject(*called, members.helpers);
         }
 
         /// The joins `function` makes through a pointer-to-member whose pair depends on its own
@@ -2804,7 +2809,9 @@ namespace ctrace::concurrency::internal::analysis
                              memberInvocations(*call, *members))
                             if (constantPair(invocation.member.pair))
                                 if (const llvm::Function* called = members->held.calledWith(
-                                        invocation.member.call, invocation.member.pair))
+                                        invocation.member.call, invocation.member.pair);
+                                    called != nullptr &&
+                                    !members->possibleStarters.contains(called))
                                     for (const std::int64_t offset :
                                          objectJoinOffsets(*called, members->helpers))
                                         if (offset == 0 || atOffsets)
@@ -3106,6 +3113,22 @@ namespace ctrace::concurrency::internal::analysis
             return startsThread(call, classifier) || starters.contains(call.getCalledFunction());
         }
 
+        /// Whether `call` may start a thread, `starters` being the functions that may. A call
+        /// through a function pointer reaches the function the pointer certainly holds; one whose
+        /// callee is unknown, or only declared, since the classifier reads a direct call only, may
+        /// start a thread. A declared function called directly starts what the classifier tells
+        /// of it, as everywhere else in the analysis.
+        bool mayStart(const llvm::CallBase& call, const Starters& starters,
+                      const ConcurrencySymbolClassifier& classifier)
+        {
+            if (startsThread(call, classifier))
+                return true;
+            if (const llvm::Function* called = classifier.directCallee(call))
+                return starters.contains(called);
+            const llvm::Function* called = resolveFunctionValue(*call.getCalledOperand());
+            return called == nullptr || called->isDeclaration() || starters.contains(called);
+        }
+
         using StartTest = bool (*)(const llvm::CallBase&, const Starters&,
                                    const ConcurrencySymbolClassifier&);
 
@@ -3144,6 +3167,15 @@ namespace ctrace::concurrency::internal::analysis
                                 const ConcurrencySymbolClassifier& classifier)
         {
             return startersBy(module, classifier, startsDirectly);
+        }
+
+        /// The functions this module defines that are not established to start no thread. Not
+        /// starting one known to `threadStarters`, which follows direct calls only, is not enough:
+        /// a function absent from these starts none whatever form its calls take.
+        Starters possibleThreadStarters(const llvm::Module& module,
+                                        const ConcurrencySymbolClassifier& classifier)
+        {
+            return startersBy(module, classifier, mayStart);
         }
 
         /// Whether every thread `function` may start, itself or through the functions it calls, is
@@ -3660,7 +3692,12 @@ namespace ctrace::concurrency::internal::analysis
     {
         ThreadCompletionMap result;
         const HeldMemberAnalysis held(module);
-        MemberJoins members{.held = held, .helpers = helpers, .byFunction = {}};
+        const std::unordered_set<const llvm::Function*> possibleStarters =
+            possibleThreadStarters(module, classifier);
+        MemberJoins members{.held = held,
+                            .helpers = helpers,
+                            .possibleStarters = possibleStarters,
+                            .byFunction = {}};
         collectMemberJoins(module, members);
         const VectorHelpers joining =
             collectVectorHelpers(module, classifier, analyses, helpers, members);
