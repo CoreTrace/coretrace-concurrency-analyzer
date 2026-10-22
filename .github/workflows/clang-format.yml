@@ -18,6 +18,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y clang-format-20
           sudo update-alternatives --install /usr/bin/clang-format clang-format /usr/bin/clang-format-20 100
+          clang-format-20 --version
+          echo "clang-format on PATH: $(command -v clang-format)"
+          clang-format --version
 
       - name: Run format-check
         run: bash ./scripts/format-check.sh
