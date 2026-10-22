@@ -55,6 +55,9 @@ Function: increment
 ```
 
 The same report is available as **JSON** and **SARIF**, so it lands directly in GitHub Code Scanning.
+There, a finding's message is its plain statement and its notes are data (a `notes` array in
+JSON, a `notes` result property in SARIF); the `[!!!Error]` tag and the `↳` lines lay out the
+human report only.
 
 ## Quick start
 
@@ -136,6 +139,10 @@ auto result = compiler.compile({.inputFile = "sample.cpp"}, context);
 
 ctrace::concurrency::SingleTUConcurrencyAnalyzer analyzer;
 auto report = analyzer.analyze(*result.module);
+
+// What a finding's rule detects, with the text the reports give it.
+auto rule = ctrace::concurrency::describeRule(report.diagnostics.front().ruleId);
+// rule.title, rule.description, rule.defaultSeverity
 ```
 
 Embed it with CMake `FetchContent` (tag `v0.8.0`); a complete consumer lives in
