@@ -3097,40 +3097,53 @@ namespace ctrace::concurrency::internal::analysis
             return kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor;
         }
 
-        /// Whether `function` starts a thread, or calls a function among `starters`.
-        bool startsOrCalls(const llvm::Function& function,
-                           const std::unordered_set<const llvm::Function*>& starters,
-                           const ConcurrencySymbolClassifier& classifier)
+        using Starters = std::unordered_set<const llvm::Function*>;
+
+        /// Whether `call` starts a thread, or calls directly a function among `starters`.
+        bool startsDirectly(const llvm::CallBase& call, const Starters& starters,
+                            const ConcurrencySymbolClassifier& classifier)
         {
-            for (const llvm::Instruction& instruction : llvm::instructions(function))
-            {
-                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                if (call != nullptr && (startsThread(*call, classifier) ||
-                                        starters.contains(call->getCalledFunction())))
-                    return true;
-            }
-            return false;
+            return startsThread(call, classifier) || starters.contains(call.getCalledFunction());
         }
 
-        /// The functions this module defines that may start a thread, themselves or through the
-        /// functions they call: what a call can bring running threads from.
-        std::unordered_set<const llvm::Function*>
-        threadStarters(const llvm::Module& module, const ConcurrencySymbolClassifier& classifier)
+        using StartTest = bool (*)(const llvm::CallBase&, const Starters&,
+                                   const ConcurrencySymbolClassifier&);
+
+        /// The functions this module defines that make a call `starts` accepts, `starts` being
+        /// handed the functions found so far.
+        Starters startersBy(const llvm::Module& module,
+                            const ConcurrencySymbolClassifier& classifier, StartTest starts)
         {
-            std::unordered_set<const llvm::Function*> starters;
+            Starters starters;
             bool changed = true;
             while (changed)
             {
                 changed = false;
                 for (const llvm::Function& function : module)
-                    if (!function.isDeclaration() && !starters.contains(&function) &&
-                        startsOrCalls(function, starters, classifier))
+                {
+                    if (function.isDeclaration() || starters.contains(&function))
+                        continue;
+                    for (const llvm::Instruction& instruction : llvm::instructions(function))
                     {
-                        starters.insert(&function);
-                        changed = true;
+                        const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                        if (call != nullptr && starts(*call, starters, classifier))
+                        {
+                            starters.insert(&function);
+                            changed = true;
+                            break;
+                        }
                     }
+                }
             }
             return starters;
+        }
+
+        /// The functions this module defines that may start a thread, themselves or through the
+        /// functions they call: what a call can bring running threads from.
+        Starters threadStarters(const llvm::Module& module,
+                                const ConcurrencySymbolClassifier& classifier)
+        {
+            return startersBy(module, classifier, startsDirectly);
         }
 
         /// Whether every thread `function` may start, itself or through the functions it calls, is
