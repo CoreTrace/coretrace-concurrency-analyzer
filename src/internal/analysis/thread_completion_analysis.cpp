@@ -2995,15 +2995,14 @@ namespace ctrace::concurrency::internal::analysis
             // reach, and in a loop before its own next round.
             const llvm::LoopInfo& loops = analyses.getLoopInfo(function);
             for (const llvm::CallBase* changing : changingJoins)
-                if (loops.getLoopFor(changing->getParent()) != nullptr ||
-                    llvm::any_of(joins,
-                                 [&](const llvm::CallBase* join)
-                                 {
-                                     return join != changing &&
-                                            llvm::isPotentiallyReachable(changing, join, nullptr,
-                                                                         &dominators);
-                                 }))
+            {
+                if (loops.getLoopFor(changing->getParent()) != nullptr)
                     return JoinProof::Refused;
+                for (const llvm::CallBase* join : joins)
+                    if (join != changing &&
+                        llvm::isPotentiallyReachable(changing, join, nullptr, &dominators))
+                        return JoinProof::Refused;
+            }
             bool changedAfter = !changingJoins.empty();
             for (const auto& [call, argument] : calls)
             {
