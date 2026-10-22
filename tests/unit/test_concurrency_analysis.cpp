@@ -3932,6 +3932,12 @@ namespace
                      "cpp_thread_member_function_helper_catching_after_its_join_no_fp.cpp",
              .intent = "a catch past a helper's join that leaves the object alone ends both",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_restarting_after_join_race.cpp",
+             .intent = "a member function starting its thread again past its join races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
