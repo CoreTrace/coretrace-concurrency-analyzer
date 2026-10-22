@@ -3793,6 +3793,18 @@ namespace
                      "cpp_thread_member_function_joining_sub_object_no_fp.cpp",
              .intent = "offsets compose through the member function of a sub-object it calls",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_other_member_created_after_race.cpp",
+             .intent = "a member function joining the other member leaves the reader's running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_other_member_created_before_race.cpp",
+             .intent = "so does it when the reader's member is the last stored before the join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
