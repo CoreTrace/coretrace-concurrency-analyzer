@@ -207,3 +207,13 @@ namespace ctrace::concurrency::internal::diagnostics
         return kCompilerDiagnostic;
     }
 } // namespace ctrace::concurrency::internal::diagnostics
+
+namespace ctrace::concurrency
+{
+    RuleDescription describeRule(RuleId ruleId)
+    {
+        const internal::diagnostics::RuleMetadata& metadata =
+            internal::diagnostics::lookupRuleMetadata(ruleId);
+        return RuleDescription{metadata.title, metadata.shortDescription, metadata.defaultSeverity};
+    }
+} // namespace ctrace::concurrency
