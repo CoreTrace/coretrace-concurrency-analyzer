@@ -26,6 +26,7 @@
 #include <llvm/Support/CheckedArithmetic.h>
 
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <string>
@@ -3618,7 +3619,13 @@ namespace ctrace::concurrency::internal::analysis
                 }
             if (creates.empty() && fillCalls.empty() && emplaces.empty())
                 continue;
-            const std::vector<JoinSite> joins = joinSites(function, classifier, helpers, &members);
+            // Only the match of a creation to its join below reads a join of an object's member at
+            // a nonzero offset: every other proof reads a site's operand as the handle itself.
+            const std::vector<JoinSite> allJoins =
+                joinSites(function, classifier, helpers, &members, /*atOffsets=*/true);
+            std::vector<JoinSite> joins;
+            llvm::copy_if(allJoins, std::back_inserter(joins),
+                          [](const JoinSite& join) { return join.offset == 0; });
             std::vector<const llvm::CallBase*> handOffs;
             for (const llvm::BasicBlock& block : function)
                 for (const llvm::Instruction& instruction : block)
@@ -3626,7 +3633,7 @@ namespace ctrace::concurrency::internal::analysis
                         call != nullptr && (joining.vectors.contains(call->getCalledFunction()) ||
                                             joining.ranges.contains(call->getCalledFunction())))
                         handOffs.push_back(call);
-            if (joins.empty() && handOffs.empty())
+            if (allJoins.empty() && handOffs.empty())
                 continue;
             const auto& dominators = analyses.getDominatorTree(function);
             const auto& loops = analyses.getLoopInfo(function);
@@ -3699,17 +3706,18 @@ namespace ctrace::concurrency::internal::analysis
                                                            *call, handOff, joining, dominators));
             }
             for (const auto* create : creates)
-                for (const JoinSite& join : joins)
+                for (const JoinSite& join : allJoins)
                 {
                     if (create->arg_empty())
                         continue;
-                    if (const std::optional<ThreadCompletion> completion =
-                            loopCompletion(*create, handleWriter(*create, classifier), join, fills,
-                                           loops, dominators, classifier, members, analyses))
-                    {
-                        result.emplace(create, *completion);
-                        break;
-                    }
+                    if (join.offset == 0)
+                        if (const std::optional<ThreadCompletion> completion = loopCompletion(
+                                *create, handleWriter(*create, classifier), join, fills, loops,
+                                dominators, classifier, members, analyses))
+                        {
+                            result.emplace(create, *completion);
+                            break;
+                        }
                     if (loops.getLoopFor(create->getParent()) != nullptr)
                         continue;
                     const llvm::CallBase& writer = handleWriter(*create, classifier);
@@ -3725,13 +3733,35 @@ namespace ctrace::concurrency::internal::analysis
                     if (createGep && joinGep && createGep->hasAllConstantIndices() &&
                         joinGep->hasAllConstantIndices() && first && first == second)
                         sameAddress = true;
+                    // A join names the handle itself only at no offset into what it is handed.
+                    // Otherwise, as for any address, the handle is the value the address is a
+                    // constant offset from and that offset, the join's own added.
+                    const bool named = join.offset == 0 && sameAddress && first && first == second;
+                    const auto created = createAddress != nullptr
+                                             ? constantOffsetFrom(*createAddress, 0, layout)
+                                             : std::nullopt;
+                    const auto joined = joinAddress != nullptr
+                                            ? constantOffsetFrom(*joinAddress, join.offset, layout)
+                                            : std::nullopt;
+                    const bool located = created && joined && *created == *joined;
+                    // Another creation storing at the handle leaves the join's thread ambiguous. It
+                    // is told by the storage group, and by the same location a match may rest on:
+                    // a creation writing there through another spelling of the address is no less
+                    // one.
                     bool overwritten = false;
                     for (const auto* other : creates)
-                        if (other != create && !other->arg_empty() &&
-                            canonicalStorageGroupId(
-                                *handleWriter(*other, classifier).getArgOperand(0)) == first)
+                    {
+                        if (other == create || other->arg_empty())
+                            continue;
+                        const llvm::Value& stored =
+                            *handleWriter(*other, classifier).getArgOperand(0);
+                        const auto* storedAddress = handleAddress(stored, false);
+                        if (canonicalStorageGroupId(stored) == first ||
+                            (created && storedAddress != nullptr &&
+                             constantOffsetFrom(*storedAddress, 0, layout) == created))
                             overwritten = true;
-                    if (!overwritten && sameAddress && first && first == second &&
+                    }
+                    if (!overwritten && (named || located) &&
                         arrayStorageUnchanged(writer, join, nullptr, dominators, classifier,
                                               members, analyses) &&
                         dominators.dominates(&writer, join.call) &&
