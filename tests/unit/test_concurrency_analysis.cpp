@@ -3768,6 +3768,19 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a member function joining a member, called through a pointer-to-member (#195) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joined_through_member_pointer_no_fp.cpp",
+             .intent = "a member function joining its object's thread ends it, called by pointer",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_at_offset_joined_through_member_pointer_no_fp.cpp",
+             .intent = "a member past its object's start is joined by that member function",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joined_through_forwarded_member_pointer_no_fp.cpp",
+             .intent = "that pointer-to-member forwarded to the wrapper still joins",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
