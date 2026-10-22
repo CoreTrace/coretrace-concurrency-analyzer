@@ -2,6 +2,7 @@
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
 #include "internal/analysis/held_member_analysis.hpp"
+#include "internal/analysis/thread_completion_analysis.hpp"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
@@ -464,6 +465,58 @@ namespace
              ok;
         ok = effectIs("llvm.memcpy.p0.p0.i64", 1, false, false,
                       "a copy neither writes nor keeps its source") &&
+             ok;
+        return ok;
+    }
+
+    /// What a function is summarised as joining (#195): a handle at a constant offset into the
+    /// object a parameter points to is an entry of its own, offsets compose through the helpers a
+    /// function calls, and a recursion stepping its parameter's offset stays bounded.
+    bool testJoinSummariesKeepTheirOffsets()
+    {
+        llvm::LLVMContext context;
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/joined_offsets.cpp").string();
+        request.extraCompileArgs = {"-std=c++20"};
+        request.format = IRFormat::BC;
+        CompileResult compiled = InMemoryIRCompiler().compile(request, context);
+        if (!assertTrue(compiled.module != nullptr, "the joined offsets fixture compiles"))
+            return false;
+
+        const ctrace::concurrency::internal::analysis::JoiningHelpers helpers =
+            ctrace::concurrency::internal::analysis::collectJoiningHelpers(
+                *compiled.module,
+                ctrace::concurrency::internal::analysis::ConcurrencySymbolClassifier{});
+        const auto offsetsOf = [&](llvm::StringRef name)
+        {
+            std::vector<std::int64_t> offsets;
+            const llvm::Function* function = compiled.module->getFunction(name);
+            if (const auto found = helpers.find(function); found != helpers.end())
+                for (const auto& parameter : found->second)
+                    if (parameter.index == 0 && parameter.ended)
+                        offsets.push_back(parameter.offset);
+            std::sort(offsets.begin(), offsets.end());
+            return offsets;
+        };
+
+        bool ok = true;
+        ok = assertTrue(offsetsOf("joinBoth") == std::vector<std::int64_t>{0, 8},
+                        "a function joining two members is summarised at both offsets") &&
+             ok;
+        ok = assertTrue(offsetsOf("joinSecond") == std::vector<std::int64_t>{8},
+                        "a function joining the second member is summarised at its offset alone") &&
+             ok;
+        ok =
+            assertTrue(offsetsOf("joinSecondThroughHelper") == std::vector<std::int64_t>{8},
+                       "a helper's offset carries over to the function handing it its parameter") &&
+            ok;
+        ok = assertTrue(offsetsOf("joinSecondOfInner") == std::vector<std::int64_t>{16},
+                        "a member's offset composes with the offset the helper joins it at") &&
+             ok;
+        const std::vector<std::int64_t> stepped = offsetsOf("joinFrom");
+        ok = assertTrue(
+                 stepped.size() > 1 && stepped.size() <= 8,
+                 "a recursion stepping its parameter's offset is summarised within a bound") &&
              ok;
         return ok;
     }
@@ -5318,6 +5371,7 @@ int main()
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
     ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
+    ok = testJoinSummariesKeepTheirOffsets() && ok;
     ok = testArgumentEffectsTellWritesFromKeeping() && ok;
     ok = testClassDataRaceReportsGlobalCounter() && ok;
     ok = testSharedObjectByRefReportsGlobalCounter() && ok;

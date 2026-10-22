@@ -148,6 +148,46 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
+        /// The value the pointer `address` is a constant number of bytes past, and that number,
+        /// `extra` added: through the locals unoptimized code keeps a pointer in, as
+        /// `invariantValue` follows them, and the in-bounds offsets the data layout computes
+        /// exactly. Any step LLVM cannot compute exactly stops there, so the value found is the
+        /// pointer that step produces; a sum that overflows, or locals forwarding a pointer around
+        /// a cycle, give nothing.
+        std::optional<std::pair<const llvm::Value*, std::int64_t>>
+        constantOffsetFrom(const llvm::Value& address, std::int64_t extra,
+                           const llvm::DataLayout& layout)
+        {
+            if (!address.getType()->isPointerTy())
+                return std::nullopt;
+            llvm::APInt offset(layout.getIndexTypeSizeInBits(address.getType()),
+                               static_cast<std::uint64_t>(extra), /*isSigned=*/true);
+            const llvm::Value* value = &address;
+            llvm::SmallPtrSet<const llvm::Value*, 8> visited;
+            while (true)
+            {
+                if (!visited.insert(value).second)
+                    return std::nullopt;
+                const llvm::Value* forwarded = invariantValue(value);
+                if (forwarded == nullptr || !forwarded->getType()->isPointerTy())
+                    return std::nullopt;
+                llvm::APInt step(offset.getBitWidth(), 0);
+                const llvm::Value* base = forwarded->stripAndAccumulateConstantOffsets(
+                    layout, step, /*AllowNonInbounds=*/false);
+                bool overflow = false;
+                offset = offset.sadd_ov(step, overflow);
+                if (overflow)
+                    return std::nullopt;
+                if (base == value)
+                    break;
+                value = base;
+            }
+            const std::optional<std::int64_t> bytes = offset.trySExtValue();
+            if (!bytes)
+                return std::nullopt;
+            return std::pair{value, *bytes};
+        }
+
         /// A call that waits for the thread whose handle is one of its operands: a join, or a
         /// call to a helper that joins that parameter on every normal return.
         struct JoinSite
@@ -3462,10 +3502,16 @@ namespace ctrace::concurrency::internal::analysis
         return true;
     }
 
+    /// Past this many, a function's joined parameters are no longer recorded: each distinct
+    /// offset is an entry of its own, and a recursion stepping the offset would grow them without
+    /// end. A join left out is only a join not known.
+    constexpr std::size_t kMaxJoinedParameters = 8;
+
     /// A function joins a parameter when a join of it, in place or through another joining
     /// helper, stands on every path from the entry to a normal return. The parameter is
-    /// followed only through a local copy written once, so the handle joined is the one the
-    /// caller passed. Whether the thread has also ended there, or the function hands the join's
+    /// followed only through a local copy written once and the constant in-bounds offsets the
+    /// data layout computes, so the handle joined lies where the caller's argument, that offset
+    /// added, says. Whether the thread has also ended there, or the function hands the join's
     /// status to its caller, is summarized beside it. Iterated to a fixed point: a helper calling
     /// a helper is found whatever order the module lists them in.
     JoiningHelpers collectJoiningHelpers(const llvm::Module& module,
@@ -3473,6 +3519,7 @@ namespace ctrace::concurrency::internal::analysis
                                          JoiningHelpers known)
     {
         JoiningHelpers helpers = std::move(known);
+        const llvm::DataLayout& layout = module.getDataLayout();
         bool changed = true;
         while (changed)
         {
@@ -3482,10 +3529,23 @@ namespace ctrace::concurrency::internal::analysis
                 if (function.isDeclaration())
                     continue;
                 const llvm::Instruction& entry = function.getEntryBlock().front();
-                for (const JoinSite& site : joinSites(function, classifier, helpers))
+                for (const JoinSite& site :
+                     joinSites(function, classifier, helpers, nullptr, /*atOffsets=*/true))
                 {
-                    const auto* parameter =
-                        llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
+                    // A handle travelling by value is the parameter itself. One handed by address
+                    // may lie at a constant offset into the object a parameter points to, the
+                    // offset of the helper the site calls added.
+                    const llvm::Argument* parameter = nullptr;
+                    std::int64_t offset = 0;
+                    if (site.byValue)
+                        parameter =
+                            llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
+                    else if (const auto place =
+                                 constantOffsetFrom(site.handle(), site.offset, layout))
+                    {
+                        parameter = llvm::dyn_cast<llvm::Argument>(place->first);
+                        offset = place->second;
+                    }
                     if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
                         continue;
                     const bool ended =
@@ -3495,13 +3555,18 @@ namespace ctrace::concurrency::internal::analysis
                     JoinedParameter* summary = nullptr;
                     for (JoinedParameter& existing : joined)
                     {
-                        if (existing.index == parameter->getArgNo())
+                        if (existing.index == parameter->getArgNo() && existing.offset == offset)
                             summary = &existing;
                     }
                     if (summary == nullptr)
                     {
+                        // A recursion stepping its parameter's offset would add entries without
+                        // end: past the bound, a join is not summarised.
+                        if (joined.size() >= kMaxJoinedParameters)
+                            continue;
                         joined.push_back({.index = parameter->getArgNo(),
                                           .byValue = site.byValue,
+                                          .offset = offset,
                                           .ended = ended,
                                           .reported = reported});
                         changed = true;
