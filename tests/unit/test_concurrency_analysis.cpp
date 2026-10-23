@@ -2630,15 +2630,15 @@ namespace
                      "cpp_thread_member_pointer_detach_on_one_path_reports_missing_join.cpp",
              .intent = "that detach on one branch only leaves the other path abandoning it",
              .dataRace = 1,
-             .racingSymbol = "_ZL6shared",
              .missingJoin = 1,
+             .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "cpp_thread_member_pointer_detaching_other_reports_missing_join.cpp",
              .intent = "it resolves the thread of the object it is called on, not another",
              .dataRace = 1,
-             .racingSymbol = "_ZL6shared",
              .missingJoin = 1,
+             .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
             {.path = "tests/fixtures/concurrency/missing-join/"
                      "cpp_thread_joined_through_member_pointer_no_missing_join.cpp",
@@ -2648,8 +2648,8 @@ namespace
                      "cpp_thread_member_pointer_naming_other_member_reports_missing_join.cpp",
              .intent = "a pointer naming another member of a thread's class resolves nothing",
              .dataRace = 1,
-             .racingSymbol = "_ZL6shared",
              .missingJoin = 1,
+             .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
 
             // --- imported missing-join fixtures (Nihil, 91e7431; #4) ---
