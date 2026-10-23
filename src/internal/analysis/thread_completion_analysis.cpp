@@ -26,6 +26,7 @@
 #include <llvm/Support/CheckedArithmetic.h>
 
 #include <cstdint>
+#include <iterator>
 #include <optional>
 #include <set>
 #include <string>
@@ -148,6 +149,46 @@ namespace ctrace::concurrency::internal::analysis
             return nullptr;
         }
 
+        /// The value the pointer `address` is a constant number of bytes past, and that number,
+        /// `extra` added: through the locals unoptimized code keeps a pointer in, as
+        /// `invariantValue` follows them, and the in-bounds offsets the data layout computes
+        /// exactly. Any step LLVM cannot compute exactly stops there, so the value found is the
+        /// pointer that step produces; a sum that overflows, or locals forwarding a pointer around
+        /// a cycle, give nothing.
+        std::optional<std::pair<const llvm::Value*, std::int64_t>>
+        constantOffsetFrom(const llvm::Value& address, std::int64_t extra,
+                           const llvm::DataLayout& layout)
+        {
+            if (!address.getType()->isPointerTy())
+                return std::nullopt;
+            llvm::APInt offset(layout.getIndexTypeSizeInBits(address.getType()),
+                               static_cast<std::uint64_t>(extra), /*isSigned=*/true);
+            const llvm::Value* value = &address;
+            llvm::SmallPtrSet<const llvm::Value*, 8> visited;
+            while (true)
+            {
+                if (!visited.insert(value).second)
+                    return std::nullopt;
+                const llvm::Value* forwarded = invariantValue(value);
+                if (forwarded == nullptr || !forwarded->getType()->isPointerTy())
+                    return std::nullopt;
+                llvm::APInt step(offset.getBitWidth(), 0);
+                const llvm::Value* base = forwarded->stripAndAccumulateConstantOffsets(
+                    layout, step, /*AllowNonInbounds=*/false);
+                bool overflow = false;
+                offset = offset.sadd_ov(step, overflow);
+                if (overflow)
+                    return std::nullopt;
+                if (base == value)
+                    break;
+                value = base;
+            }
+            const std::optional<std::int64_t> bytes = offset.trySExtValue();
+            if (!bytes)
+                return std::nullopt;
+            return std::pair{value, *bytes};
+        }
+
         /// A call that waits for the thread whose handle is one of its operands: a join, or a
         /// call to a helper that joins that parameter on every normal return.
         struct JoinSite
@@ -165,6 +206,10 @@ namespace ctrace::concurrency::internal::analysis
             /// The thread, when it is not the operand itself: a call through a pointer-to-member is
             /// handed the object adjusted by the pair, the adjustment being proven nil.
             const llvm::Value* object = nullptr;
+            /// Bytes past `handle()` where the handle joined lies, when the call joins a member of
+            /// the object it is handed. Sites with a nonzero offset are listed only to the analyses
+            /// asking for them: every other one reads `handle()` as the handle itself.
+            std::int64_t offset = 0;
 
             [[nodiscard]] const llvm::Value& handle() const
             {
@@ -406,14 +451,29 @@ namespace ctrace::concurrency::internal::analysis
         {
             const HeldMemberAnalysis& held;
             const JoiningHelpers& helpers;
+            /// The functions not established to start no thread. A member among them joins nothing
+            /// a caller can rely on: the analyses that follow a call do not follow one through a
+            /// pointer-to-member, so a thread it starts would go unseen once its join is known.
+            const std::unordered_set<const llvm::Function*>& possibleStarters;
             std::unordered_map<const llvm::Function*, std::vector<MemberJoin>> byFunction;
         };
 
-        bool waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
-                                     llvm::ArrayRef<const llvm::CallBase*> callers,
-                                     const MemberJoins& members,
-                                     LlvmFunctionAnalysisProvider& analyses,
-                                     const ConcurrencySymbolClassifier& classifier);
+        /// What a join is proven to do to the storage of the thread it waits for: nothing it does
+        /// before its joins may change the storage, or the proof is refused. Past its last join it
+        /// may still change it, which matters to a caller making another join after it: a write
+        /// there may precede that join.
+        enum class JoinProof
+        {
+            Refused,
+            Unchanged,
+            ChangedAfter,
+        };
+
+        JoinProof waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
+                                          llvm::ArrayRef<const llvm::CallBase*> callers,
+                                          const MemberJoins& members,
+                                          LlvmFunctionAnalysisProvider& analyses,
+                                          const ConcurrencySymbolClassifier& classifier);
 
         /// Whether `point` may run after `writer` and before `join`: `writer` may reach it, and it
         /// may reach `join`.
@@ -524,9 +584,18 @@ namespace ctrace::concurrency::internal::analysis
                         return false;
                 }
             }
-            if (!judged.empty() &&
-                (handedToThread ||
-                 !waitsForUnchangedHandle(join, joinAliases, {}, members, analyses, classifier)))
+            // A join made through a call handed the storage waits for the thread the handle holds
+            // only when nothing changes the handle before that call's own joins, whether or not
+            // anything else is handed the storage: neither the call, nor a thread handed the
+            // storage. One handed the handle's value cannot change it. A change the join makes past
+            // its own joins follows every one of them, the join of the handle proven among them.
+            const CallKind joinKind = classifier.classify(*join.call);
+            const bool callHandedStorage = joinKind != CallKind::PThreadJoin &&
+                                           joinKind != CallKind::StdThreadJoin &&
+                                           !joinAliases.empty();
+            if ((!judged.empty() || callHandedStorage) &&
+                (handedToThread || waitsForUnchangedHandle(join, joinAliases, {}, members, analyses,
+                                                           classifier) == JoinProof::Refused))
                 return false;
             for (const auto& [call, argument] : judged)
             {
@@ -2027,17 +2096,28 @@ namespace ctrace::concurrency::internal::analysis
                    isStdClass(name->context, "thread");
         }
 
-        bool joinsItsObject(const llvm::Function& function, const JoiningHelpers& helpers)
+        /// The offsets, past the address of the object `function` is called on, of the handles it
+        /// joins on every normal return: 0 for `std::thread::join`, and each offset at which it
+        /// joins its first parameter.
+        llvm::SmallVector<std::int64_t, 2> objectJoinOffsets(const llvm::Function& function,
+                                                             const JoiningHelpers& helpers)
         {
             if (isThreadJoin(function))
-                return true;
-            const auto helper = helpers.find(&function);
-            if (helper == helpers.end())
-                return false;
-            for (const JoinedParameter& parameter : helper->second)
-                if (parameter.index == 0 && parameter.ended)
-                    return true;
-            return false;
+                return {0};
+            llvm::SmallVector<std::int64_t, 2> offsets;
+            if (const auto helper = helpers.find(&function); helper != helpers.end())
+                for (const JoinedParameter& parameter : helper->second)
+                    if (parameter.index == 0 && parameter.ended &&
+                        !llvm::is_contained(offsets, parameter.offset))
+                        offsets.push_back(parameter.offset);
+            return offsets;
+        }
+
+        /// Whether calling `function` joins the handle at the address of the object it is called
+        /// on.
+        bool joinsItsObject(const llvm::Function& function, const JoiningHelpers& helpers)
+        {
+            return llvm::is_contained(objectJoinOffsets(function, helpers), 0);
         }
 
         /// Whether the member `member` names, with its pair resolved at `call`, joins its object.
@@ -2047,7 +2127,8 @@ namespace ctrace::concurrency::internal::analysis
             const std::optional<HeldPair> pair = members.held.atCall(member.pair, call);
             const llvm::Function* called =
                 pair && constantPair(*pair) ? members.held.calledWith(member.call, *pair) : nullptr;
-            return called != nullptr && joinsItsObject(*called, members.helpers);
+            return called != nullptr && !members.possibleStarters.contains(called) &&
+                   joinsItsObject(*called, members.helpers);
         }
 
         /// The joins `function` makes through a pointer-to-member whose pair depends on its own
@@ -2703,10 +2784,13 @@ namespace ctrace::concurrency::internal::analysis
                        : create;
         }
 
+        /// The joins `function` makes. One joining a member of the object its operand points to,
+        /// at a nonzero offset, is listed only when `atOffsets` asks for it.
         std::vector<JoinSite> joinSites(const llvm::Function& function,
                                         const ConcurrencySymbolClassifier& classifier,
                                         const JoiningHelpers& helpers,
-                                        const MemberJoins* members = nullptr)
+                                        const MemberJoins* members = nullptr,
+                                        bool atOffsets = false)
         {
             std::vector<JoinSite> sites;
             for (const llvm::BasicBlock& block : function)
@@ -2733,17 +2817,23 @@ namespace ctrace::concurrency::internal::analysis
                             if (constantPair(invocation.member.pair))
                                 if (const llvm::Function* called = members->held.calledWith(
                                         invocation.member.call, invocation.member.pair);
-                                    called != nullptr && joinsItsObject(*called, members->helpers))
-                                    sites.push_back({.call = call,
-                                                     .operand = invocation.operand,
-                                                     .success = JoinSuccess{.after = call},
-                                                     .object = invocation.object});
+                                    called != nullptr &&
+                                    !members->possibleStarters.contains(called))
+                                    for (const std::int64_t offset :
+                                         objectJoinOffsets(*called, members->helpers))
+                                        if (offset == 0 || atOffsets)
+                                            sites.push_back({.call = call,
+                                                             .operand = invocation.operand,
+                                                             .success = JoinSuccess{.after = call},
+                                                             .object = invocation.object,
+                                                             .offset = offset});
                     const auto helper = helpers.find(call->getCalledFunction());
                     if (helper == helpers.end())
                         continue;
                     for (const JoinedParameter& parameter : helper->second)
                     {
-                        if (parameter.index >= call->arg_size())
+                        if (parameter.index >= call->arg_size() ||
+                            (parameter.offset != 0 && !atOffsets))
                             continue;
                         std::optional<JoinSuccess> success;
                         if (parameter.ended)
@@ -2754,7 +2844,8 @@ namespace ctrace::concurrency::internal::analysis
                                          .operand = parameter.index,
                                          .byValue = parameter.byValue,
                                          .reportsStatus = parameter.reported,
-                                         .success = success});
+                                         .success = success,
+                                         .offset = parameter.offset});
                     }
                 }
             return sites;
@@ -2786,25 +2877,30 @@ namespace ctrace::concurrency::internal::analysis
         /// parameters `parameters` hand it, each pointing into that thread's storage, as the
         /// thread was when the call was made. It must join it, and every join it makes on it must
         /// itself wait so; before any of them, nothing it does may write the storage through any
-        /// of those parameters or let its address escape. A pointer a call handed one of them
-        /// returns is followed as they are. A use it cannot follow, a pair it is handed that its
-        /// callers do not resolve, or a declaration refuses.
-        bool joinsWithoutChanging(const llvm::Function& function,
-                                  llvm::ArrayRef<unsigned> parameters,
-                                  llvm::ArrayRef<const llvm::CallBase*> callers,
-                                  const MemberJoins& members,
-                                  LlvmFunctionAnalysisProvider& analyses,
-                                  const ConcurrencySymbolClassifier& classifier)
+        /// of those parameters or let its address escape. A join it makes that may still change
+        /// the storage past its own joins counts as such a change wherever it may precede another
+        /// join, its own next round included. "Before" and "past" follow the control flow,
+        /// exception edges included: a change on a path through a landing pad that rejoins a
+        /// normal return is placed as any other. A pointer a call handed one of them returns is
+        /// followed as they are. A use it cannot follow, a pair it is handed that its callers do
+        /// not resolve, or a declaration refuses. Anything left past every join is told apart:
+        /// the joins a caller makes after this call are not covered by it.
+        JoinProof joinsWithoutChanging(const llvm::Function& function,
+                                       llvm::ArrayRef<unsigned> parameters,
+                                       llvm::ArrayRef<const llvm::CallBase*> callers,
+                                       const MemberJoins& members,
+                                       LlvmFunctionAnalysisProvider& analyses,
+                                       const ConcurrencySymbolClassifier& classifier)
         {
             if (function.isDeclaration())
-                return false;
+                return JoinProof::Refused;
             // The pointers into the storage, through the slots unoptimized code keeps them in,
             // and what each of their uses does.
             std::vector<const llvm::Value*> pending;
             for (const unsigned parameter : parameters)
             {
                 if (parameter >= function.arg_size())
-                    return false;
+                    return JoinProof::Refused;
                 pending.push_back(function.getArg(parameter));
             }
             llvm::SmallPtrSet<const llvm::Value*, 16> pointers;
@@ -2817,7 +2913,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (!pointers.insert(pointer).second)
                     continue;
                 if (pointers.size() > kMaxParameterPointers)
-                    return false;
+                    return JoinProof::Refused;
                 for (const llvm::Use& use : pointer->uses())
                 {
                     const llvm::User* user = use.getUser();
@@ -2845,12 +2941,15 @@ namespace ctrace::concurrency::internal::analysis
                             pending.push_back(call);
                     }
                     else if (!llvm::isa<llvm::LoadInst, llvm::ICmpInst>(user))
-                        return false;
+                        return JoinProof::Refused;
                 }
             }
+            // A handle travelling by value is read from the storage, through a local copy written
+            // once if any, as the summaries of the joining functions read it.
             const auto handedTo = [&](const JoinSite& site)
             {
-                const auto* load = llvm::dyn_cast<llvm::LoadInst>(&site.handle());
+                const auto* load = llvm::dyn_cast_or_null<llvm::LoadInst>(
+                    site.byValue ? invariantValue(&site.handle()) : &site.handle());
                 return pointers.contains(&site.handle()) ||
                        (site.byValue && load != nullptr &&
                         pointers.contains(load->getPointerOperand()));
@@ -2865,14 +2964,24 @@ namespace ctrace::concurrency::internal::analysis
                 return aliases;
             };
             std::vector<const llvm::CallBase*> joins;
-            for (const JoinSite& site : joinSites(function, classifier, members.helpers, &members))
+            // The joins that may still change the storage past their own joins.
+            std::vector<const llvm::CallBase*> changingJoins;
+            const auto record = [&](const llvm::CallBase& call, JoinProof proof)
+            {
+                joins.push_back(&call);
+                if (proof == JoinProof::ChangedAfter)
+                    changingJoins.push_back(&call);
+                return proof != JoinProof::Refused;
+            };
+            for (const JoinSite& site :
+                 joinSites(function, classifier, members.helpers, &members, /*atOffsets=*/true))
             {
                 if (!handedTo(site))
                     continue;
-                if (!waitsForUnchangedHandle(site, aliasesAt(*site.call), callers, members,
-                                             analyses, classifier))
-                    return false;
-                joins.push_back(site.call);
+                if (!record(*site.call,
+                            waitsForUnchangedHandle(site, aliasesAt(*site.call), callers, members,
+                                                    analyses, classifier)))
+                    return JoinProof::Refused;
             }
             // A pair the function is handed names what its callers resolve it to.
             for (const llvm::Instruction& instruction : llvm::instructions(function))
@@ -2882,16 +2991,16 @@ namespace ctrace::concurrency::internal::analysis
                         if (constantPair(invocation.member.pair) ||
                             !pointers.contains(invocation.object))
                             continue;
-                        if (!waitsForUnchangedHandle(JoinSite{.call = call,
-                                                              .operand = invocation.operand,
-                                                              .object = invocation.object},
-                                                     aliasesAt(*call), callers, members, analyses,
-                                                     classifier))
-                            return false;
-                        joins.push_back(call);
+                        if (!record(*call,
+                                    waitsForUnchangedHandle(JoinSite{.call = call,
+                                                                     .operand = invocation.operand,
+                                                                     .object = invocation.object},
+                                                            aliasesAt(*call), callers, members,
+                                                            analyses, classifier)))
+                            return JoinProof::Refused;
                     }
             if (joins.empty())
-                return false;
+                return JoinProof::Refused;
             const llvm::DominatorTree& dominators = analyses.getDominatorTree(function);
             const auto beforeAJoin = [&](const llvm::Instruction& point)
             {
@@ -2899,16 +3008,37 @@ namespace ctrace::concurrency::internal::analysis
                     joins, [&](const llvm::CallBase* join)
                     { return llvm::isPotentiallyReachable(&point, join, nullptr, &dominators); });
             };
+            // A join changing the storage past its own joins does so before any other join it may
+            // reach, and in a loop before its own next round.
+            const llvm::LoopInfo& loops = analyses.getLoopInfo(function);
+            for (const llvm::CallBase* changing : changingJoins)
+            {
+                if (loops.getLoopFor(changing->getParent()) != nullptr)
+                    return JoinProof::Refused;
+                for (const llvm::CallBase* join : joins)
+                    if (join != changing &&
+                        llvm::isPotentiallyReachable(changing, join, nullptr, &dominators))
+                        return JoinProof::Refused;
+            }
+            bool changedAfter = !changingJoins.empty();
             for (const auto& [call, argument] : calls)
             {
                 if (llvm::is_contained(joins, call))
                     continue;
                 const ArgumentEffect effect = members.held.effectOn(*call, argument);
-                if ((effect.keeps || effect.writes) && beforeAJoin(*call))
-                    return false;
+                if (!effect.keeps && !effect.writes)
+                    continue;
+                if (beforeAJoin(*call))
+                    return JoinProof::Refused;
+                changedAfter = true;
             }
-            return llvm::none_of(changes, [&](const llvm::Instruction* change)
-                                 { return beforeAJoin(*change); });
+            for (const llvm::Instruction* change : changes)
+            {
+                if (beforeAJoin(*change))
+                    return JoinProof::Refused;
+                changedAfter = true;
+            }
+            return changedAfter ? JoinProof::ChangedAfter : JoinProof::Unchanged;
         }
 
         /// Whether `join`, made in the function the last of `callers` calls or, without any, in the
@@ -2917,18 +3047,23 @@ namespace ctrace::concurrency::internal::analysis
         /// there is std::thread::join, or joins its object unchanged; a call to any other function
         /// does when that function joins the parameter unchanged. `aliases` are the operands of
         /// `join` handed a pointer into the thread's storage besides its handle: what the function
-        /// does through each of them is proven too.
-        bool waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
-                                     llvm::ArrayRef<const llvm::CallBase*> callers,
-                                     const MemberJoins& members,
-                                     LlvmFunctionAnalysisProvider& analyses,
-                                     const ConcurrencySymbolClassifier& classifier)
+        /// does through each of them is proven too. A join call changes nothing but the handle it
+        /// empties, which then holds no thread, unless another of its operands points into the
+        /// storage: `pthread_join` writes the thread's result there, which refuses.
+        JoinProof waitsForUnchangedHandle(const JoinSite& join, llvm::ArrayRef<unsigned> aliases,
+                                          llvm::ArrayRef<const llvm::CallBase*> callers,
+                                          const MemberJoins& members,
+                                          LlvmFunctionAnalysisProvider& analyses,
+                                          const ConcurrencySymbolClassifier& classifier)
         {
             const CallKind kind = classifier.classify(*join.call);
             if (kind == CallKind::PThreadJoin || kind == CallKind::StdThreadJoin)
-                return true;
+                return llvm::all_of(aliases,
+                                    [&](unsigned operand) { return operand == join.operand; })
+                           ? JoinProof::Unchanged
+                           : JoinProof::Refused;
             if (callers.size() >= kMaxJoinDepth)
-                return false;
+                return JoinProof::Refused;
             std::vector<const llvm::CallBase*> through(callers.begin(), callers.end());
             through.push_back(join.call);
             std::vector<unsigned> handed(aliases.begin(), aliases.end());
@@ -2941,13 +3076,17 @@ namespace ctrace::concurrency::internal::analysis
                     pair ? memberThrough(MemberCondition{.pair = *pair, .call = *direct}, callers,
                                          members)
                          : nullptr;
-                return member != nullptr && (isThreadJoin(*member) ||
-                                             joinsWithoutChanging(*member, handed, through, members,
-                                                                  analyses, classifier));
+                if (member == nullptr)
+                    return JoinProof::Refused;
+                if (isThreadJoin(*member))
+                    return JoinProof::Unchanged;
+                return joinsWithoutChanging(*member, handed, through, members, analyses,
+                                            classifier);
             }
             const llvm::Function* callee = join.call->getCalledFunction();
-            return callee != nullptr &&
-                   joinsWithoutChanging(*callee, handed, through, members, analyses, classifier);
+            if (callee == nullptr)
+                return JoinProof::Refused;
+            return joinsWithoutChanging(*callee, handed, through, members, analyses, classifier);
         }
 
         /// Records that `function` joins every thread of the vector at `container`, past
@@ -2975,40 +3114,78 @@ namespace ctrace::concurrency::internal::analysis
             return kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor;
         }
 
-        /// Whether `function` starts a thread, or calls a function among `starters`.
-        bool startsOrCalls(const llvm::Function& function,
-                           const std::unordered_set<const llvm::Function*>& starters,
-                           const ConcurrencySymbolClassifier& classifier)
+        using Starters = std::unordered_set<const llvm::Function*>;
+
+        /// Whether `call` starts a thread, or calls directly a function among `starters`.
+        bool startsDirectly(const llvm::CallBase& call, const Starters& starters,
+                            const ConcurrencySymbolClassifier& classifier)
         {
-            for (const llvm::Instruction& instruction : llvm::instructions(function))
-            {
-                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
-                if (call != nullptr && (startsThread(*call, classifier) ||
-                                        starters.contains(call->getCalledFunction())))
-                    return true;
-            }
-            return false;
+            return startsThread(call, classifier) || starters.contains(call.getCalledFunction());
         }
 
-        /// The functions this module defines that may start a thread, themselves or through the
-        /// functions they call: what a call can bring running threads from.
-        std::unordered_set<const llvm::Function*>
-        threadStarters(const llvm::Module& module, const ConcurrencySymbolClassifier& classifier)
+        /// Whether `call` may start a thread, `starters` being the functions that may. A call
+        /// through a function pointer reaches the function the pointer certainly holds; one whose
+        /// callee is unknown, or only declared, since the classifier reads a direct call only, may
+        /// start a thread. A declared function called directly starts what the classifier tells
+        /// of it, as everywhere else in the analysis.
+        bool mayStart(const llvm::CallBase& call, const Starters& starters,
+                      const ConcurrencySymbolClassifier& classifier)
         {
-            std::unordered_set<const llvm::Function*> starters;
+            if (startsThread(call, classifier))
+                return true;
+            if (const llvm::Function* called = classifier.directCallee(call))
+                return starters.contains(called);
+            const llvm::Function* called = resolveFunctionValue(*call.getCalledOperand());
+            return called == nullptr || called->isDeclaration() || starters.contains(called);
+        }
+
+        using StartTest = bool (*)(const llvm::CallBase&, const Starters&,
+                                   const ConcurrencySymbolClassifier&);
+
+        /// The functions this module defines that make a call `starts` accepts, `starts` being
+        /// handed the functions found so far.
+        Starters startersBy(const llvm::Module& module,
+                            const ConcurrencySymbolClassifier& classifier, StartTest starts)
+        {
+            Starters starters;
             bool changed = true;
             while (changed)
             {
                 changed = false;
                 for (const llvm::Function& function : module)
-                    if (!function.isDeclaration() && !starters.contains(&function) &&
-                        startsOrCalls(function, starters, classifier))
+                {
+                    if (function.isDeclaration() || starters.contains(&function))
+                        continue;
+                    for (const llvm::Instruction& instruction : llvm::instructions(function))
                     {
-                        starters.insert(&function);
-                        changed = true;
+                        const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                        if (call != nullptr && starts(*call, starters, classifier))
+                        {
+                            starters.insert(&function);
+                            changed = true;
+                            break;
+                        }
                     }
+                }
             }
             return starters;
+        }
+
+        /// The functions this module defines that may start a thread, themselves or through the
+        /// functions they call: what a call can bring running threads from.
+        Starters threadStarters(const llvm::Module& module,
+                                const ConcurrencySymbolClassifier& classifier)
+        {
+            return startersBy(module, classifier, startsDirectly);
+        }
+
+        /// The functions this module defines that are not established to start no thread. Not
+        /// starting one known to `threadStarters`, which follows direct calls only, is not enough:
+        /// a function absent from these starts none whatever form its calls take.
+        Starters possibleThreadStarters(const llvm::Module& module,
+                                        const ConcurrencySymbolClassifier& classifier)
+        {
+            return startersBy(module, classifier, mayStart);
         }
 
         /// Whether every thread `function` may start, itself or through the functions it calls, is
@@ -3438,10 +3615,16 @@ namespace ctrace::concurrency::internal::analysis
         return true;
     }
 
+    /// Past this many, a function's joined parameters are no longer recorded: each distinct
+    /// offset is an entry of its own, and a recursion stepping the offset would grow them without
+    /// end. A join left out is only a join not known.
+    constexpr std::size_t kMaxJoinedParameters = 8;
+
     /// A function joins a parameter when a join of it, in place or through another joining
     /// helper, stands on every path from the entry to a normal return. The parameter is
-    /// followed only through a local copy written once, so the handle joined is the one the
-    /// caller passed. Whether the thread has also ended there, or the function hands the join's
+    /// followed only through a local copy written once and the constant in-bounds offsets the
+    /// data layout computes, so the handle joined lies where the caller's argument, that offset
+    /// added, says. Whether the thread has also ended there, or the function hands the join's
     /// status to its caller, is summarized beside it. Iterated to a fixed point: a helper calling
     /// a helper is found whatever order the module lists them in.
     JoiningHelpers collectJoiningHelpers(const llvm::Module& module,
@@ -3449,6 +3632,7 @@ namespace ctrace::concurrency::internal::analysis
                                          JoiningHelpers known)
     {
         JoiningHelpers helpers = std::move(known);
+        const llvm::DataLayout& layout = module.getDataLayout();
         bool changed = true;
         while (changed)
         {
@@ -3458,10 +3642,33 @@ namespace ctrace::concurrency::internal::analysis
                 if (function.isDeclaration())
                     continue;
                 const llvm::Instruction& entry = function.getEntryBlock().front();
-                for (const JoinSite& site : joinSites(function, classifier, helpers))
+                for (const JoinSite& site :
+                     joinSites(function, classifier, helpers, nullptr, /*atOffsets=*/true))
                 {
-                    const auto* parameter =
-                        llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
+                    // A handle travelling by value is the parameter itself, or is read from a place
+                    // a parameter points to: that place is then the handle joined, as for one
+                    // handed by address. One handed by address may lie at a constant offset into
+                    // the object a parameter points to, the offset of the helper the site calls
+                    // added.
+                    const llvm::Argument* parameter = nullptr;
+                    std::int64_t offset = 0;
+                    bool byValue = site.byValue;
+                    const llvm::Value* address = &site.handle();
+                    if (site.byValue)
+                    {
+                        const llvm::Value* read = invariantValue(&site.handle());
+                        parameter = llvm::dyn_cast_or_null<llvm::Argument>(read);
+                        byValue = parameter != nullptr;
+                        address = parameter == nullptr && read != nullptr
+                                      ? handleAddress(*read, /*byValue=*/true)
+                                      : nullptr;
+                    }
+                    if (parameter == nullptr && address != nullptr)
+                        if (const auto place = constantOffsetFrom(*address, site.offset, layout))
+                        {
+                            parameter = llvm::dyn_cast<llvm::Argument>(place->first);
+                            offset = place->second;
+                        }
                     if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
                         continue;
                     const bool ended =
@@ -3471,13 +3678,18 @@ namespace ctrace::concurrency::internal::analysis
                     JoinedParameter* summary = nullptr;
                     for (JoinedParameter& existing : joined)
                     {
-                        if (existing.index == parameter->getArgNo())
+                        if (existing.index == parameter->getArgNo() && existing.offset == offset)
                             summary = &existing;
                     }
                     if (summary == nullptr)
                     {
+                        // A recursion stepping its parameter's offset would add entries without
+                        // end: past the bound, a join is not summarised.
+                        if (joined.size() >= kMaxJoinedParameters)
+                            continue;
                         joined.push_back({.index = parameter->getArgNo(),
-                                          .byValue = site.byValue,
+                                          .byValue = byValue,
+                                          .offset = offset,
                                           .ended = ended,
                                           .reported = reported});
                         changed = true;
@@ -3500,7 +3712,12 @@ namespace ctrace::concurrency::internal::analysis
     {
         ThreadCompletionMap result;
         const HeldMemberAnalysis held(module);
-        MemberJoins members{.held = held, .helpers = helpers, .byFunction = {}};
+        const std::unordered_set<const llvm::Function*> possibleStarters =
+            possibleThreadStarters(module, classifier);
+        MemberJoins members{.held = held,
+                            .helpers = helpers,
+                            .possibleStarters = possibleStarters,
+                            .byFunction = {}};
         collectMemberJoins(module, members);
         const VectorHelpers joining =
             collectVectorHelpers(module, classifier, analyses, helpers, members);
@@ -3529,7 +3746,13 @@ namespace ctrace::concurrency::internal::analysis
                 }
             if (creates.empty() && fillCalls.empty() && emplaces.empty())
                 continue;
-            const std::vector<JoinSite> joins = joinSites(function, classifier, helpers, &members);
+            // Only the match of a creation to its join below reads a join of an object's member at
+            // a nonzero offset: every other proof reads a site's operand as the handle itself.
+            const std::vector<JoinSite> allJoins =
+                joinSites(function, classifier, helpers, &members, /*atOffsets=*/true);
+            std::vector<JoinSite> joins;
+            llvm::copy_if(allJoins, std::back_inserter(joins),
+                          [](const JoinSite& join) { return join.offset == 0; });
             std::vector<const llvm::CallBase*> handOffs;
             for (const llvm::BasicBlock& block : function)
                 for (const llvm::Instruction& instruction : block)
@@ -3537,7 +3760,7 @@ namespace ctrace::concurrency::internal::analysis
                         call != nullptr && (joining.vectors.contains(call->getCalledFunction()) ||
                                             joining.ranges.contains(call->getCalledFunction())))
                         handOffs.push_back(call);
-            if (joins.empty() && handOffs.empty())
+            if (allJoins.empty() && handOffs.empty())
                 continue;
             const auto& dominators = analyses.getDominatorTree(function);
             const auto& loops = analyses.getLoopInfo(function);
@@ -3610,17 +3833,18 @@ namespace ctrace::concurrency::internal::analysis
                                                            *call, handOff, joining, dominators));
             }
             for (const auto* create : creates)
-                for (const JoinSite& join : joins)
+                for (const JoinSite& join : allJoins)
                 {
                     if (create->arg_empty())
                         continue;
-                    if (const std::optional<ThreadCompletion> completion =
-                            loopCompletion(*create, handleWriter(*create, classifier), join, fills,
-                                           loops, dominators, classifier, members, analyses))
-                    {
-                        result.emplace(create, *completion);
-                        break;
-                    }
+                    if (join.offset == 0)
+                        if (const std::optional<ThreadCompletion> completion = loopCompletion(
+                                *create, handleWriter(*create, classifier), join, fills, loops,
+                                dominators, classifier, members, analyses))
+                        {
+                            result.emplace(create, *completion);
+                            break;
+                        }
                     if (loops.getLoopFor(create->getParent()) != nullptr)
                         continue;
                     const llvm::CallBase& writer = handleWriter(*create, classifier);
@@ -3636,13 +3860,35 @@ namespace ctrace::concurrency::internal::analysis
                     if (createGep && joinGep && createGep->hasAllConstantIndices() &&
                         joinGep->hasAllConstantIndices() && first && first == second)
                         sameAddress = true;
+                    // A join names the handle itself only at no offset into what it is handed.
+                    // Otherwise, as for any address, the handle is the value the address is a
+                    // constant offset from and that offset, the join's own added.
+                    const bool named = join.offset == 0 && sameAddress && first && first == second;
+                    const auto created = createAddress != nullptr
+                                             ? constantOffsetFrom(*createAddress, 0, layout)
+                                             : std::nullopt;
+                    const auto joined = joinAddress != nullptr
+                                            ? constantOffsetFrom(*joinAddress, join.offset, layout)
+                                            : std::nullopt;
+                    const bool located = created && joined && *created == *joined;
+                    // Another creation storing at the handle leaves the join's thread ambiguous. It
+                    // is told by the storage group, and by the same location a match may rest on:
+                    // a creation writing there through another spelling of the address is no less
+                    // one.
                     bool overwritten = false;
                     for (const auto* other : creates)
-                        if (other != create && !other->arg_empty() &&
-                            canonicalStorageGroupId(
-                                *handleWriter(*other, classifier).getArgOperand(0)) == first)
+                    {
+                        if (other == create || other->arg_empty())
+                            continue;
+                        const llvm::Value& stored =
+                            *handleWriter(*other, classifier).getArgOperand(0);
+                        const auto* storedAddress = handleAddress(stored, false);
+                        if (canonicalStorageGroupId(stored) == first ||
+                            (created && storedAddress != nullptr &&
+                             constantOffsetFrom(*storedAddress, 0, layout) == created))
                             overwritten = true;
-                    if (!overwritten && sameAddress && first && first == second &&
+                    }
+                    if (!overwritten && (named || located) &&
                         arrayStorageUnchanged(writer, join, nullptr, dominators, classifier,
                                               members, analyses) &&
                         dominators.dominates(&writer, join.call) &&

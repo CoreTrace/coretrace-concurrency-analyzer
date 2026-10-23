@@ -558,15 +558,17 @@ namespace ctrace::concurrency::internal::analysis
     CallKind ConcurrencySymbolClassifier::classify(const llvm::CallBase& call) const
     {
         const llvm::Function* callee = directCallee(call);
-        if (callee == nullptr)
-            return CallKind::Unknown;
+        return callee != nullptr ? classify(*callee) : CallKind::Unknown;
+    }
 
-        const auto cached = classificationCache_.find(callee);
+    CallKind ConcurrencySymbolClassifier::classify(const llvm::Function& callee) const
+    {
+        const auto cached = classificationCache_.find(&callee);
         if (cached != classificationCache_.end())
             return cached->second;
 
-        const CallKind kind = classifyCallee(*callee);
-        classificationCache_.emplace(callee, kind);
+        const CallKind kind = classifyCallee(callee);
+        classificationCache_.emplace(&callee, kind);
         return kind;
     }
 

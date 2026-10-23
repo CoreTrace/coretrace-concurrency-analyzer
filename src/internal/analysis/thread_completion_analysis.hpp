@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 
+#include <cstdint>
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
@@ -85,6 +86,10 @@ namespace ctrace::concurrency::internal::analysis
     {
         unsigned index = 0;
         bool byValue = false;
+        /// Bytes past the address the parameter holds where the handle joined lies: a function
+        /// joining a member of the object it is handed. Always 0 for a handle handed by value. One
+        /// function may join a parameter at several offsets, each its own entry.
+        std::int64_t offset = 0;
         /// The join also succeeds on every normal return: the thread has ended once a call to the
         /// function returns.
         bool ended = false;
@@ -94,7 +99,8 @@ namespace ctrace::concurrency::internal::analysis
     };
 
     /// The parameters each function joins on every normal return. A call passing a thread handle
-    /// there waits for that thread exactly as a join written in place does.
+    /// there, or the address of an object holding one at the offset a summary names, waits for
+    /// that thread exactly as a join written in place does.
     using JoiningHelpers = std::unordered_map<const llvm::Function*, std::vector<JoinedParameter>>;
 
     /// Summarises the functions this module defines, starting from `known`: what other units

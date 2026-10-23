@@ -3,6 +3,7 @@
 #include "thread_completion_analysis.hpp"
 
 #include "concurrency_symbol_classifier.hpp"
+#include "held_member_analysis.hpp"
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
 
@@ -105,6 +106,39 @@ namespace ctrace::concurrency::internal::analysis
                 return false;
 
             return !isLikelyUserLocation(userLocation, sourceRoot);
+        }
+
+        /// What a call is, and the object it is made on when it is made through a
+        /// pointer-to-member: the classifier names a direct call's target, and the held-member
+        /// analysis the target of a call through a pair constant where it is made, called on the
+        /// object itself. Such a call is classified as the direct call to its target.
+        struct ResolvedCall
+        {
+            CallKind kind = CallKind::Unknown;
+            const llvm::Value* object = nullptr;
+        };
+
+        ResolvedCall resolveCall(const llvm::CallBase& call,
+                                 const ConcurrencySymbolClassifier& classifier,
+                                 const HeldMemberAnalysis& held)
+        {
+            if (const CallKind kind = classifier.classify(call); kind != CallKind::Unknown)
+                return ResolvedCall{.kind = kind};
+            if (const std::optional<MemberCall> member = held.memberCall(call))
+                if (const std::optional<HeldPair> pair = held.pairOf(*member))
+                    if (const llvm::Function* called = held.calledWith(*member, *pair))
+                        return ResolvedCall{.kind = classifier.classify(*called),
+                                            .object = member->object};
+            return ResolvedCall{};
+        }
+
+        /// The value `call` hands its operand `index`, `this` being the object for a call through a
+        /// pointer-to-member.
+        const llvm::Value& operandOf(const llvm::CallBase& call, const ResolvedCall& resolved,
+                                     unsigned index)
+        {
+            return index == 0 && resolved.object != nullptr ? *resolved.object
+                                                            : *call.getArgOperand(index);
         }
 
         struct ResolutionSite
@@ -285,6 +319,7 @@ namespace ctrace::concurrency::internal::analysis
     {
         std::vector<ThreadLifecycleFact> facts;
         std::unordered_set<std::string> factKeys;
+        const HeldMemberAnalysis held(module);
         const std::optional<std::filesystem::path> sourceRoot = primarySourceRoot(module);
         const std::unordered_set<std::string> detachedAttributeGroups =
             collectDetachedAttributeGroups(module, classifier_);
@@ -316,13 +351,14 @@ namespace ctrace::concurrency::internal::analysis
                     if (call == nullptr)
                         continue;
 
-                    const CallKind kind = classifier_.classify(*call);
-                    const std::optional<LifecycleDescriptor> descriptor = classifyLifecycle(kind);
+                    const ResolvedCall resolved = resolveCall(*call, classifier_, held);
+                    const std::optional<LifecycleDescriptor> descriptor =
+                        classifyLifecycle(resolved.kind);
                     if (!descriptor.has_value() || descriptor->operandIndex >= call->arg_size())
                         continue;
 
-                    const std::optional<std::string> handleGroupId =
-                        canonicalStorageGroupId(*call->getArgOperand(descriptor->operandIndex));
+                    const std::optional<std::string> handleGroupId = canonicalStorageGroupId(
+                        operandOf(*call, resolved, descriptor->operandIndex));
 
                     if (descriptor->action == ThreadLifecycleAction::Move &&
                         descriptor->sourceOperandIndex.has_value() &&
@@ -390,13 +426,14 @@ namespace ctrace::concurrency::internal::analysis
                     if (call == nullptr)
                         continue;
 
-                    const CallKind kind = classifier_.classify(*call);
+                    const ResolvedCall resolved = resolveCall(*call, classifier_, held);
+                    const CallKind kind = resolved.kind;
                     const std::optional<LifecycleDescriptor> descriptor = classifyLifecycle(kind);
                     if (!descriptor.has_value() || descriptor->operandIndex >= call->arg_size())
                         continue;
 
-                    const std::optional<std::string> handleGroupId =
-                        canonicalStorageGroupId(*call->getArgOperand(descriptor->operandIndex));
+                    const std::optional<std::string> handleGroupId = canonicalStorageGroupId(
+                        operandOf(*call, resolved, descriptor->operandIndex));
                     if (!handleGroupId.has_value())
                         continue;
 
