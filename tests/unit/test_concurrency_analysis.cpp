@@ -2620,6 +2620,12 @@ namespace
              .intent = "a counter raised before the spawn reads it fills the slots one further "
                        "on (#151)",
              .missingJoin = 1},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "cpp_thread_detached_through_member_pointer_no_missing_join.cpp",
+             .intent = "a detach through a pointer-to-member naming detach resolves the thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
 
             // --- imported missing-join fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join_scope_exit.cpp",
