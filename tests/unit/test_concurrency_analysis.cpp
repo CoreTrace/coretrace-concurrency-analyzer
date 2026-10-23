@@ -3991,6 +3991,10 @@ namespace
                      "cpp_pthread_member_copied_then_joined_through_member_pointer_no_fp.cpp",
              .intent = "so does one joining a local copy of the member",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_helpers_joining_through_pointer_in_loop_no_fp.cpp",
+             .intent = "a loop of helpers joining the pthread_t they point to ends every thread",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
