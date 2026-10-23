@@ -2,6 +2,7 @@
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
 #include "internal/analysis/held_member_analysis.hpp"
+#include "internal/analysis/thread_completion_analysis.hpp"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
@@ -464,6 +465,58 @@ namespace
              ok;
         ok = effectIs("llvm.memcpy.p0.p0.i64", 1, false, false,
                       "a copy neither writes nor keeps its source") &&
+             ok;
+        return ok;
+    }
+
+    /// What a function is summarised as joining (#195): a handle at a constant offset into the
+    /// object a parameter points to is an entry of its own, offsets compose through the helpers a
+    /// function calls, and a recursion stepping its parameter's offset stays bounded.
+    bool testJoinSummariesKeepTheirOffsets()
+    {
+        llvm::LLVMContext context;
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/joined_offsets.cpp").string();
+        request.extraCompileArgs = {"-std=c++20"};
+        request.format = IRFormat::BC;
+        CompileResult compiled = InMemoryIRCompiler().compile(request, context);
+        if (!assertTrue(compiled.module != nullptr, "the joined offsets fixture compiles"))
+            return false;
+
+        const ctrace::concurrency::internal::analysis::JoiningHelpers helpers =
+            ctrace::concurrency::internal::analysis::collectJoiningHelpers(
+                *compiled.module,
+                ctrace::concurrency::internal::analysis::ConcurrencySymbolClassifier{});
+        const auto offsetsOf = [&](llvm::StringRef name)
+        {
+            std::vector<std::int64_t> offsets;
+            const llvm::Function* function = compiled.module->getFunction(name);
+            if (const auto found = helpers.find(function); found != helpers.end())
+                for (const auto& parameter : found->second)
+                    if (parameter.index == 0 && parameter.ended)
+                        offsets.push_back(parameter.offset);
+            std::sort(offsets.begin(), offsets.end());
+            return offsets;
+        };
+
+        bool ok = true;
+        ok = assertTrue(offsetsOf("joinBoth") == std::vector<std::int64_t>{0, 8},
+                        "a function joining two members is summarised at both offsets") &&
+             ok;
+        ok = assertTrue(offsetsOf("joinSecond") == std::vector<std::int64_t>{8},
+                        "a function joining the second member is summarised at its offset alone") &&
+             ok;
+        ok =
+            assertTrue(offsetsOf("joinSecondThroughHelper") == std::vector<std::int64_t>{8},
+                       "a helper's offset carries over to the function handing it its parameter") &&
+            ok;
+        ok = assertTrue(offsetsOf("joinSecondOfInner") == std::vector<std::int64_t>{16},
+                        "a member's offset composes with the offset the helper joins it at") &&
+             ok;
+        const std::vector<std::int64_t> stepped = offsetsOf("joinFrom");
+        ok = assertTrue(
+                 stepped.size() > 1 && stepped.size() <= 8,
+                 "a recursion stepping its parameter's offset is summarised within a bound") &&
              ok;
         return ok;
     }
@@ -3768,6 +3821,163 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a member function joining a member, called through a pointer-to-member (#195) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joined_through_member_pointer_no_fp.cpp",
+             .intent = "a member function joining its object's thread ends it, called by pointer",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_at_offset_joined_through_member_pointer_no_fp.cpp",
+             .intent = "a member past its object's start is joined by that member function",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joined_through_forwarded_member_pointer_no_fp.cpp",
+             .intent = "that pointer-to-member forwarded to the wrapper still joins",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_through_helper_no_fp.cpp",
+             .intent = "the member's offset composes with the join of a helper it is handed to",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_sub_object_member_function_joined_by_member_pointer_no_fp.cpp",
+             .intent = "a sub-object's offset composes with the one its member function joins at",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_sub_object_no_fp.cpp",
+             .intent = "offsets compose through the member function of a sub-object it calls",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_other_member_created_after_race.cpp",
+             .intent = "a member function joining the other member leaves the reader's running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_other_member_created_before_race.cpp",
+             .intent = "so does it when the reader's member is the last stored before the join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_written_before_member_pointer_join_race.cpp",
+             .intent = "a member function joining only after main writes races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_on_one_path_race.cpp",
+             .intent = "a member function joining on one path only leaves the reader running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_swapping_before_join_race.cpp",
+             .intent = "a member function swapping the thread away before its join races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_detaching_through_member_pointer_race.cpp",
+             .intent = "a member function detaching the thread leaves it running",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_other_base_member_function_joined_by_member_pointer_race.cpp",
+             .intent = "the other base's member function joins that base's thread only",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_joining_variable_slot_race.cpp",
+             .intent = "a member function joining a slot a member selects is not a known join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_loop_joining_other_member_race.cpp",
+             .intent = "a loop's member-function join at an offset is no join of the first threads",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_helper_swapping_after_its_join_race.cpp",
+             .intent = "a swap past a helper's join still precedes the member function's own join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_helper_swapping_before_its_join_race.cpp",
+             .intent = "so does a swap before the helper's join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_swapping_between_joins_race.cpp",
+             .intent = "a swap between the member function's two joins races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_helper_joining_other_member_first_no_fp.cpp",
+             .intent = "joining the other member in a helper, then its own, ends both threads",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_helper_swapping_in_catch_after_its_join_race.cpp",
+             .intent = "a swap in a catch past a helper's join still precedes the own join",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_helper_catching_after_its_join_no_fp.cpp",
+             .intent = "a catch past a helper's join that leaves the object alone ends both",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_restarting_after_join_race.cpp",
+             .intent = "a member function starting its thread again past its join races",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_restarting_other_after_join_race.cpp",
+             .intent = "so does one starting another entry there",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_forwarded_restarting_after_join_race.cpp",
+             .intent = "so does that pointer-to-member forwarded to the wrapper",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_restarting_through_helper_race.cpp",
+             .intent = "so does a restart in a helper the member function hands its thread to",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_restarting_through_function_pointer_race.cpp",
+             .intent = "so does a restart through a function pointer held in a local",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_calling_through_function_pointer_no_fp.cpp",
+             .intent = "a function pointer to a function starting no thread keeps the join",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_restarting_through_reassigned_pointer_race.cpp",
+             .intent = "so does a restart through a pointer whose callee is unknown",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_member_function_starting_pthread_through_pointer_race.cpp",
+             .intent = "so does a start through a pointer to pthread_create",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
@@ -5245,6 +5455,7 @@ int main()
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
     ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
+    ok = testJoinSummariesKeepTheirOffsets() && ok;
     ok = testArgumentEffectsTellWritesFromKeeping() && ok;
     ok = testClassDataRaceReportsGlobalCounter() && ok;
     ok = testSharedObjectByRefReportsGlobalCounter() && ok;
