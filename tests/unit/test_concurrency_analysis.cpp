@@ -2626,6 +2626,13 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "cpp_thread_member_pointer_detach_on_one_path_reports_missing_join.cpp",
+             .intent = "that detach on one branch only leaves the other path abandoning it",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .missingJoin = 1,
+             .requiresCxx20 = true},
 
             // --- imported missing-join fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join_scope_exit.cpp",
