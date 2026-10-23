@@ -2946,9 +2946,12 @@ namespace ctrace::concurrency::internal::analysis
                         return JoinProof::Refused;
                 }
             }
+            // A handle travelling by value is read from the storage, through a local copy written
+            // once if any, as the summaries of the joining functions read it.
             const auto handedTo = [&](const JoinSite& site)
             {
-                const auto* load = llvm::dyn_cast<llvm::LoadInst>(&site.handle());
+                const auto* load = llvm::dyn_cast_or_null<llvm::LoadInst>(
+                    site.byValue ? invariantValue(&site.handle()) : &site.handle());
                 return pointers.contains(&site.handle()) ||
                        (site.byValue && load != nullptr &&
                         pointers.contains(load->getPointerOperand()));
