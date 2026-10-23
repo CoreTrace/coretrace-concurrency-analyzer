@@ -3644,20 +3644,30 @@ namespace ctrace::concurrency::internal::analysis
                 for (const JoinSite& site :
                      joinSites(function, classifier, helpers, nullptr, /*atOffsets=*/true))
                 {
-                    // A handle travelling by value is the parameter itself. One handed by address
-                    // may lie at a constant offset into the object a parameter points to, the
-                    // offset of the helper the site calls added.
+                    // A handle travelling by value is the parameter itself, or is read from a place
+                    // a parameter points to: that place is then the handle joined, as for one
+                    // handed by address. One handed by address may lie at a constant offset into
+                    // the object a parameter points to, the offset of the helper the site calls
+                    // added.
                     const llvm::Argument* parameter = nullptr;
                     std::int64_t offset = 0;
+                    bool byValue = site.byValue;
+                    const llvm::Value* address = &site.handle();
                     if (site.byValue)
-                        parameter =
-                            llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
-                    else if (const auto place =
-                                 constantOffsetFrom(site.handle(), site.offset, layout))
                     {
-                        parameter = llvm::dyn_cast<llvm::Argument>(place->first);
-                        offset = place->second;
+                        const llvm::Value* read = invariantValue(&site.handle());
+                        parameter = llvm::dyn_cast_or_null<llvm::Argument>(read);
+                        byValue = parameter != nullptr;
+                        address = parameter == nullptr && read != nullptr
+                                      ? handleAddress(*read, /*byValue=*/true)
+                                      : nullptr;
                     }
+                    if (parameter == nullptr && address != nullptr)
+                        if (const auto place = constantOffsetFrom(*address, site.offset, layout))
+                        {
+                            parameter = llvm::dyn_cast<llvm::Argument>(place->first);
+                            offset = place->second;
+                        }
                     if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
                         continue;
                     const bool ended =
@@ -3677,7 +3687,7 @@ namespace ctrace::concurrency::internal::analysis
                         if (joined.size() >= kMaxJoinedParameters)
                             continue;
                         joined.push_back({.index = parameter->getArgNo(),
-                                          .byValue = site.byValue,
+                                          .byValue = byValue,
                                           .offset = offset,
                                           .ended = ended,
                                           .reported = reported});
