@@ -78,6 +78,9 @@ namespace ctrace::concurrency::internal::analysis
       public:
         [[nodiscard]] const llvm::Function* directCallee(const llvm::CallBase& call) const;
         [[nodiscard]] CallKind classify(const llvm::CallBase& call) const;
+        /// What a call to `callee` is, wherever the call names it from: a call through a pointer
+        /// whose target is known is classified as the direct call to that target.
+        [[nodiscard]] CallKind classify(const llvm::Function& callee) const;
         /// True when the call targets a lock type that its owner may reacquire. Read from the
         /// callee symbol because a standard library may lower the lock to an unnamed struct,
         /// leaving the type name visible only in the mangled member function.
