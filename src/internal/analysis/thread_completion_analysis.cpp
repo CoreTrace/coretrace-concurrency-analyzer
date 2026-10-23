@@ -584,9 +584,16 @@ namespace ctrace::concurrency::internal::analysis
                         return false;
                 }
             }
-            // A change the join makes past its own joins follows every one of them, the join of the
-            // handle proven among them.
-            if (!judged.empty() &&
+            // A join made through a call handed the storage waits for the thread the handle holds
+            // only when nothing changes the handle before that call's own joins, whether or not
+            // anything else is handed the storage: neither the call, nor a thread handed the
+            // storage. One handed the handle's value cannot change it. A change the join makes past
+            // its own joins follows every one of them, the join of the handle proven among them.
+            const CallKind joinKind = classifier.classify(*join.call);
+            const bool callHandedStorage = joinKind != CallKind::PThreadJoin &&
+                                           joinKind != CallKind::StdThreadJoin &&
+                                           !joinAliases.empty();
+            if ((!judged.empty() || callHandedStorage) &&
                 (handedToThread || waitsForUnchangedHandle(join, joinAliases, {}, members, analyses,
                                                            classifier) == JoinProof::Refused))
                 return false;
@@ -2937,9 +2944,12 @@ namespace ctrace::concurrency::internal::analysis
                         return JoinProof::Refused;
                 }
             }
+            // A handle travelling by value is read from the storage, through a local copy written
+            // once if any, as the summaries of the joining functions read it.
             const auto handedTo = [&](const JoinSite& site)
             {
-                const auto* load = llvm::dyn_cast<llvm::LoadInst>(&site.handle());
+                const auto* load = llvm::dyn_cast_or_null<llvm::LoadInst>(
+                    site.byValue ? invariantValue(&site.handle()) : &site.handle());
                 return pointers.contains(&site.handle()) ||
                        (site.byValue && load != nullptr &&
                         pointers.contains(load->getPointerOperand()));
@@ -3635,20 +3645,30 @@ namespace ctrace::concurrency::internal::analysis
                 for (const JoinSite& site :
                      joinSites(function, classifier, helpers, nullptr, /*atOffsets=*/true))
                 {
-                    // A handle travelling by value is the parameter itself. One handed by address
-                    // may lie at a constant offset into the object a parameter points to, the
-                    // offset of the helper the site calls added.
+                    // A handle travelling by value is the parameter itself, or is read from a place
+                    // a parameter points to: that place is then the handle joined, as for one
+                    // handed by address. One handed by address may lie at a constant offset into
+                    // the object a parameter points to, the offset of the helper the site calls
+                    // added.
                     const llvm::Argument* parameter = nullptr;
                     std::int64_t offset = 0;
+                    bool byValue = site.byValue;
+                    const llvm::Value* address = &site.handle();
                     if (site.byValue)
-                        parameter =
-                            llvm::dyn_cast_or_null<llvm::Argument>(invariantValue(&site.handle()));
-                    else if (const auto place =
-                                 constantOffsetFrom(site.handle(), site.offset, layout))
                     {
-                        parameter = llvm::dyn_cast<llvm::Argument>(place->first);
-                        offset = place->second;
+                        const llvm::Value* read = invariantValue(&site.handle());
+                        parameter = llvm::dyn_cast_or_null<llvm::Argument>(read);
+                        byValue = parameter != nullptr;
+                        address = parameter == nullptr && read != nullptr
+                                      ? handleAddress(*read, /*byValue=*/true)
+                                      : nullptr;
                     }
+                    if (parameter == nullptr && address != nullptr)
+                        if (const auto place = constantOffsetFrom(*address, site.offset, layout))
+                        {
+                            parameter = llvm::dyn_cast<llvm::Argument>(place->first);
+                            offset = place->second;
+                        }
                     if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
                         continue;
                     const bool ended =
@@ -3668,7 +3688,7 @@ namespace ctrace::concurrency::internal::analysis
                         if (joined.size() >= kMaxJoinedParameters)
                             continue;
                         joined.push_back({.index = parameter->getArgNo(),
-                                          .byValue = site.byValue,
+                                          .byValue = byValue,
                                           .offset = offset,
                                           .ended = ended,
                                           .reported = reported});

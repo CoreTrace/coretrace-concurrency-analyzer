@@ -4009,6 +4009,68 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a pthread_t joined through a pointer to it, or as a member (#213) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_joined_through_member_pointer_no_fp.cpp",
+             .intent = "a member function joining a pthread_t member, called by pointer, ends it",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_at_zero_joined_through_member_pointer_no_fp.cpp",
+             .intent = "so does one joining the member at the start of its object",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_copied_then_joined_through_member_pointer_no_fp.cpp",
+             .intent = "so does one joining a local copy of the member",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_helpers_joining_through_pointer_in_loop_no_fp.cpp",
+             .intent = "a loop of helpers joining the pthread_t they point to ends every thread",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_pointer_joining_other_member_race.cpp",
+             .intent = "a member function joining the other pthread_t member leaves the reader",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_pointer_overwriting_then_joining_race.cpp",
+             .intent = "one overwriting the handle before joining it waits for another thread",
+             .dataRace = 1,
+             .missingJoin = 2,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_pointer_joining_on_one_path_race.cpp",
+             .intent = "one joining on one path only may leave the reader running",
+             .dataRace = 1,
+             .missingJoin = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_helpers_by_pointer_loop_stopping_short_race.cpp",
+             .intent = "that loop of helpers stopping one slot short leaves the last reader",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_pointer_joining_stale_copy_race.cpp",
+             .intent = "a member function joining a copy of the other member leaves the reader",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_task_restarted_before_join_race.c",
+             .intent = "a callee starting into the handle before its join joins another thread",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_rewritten_by_its_thread_before_join_race.cpp",
+             .intent = "a member function joining a handle its thread may rewrite ends nothing",
+             .dataRace = 3,
+             .missingJoin = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
