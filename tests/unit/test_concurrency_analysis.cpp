@@ -4008,6 +4008,13 @@ namespace
              .missingJoin = 2,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_pointer_joining_on_one_path_race.cpp",
+             .intent = "one joining on one path only may leave the reader running",
+             .dataRace = 1,
+             .missingJoin = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
