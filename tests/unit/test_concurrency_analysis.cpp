@@ -4015,6 +4015,12 @@ namespace
              .missingJoin = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_helpers_by_pointer_loop_stopping_short_race.cpp",
+             .intent = "that loop of helpers stopping one slot short leaves the last reader",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
