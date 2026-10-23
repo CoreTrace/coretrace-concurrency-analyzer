@@ -4033,6 +4033,13 @@ namespace
              .dataRace = 2,
              .missingJoin = 1,
              .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_rewritten_by_its_thread_before_join_race.cpp",
+             .intent = "a member function joining a handle its thread may rewrite ends nothing",
+             .dataRace = 3,
+             .missingJoin = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
