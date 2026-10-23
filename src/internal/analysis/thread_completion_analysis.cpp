@@ -584,20 +584,18 @@ namespace ctrace::concurrency::internal::analysis
                         return false;
                 }
             }
-            if (!judged.empty() && handedToThread)
-                return false;
             // A join made through a call handed the storage waits for the thread the handle holds
-            // only when that call leaves the handle unchanged until its own joins, whether or not
-            // anything else is handed the storage; one handed the handle's value cannot change it.
-            // A change the join makes past its own joins follows every one of them, the join of the
-            // handle proven among them.
+            // only when nothing changes the handle before that call's own joins, whether or not
+            // anything else is handed the storage: neither the call, nor a thread handed the
+            // storage. One handed the handle's value cannot change it. A change the join makes past
+            // its own joins follows every one of them, the join of the handle proven among them.
             const CallKind joinKind = classifier.classify(*join.call);
             const bool callHandedStorage = joinKind != CallKind::PThreadJoin &&
                                            joinKind != CallKind::StdThreadJoin &&
                                            !joinAliases.empty();
             if ((!judged.empty() || callHandedStorage) &&
-                waitsForUnchangedHandle(join, joinAliases, {}, members, analyses, classifier) ==
-                    JoinProof::Refused)
+                (handedToThread || waitsForUnchangedHandle(join, joinAliases, {}, members, analyses,
+                                                           classifier) == JoinProof::Refused))
                 return false;
             for (const auto& [call, argument] : judged)
             {
