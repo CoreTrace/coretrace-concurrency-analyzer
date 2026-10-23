@@ -3995,6 +3995,12 @@ namespace
                      "cpp_pthread_helpers_joining_through_pointer_in_loop_no_fp.cpp",
              .intent = "a loop of helpers joining the pthread_t they point to ends every thread",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_pointer_joining_other_member_race.cpp",
+             .intent = "a member function joining the other pthread_t member leaves the reader",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
