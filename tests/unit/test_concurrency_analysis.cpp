@@ -2633,6 +2633,13 @@ namespace
              .racingSymbol = "_ZL6shared",
              .missingJoin = 1,
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/missing-join/"
+                     "cpp_thread_member_pointer_detaching_other_reports_missing_join.cpp",
+             .intent = "it resolves the thread of the object it is called on, not another",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared",
+             .missingJoin = 1,
+             .requiresCxx20 = true},
 
             // --- imported missing-join fixtures (Nihil, 91e7431; #4) ---
             {.path = "tests/fixtures/concurrency/missing-join/cpp_missing_join_scope_exit.cpp",
