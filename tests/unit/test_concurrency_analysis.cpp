@@ -4001,6 +4001,13 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_pointer_overwriting_then_joining_race.cpp",
+             .intent = "one overwriting the handle before joining it waits for another thread",
+             .dataRace = 1,
+             .missingJoin = 2,
+             .racingSymbol = "_ZL6shared",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
