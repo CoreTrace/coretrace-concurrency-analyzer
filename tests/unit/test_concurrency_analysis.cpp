@@ -3978,6 +3978,11 @@ namespace
              .dataRace = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- a pthread_t joined through a pointer to it, or as a member (#213) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_member_joined_through_member_pointer_no_fp.cpp",
+             .intent = "a member function joining a pthread_t member, called by pointer, ends it",
+             .requiresCxx20 = true},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
