@@ -8,6 +8,15 @@ patch, and a `!` or a `BREAKING CHANGE` footer moves the major.
 While the version is below 1.0.0, the report format and the public C++ API may
 still change between minor releases.
 
+## Unreleased
+
+- **Report:** in JSON and SARIF, a finding's message is its plain statement, without the
+  `[!!!Error]` tag, the tabs and the `↳` note lines of the human report; the notes stay data,
+  in the JSON `notes` array and in a new SARIF `notes` result property (#218). The human
+  report and the SARIF fingerprints are unchanged.
+- **API:** `describeRule(RuleId)` gives a rule's title, description and default severity, from
+  the catalog the reports read (#214).
+
 ## v0.8.0
 
 Thread lifecycles are followed much further. A thread is now proven ended by

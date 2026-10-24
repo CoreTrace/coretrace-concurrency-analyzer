@@ -1221,6 +1221,38 @@ namespace
 
         return ok;
     }
+
+    // JSON and SARIF are read by programs (GitHub code scanning, CoreTrace): a finding's message
+    // is its plain statement, and its notes are data. The severity tag, the tabs and the arrows
+    // lay out the human report only.
+    bool testMachineFormatsCarryThePlainMessage()
+    {
+        bool ok = true;
+        constexpr std::string_view kMessage =
+            "unsynchronized concurrent access to global 'shared_counter'";
+        constexpr std::string_view kNote =
+            "\"no common recognized lock protects the conflicting accesses\"";
+
+        for (const char* format : {"--format=json", "--format=sarif"})
+        {
+            const RunResult result =
+                runAnalyzer({fixturePath("concurrency/data-race/data_race_basic.c").string(),
+                             "--analyze", format});
+            const std::string label = std::string(format) + " on data_race_basic";
+            ok = assertTrue(result.exitCode == 0, label + " should succeed") && ok;
+            ok = assertContains(result.output, "\"" + std::string(kMessage) + "\"", label) && ok;
+            ok = assertContains(result.output, kNote, label) && ok;
+            ok = assertNotContains(result.output, "[!!!", label) && ok;
+            ok = assertNotContains(result.output, "↳", label) && ok;
+            ok = assertNotContains(result.output, "\\t", label) && ok;
+        }
+
+        const RunResult human = runAnalyzer(
+            {fixturePath("concurrency/data-race/data_race_basic.c").string(), "--analyze"});
+        ok = assertContains(human.output, "[!!!Error] ", "human output") && ok;
+        ok = assertContains(human.output, "↳ no common recognized lock", "human output") && ok;
+        return ok;
+    }
 } // namespace
 
 int main()
@@ -1240,6 +1272,7 @@ int main()
     ok = testWarningsAsErrorsDoNotStopTheAnalysis() && ok;
     ok = testCachedProjectKeepsNoBitcodeInMemory() && ok;
     ok = testNoCacheNeitherReadsNorWritesTheCache() && ok;
+    ok = testMachineFormatsCarryThePlainMessage() && ok;
 
     if (!ok)
         return 1;

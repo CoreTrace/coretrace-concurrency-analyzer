@@ -375,6 +375,19 @@ namespace ctrace::concurrency
         return "unknown";
     }
 
+    /// What a rule detects, as the reports describe it: a title, a one-sentence description, and
+    /// the severity of its findings by default.
+    struct RuleDescription
+    {
+        std::string_view title;
+        std::string_view description;
+        Severity defaultSeverity = Severity::Info;
+    };
+
+    /// The description of `ruleId`, from the rule catalog the analyzer's own reports read: a
+    /// program that links the library describes a rule with the same text as the SARIF report.
+    [[nodiscard]] RuleDescription describeRule(RuleId ruleId);
+
     constexpr std::string_view toString(RuleId ruleId)
     {
         switch (ruleId)

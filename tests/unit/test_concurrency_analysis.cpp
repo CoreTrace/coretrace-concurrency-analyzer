@@ -3,6 +3,7 @@
 #include "coretrace_concurrency_analyzer.hpp"
 #include "internal/analysis/held_member_analysis.hpp"
 #include "internal/analysis/thread_completion_analysis.hpp"
+#include "internal/diagnostics/diagnostic_catalog.hpp"
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/InstIterator.h>
@@ -5537,6 +5538,33 @@ namespace
 
         return ok;
     }
+
+    // A program linking the library describes a rule with the text the reports give it: every
+    // rule, the compiler diagnostic included, has a title other than its id and a description,
+    // the same as the catalog the SARIF report reads.
+    bool testEveryRuleIsDescribedThroughThePublicApi()
+    {
+        bool ok = true;
+        std::vector<RuleId> rules = AnalysisOptions::allAvailable().enabledRules;
+        rules.push_back(RuleId::CompilerDiagnostic);
+        for (const RuleId rule : rules)
+        {
+            const ctrace::concurrency::RuleDescription described = describeRule(rule);
+            const auto& catalog =
+                ctrace::concurrency::internal::diagnostics::lookupRuleMetadata(rule);
+            const std::string name(toString(rule));
+            ok = assertTrue(!described.title.empty() && described.title != name,
+                            name + " has a title other than its id") &&
+                 ok;
+            ok = assertTrue(!described.description.empty(), name + " has a description") && ok;
+            ok = assertTrue(described.title == catalog.title &&
+                                described.description == catalog.shortDescription &&
+                                described.defaultSeverity == catalog.defaultSeverity,
+                            name + " is described as the reports describe it") &&
+                 ok;
+        }
+        return ok;
+    }
 } // namespace
 
 int main()
@@ -5544,6 +5572,7 @@ int main()
     bool ok = true;
 
     ok = testDataRaceBasicIsReported() && ok;
+    ok = testEveryRuleIsDescribedThroughThePublicApi() && ok;
     ok = testDataRaceBasicReportsDirectAliasHighConfidence() && ok;
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;

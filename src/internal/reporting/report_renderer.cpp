@@ -354,7 +354,8 @@ namespace ctrace::concurrency::internal::reporting
             for (const Diagnostic& diagnostic : report.diagnostics)
             {
                 llvm::json::Object details;
-                details.insert({"message", renderDiagnosticBody(diagnostic)});
+                // The plain statement: the tag and the note lines lay out the human report only.
+                details.insert({"message", diagnostic.message});
 
                 llvm::json::Array notes;
                 for (const DiagnosticNote& note : diagnostic.notes)
@@ -499,10 +500,18 @@ namespace ctrace::concurrency::internal::reporting
                         {"coretraceDiagnosticProperties", std::move(diagnostic_properties)});
                 }
 
+                if (!diagnostic.notes.empty())
+                {
+                    llvm::json::Array notes;
+                    for (const DiagnosticNote& note : diagnostic.notes)
+                        notes.emplace_back(note.text);
+                    result_properties.insert({"notes", std::move(notes)});
+                }
+
                 results.emplace_back(llvm::json::Object{
                     {"ruleId", std::string(toString(diagnostic.ruleId))},
                     {"level", sarifLevel(diagnostic.severity)},
-                    {"message", llvm::json::Object{{"text", renderDiagnosticBody(diagnostic)}}},
+                    {"message", llvm::json::Object{{"text", diagnostic.message}}},
                     {"locations", std::move(locations)},
                     {"relatedLocations", std::move(related_locations)},
                     {"partialFingerprints",
