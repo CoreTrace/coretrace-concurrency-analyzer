@@ -367,6 +367,54 @@ namespace
                           "the race is main against detachedReader alone, never joinedReader");
     }
 
+    /// In each fixture an instance of `first` runs beside one of `second`, which an order the two
+    /// entries have elsewhere must not hide: the race between them is checked, not only a race on
+    /// the symbol, which `first` racing with itself would also give (#224).
+    bool testEntriesOrderedElsewhereStillRaceFirstAgainstSecond()
+    {
+        const std::vector<std::string_view> fixtures = {
+            "data_race_entry_started_again_beside_other_race.c",
+            "data_race_entry_started_by_other_entry_race.c",
+            "data_race_entries_ordered_by_helpers_then_overlapping_race.c",
+            "data_race_entry_started_again_by_helper_beside_other_race.c",
+            "data_race_entries_ordered_by_worker_started_twice_race.c",
+            "data_race_entries_ordered_at_each_level_of_recursion_race.c",
+            "data_race_entry_started_again_through_select_race.c",
+            "data_race_entry_started_again_through_entry_array_race.c",
+            "data_race_entry_started_by_recursive_thread_entry_race.c",
+            "data_race_entries_ordered_by_root_called_indirectly_race.c",
+            "data_race_entries_ordered_by_helper_also_called_indirectly_race.c",
+            "cpp_pthread_thread_left_by_exception_caught_in_helper_race.cpp",
+        };
+        bool passed = true;
+        for (const std::string_view fixture : fixtures)
+        {
+            const std::string path = "tests/fixtures/concurrency/data-race/" + std::string(fixture);
+            const std::optional<DiagnosticReport> report =
+                analyzeFixture(path, AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
+            if (!report.has_value())
+            {
+                passed = false;
+                continue;
+            }
+
+            bool firstAgainstSecond = false;
+            for (const Diagnostic& diagnostic : report->diagnostics)
+                for (const ctrace::concurrency::RelatedLocation& related :
+                     diagnostic.relatedLocations)
+                {
+                    const std::string& one = diagnostic.location.function;
+                    const std::string& other = related.location.function;
+                    firstAgainstSecond = firstAgainstSecond ||
+                                         (one == "first" && other == "second") ||
+                                         (one == "second" && other == "first");
+                }
+            passed = assertTrue(firstAgainstSecond, path + " should report first against second") &&
+                     passed;
+        }
+        return passed;
+    }
+
     /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
     /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
     /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
@@ -4072,6 +4120,67 @@ namespace
              .missingJoin = 1,
              .racingSymbol = "_ZL6shared",
              .requiresCxx20 = true},
+            // --- two entries ordered in one place and run beside each other in another (#224) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_again_beside_other_race.c",
+             .intent = "an entry started again beside another one ordered before it races with it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_by_other_entry_race.c",
+             .intent = "so does an entry the other entry starts itself",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entries_ordered_by_helpers_then_overlapping_race.c",
+             .intent = "so do entries helpers order, once started at the same time",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_again_by_helper_beside_other_race.c",
+             .intent = "so does an entry a helper starts again beside the other",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entries_ordered_by_worker_started_twice_race.c",
+             .intent = "an order a worker gives holds in one worker, not across two",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entries_ordered_at_each_level_of_recursion_race.c",
+             .intent = "nor across the levels of a recursion",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_again_through_select_race.c",
+             .intent = "an entry started again through a select is still weighed",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_again_through_entry_array_race.c",
+             .intent = "so is one started again through an array of entries",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_by_recursive_thread_entry_race.c",
+             .intent = "and one a recursive thread entry starts, which no caller expands",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entries_ordered_by_root_called_indirectly_race.c",
+             .intent = "an order a function gives holds not where a pointer calls it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entries_ordered_by_helper_also_called_indirectly_race.c",
+             .intent = "even one also called directly, and so no root",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_thread_left_by_exception_caught_in_helper_race.cpp",
+             .intent = "a call whose exception a helper catches does not end its thread",
+             .dataRace = 1,
+             .racingSymbol = "_ZL6shared"},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
@@ -5576,6 +5685,7 @@ int main()
     ok = testDataRaceBasicReportsDirectAliasHighConfidence() && ok;
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
+    ok = testEntriesOrderedElsewhereStillRaceFirstAgainstSecond() && ok;
     ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
     ok = testJoinSummariesKeepTheirOffsets() && ok;
     ok = testArgumentEffectsTellWritesFromKeeping() && ok;
