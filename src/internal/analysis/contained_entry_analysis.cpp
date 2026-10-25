@@ -133,10 +133,12 @@ namespace ctrace::concurrency::internal::analysis
                     const auto kind = classifier.classify(*call);
                     if (kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor)
                     {
+                        // A spawn whose entry is not known, or missing, starts a thread this
+                        // expansion cannot weigh.
                         const unsigned operand = kind == CallKind::PThreadCreate ? 2 : 1;
-                        if (call->arg_size() <= operand)
-                            continue;
-                        const auto* entry = bind(*call->getArgOperand(operand), arguments);
+                        const auto* entry = call->arg_size() > operand
+                                                ? bind(*call->getArgOperand(operand), arguments)
+                                                : nullptr;
                         if (entry == nullptr || ++occurrenceCount > kMaxOccurrences)
                         {
                             complete = false;
@@ -190,10 +192,15 @@ namespace ctrace::concurrency::internal::analysis
             return {};
 
         // Helpers invoked by workers can execute concurrently even when their own bodies
-        // are sequential. Such roots cannot contribute a global never-overlaps statement.
+        // are sequential. Such roots cannot contribute a global never-overlaps statement. Nor can
+        // a function an indirect call may enter, root or not: it may run in any thread, and the
+        // instances it starts there are not among the occurrences.
         std::unordered_set<const llvm::Function*> workerReachable;
         for (const auto& occurrence : occurrences)
             workerReachable.insert(occurrence.entry);
+        for (const auto* function : relevant)
+            if (function->hasAddressTaken())
+                workerReachable.insert(function);
         changed = true;
         while (changed)
         {
@@ -207,6 +214,15 @@ namespace ctrace::concurrency::internal::analysis
             if (!visited.contains(function) && workerReachable.contains(function))
                 return {};
 
+        // Any frame counts, not only the outermost: a function entered elsewhere runs there
+        // beside what its callers here order.
+        auto inWorker = [&](const Occurrence& occurrence)
+        {
+            for (const Frame& frame : occurrence.frames)
+                if (workerReachable.contains(frame.start->getFunction()))
+                    return true;
+            return false;
+        };
         std::unordered_set<EntryPair, EntryPairHash> proved;
         std::unordered_set<EntryPair, EntryPairHash> uncertain;
         for (std::size_t i = 0; i < occurrences.size(); ++i)
@@ -217,10 +233,7 @@ namespace ctrace::concurrency::internal::analysis
                 if (a.entry == b.entry)
                     continue;
                 const auto pair = makeEntryPair(functionId(*a.entry), functionId(*b.entry));
-                const bool inWorker =
-                    workerReachable.contains(a.frames.back().start->getFunction()) ||
-                    workerReachable.contains(b.frames.back().start->getFunction());
-                if (!inWorker && ordered(a, b, analyses))
+                if (!inWorker(a) && !inWorker(b) && ordered(a, b, analyses))
                     proved.insert(pair);
                 else
                     uncertain.insert(pair);

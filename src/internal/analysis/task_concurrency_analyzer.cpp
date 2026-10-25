@@ -1563,44 +1563,13 @@ namespace ctrace::concurrency::internal::analysis
     {
         TaskConcurrencyResult result;
         result.rootTaskFunctions = collectRootTaskFunctions(module, directCallSites);
-        const auto containedPairs = collectContainedEntryPairs(module, directCallSites, completions,
-                                                               classifier_, analyses_);
-        result.sequencedEntryPairs.insert(containedPairs.begin(), containedPairs.end());
+        // Two spawns ordered in one function say nothing of the entries' other instances: only a
+        // proof over every occurrence of both orders them (#224).
+        result.sequencedEntryPairs = collectContainedEntryPairs(
+            module, directCallSites, completions, classifier_, analyses_);
 
         RunningThreads running(module, directCallSites, completions, classifier_, analyses_,
                                includeExternalEntries);
-
-        for (const llvm::Function& function : module)
-        {
-            if (function.isDeclaration())
-                continue;
-
-            const FunctionLifecycleSites& sites = running.sitesOf(function);
-            if (sites.spawns.empty())
-                continue;
-
-            const llvm::DominatorTree& dominatorTree = analyses_.getDominatorTree(function);
-
-            // A spawn dominated by the join of another entry's only instance can never overlap it.
-            for (const SpawnSite& spawn : sites.spawns)
-            {
-                for (const SpawnSite& earlier : sites.spawns)
-                {
-                    if (earlier.entryFunctionId == spawn.entryFunctionId)
-                        continue;
-
-                    const bool earlierIsJoinedFirst =
-                        !running.spawnIsLiveAt(function, earlier, *spawn.instruction) &&
-                        dominatorTree.dominates(earlier.instruction, spawn.instruction);
-                    if (earlierIsJoinedFirst)
-                    {
-                        result.sequencedEntryPairs.insert(
-                            makeEntryPair(earlier.entryFunctionId, spawn.entryFunctionId));
-                    }
-                }
-            }
-        }
-
         running.settleLeaks();
         for (const auto& [function, leaked] : running.leaked())
         {
