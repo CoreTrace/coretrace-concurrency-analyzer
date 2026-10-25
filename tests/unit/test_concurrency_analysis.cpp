@@ -4142,6 +4142,12 @@ namespace
              .dataRace = 1,
              .racingSymbol = "shared"},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entries_ordered_once_no_fp.c",
+             .intent = "entries ordered once and never started again never run at once"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entries_ordered_through_helpers_no_fp.c",
+             .intent = "nor do entries helpers start and join one after another"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_entries_ordered_by_worker_started_twice_race.c",
              .intent = "an order a worker gives holds in one worker, not across two",
              .dataRace = 1,
