@@ -32,8 +32,8 @@ namespace ctrace::concurrency::internal::analysis
         /// through the calls it made, rather than received running from its callers: a call to the
         /// function brings none of these, so they run beside the instruction at every call.
         std::unordered_map<const llvm::Instruction*, ThreadEntrySet> startedEntriesAtInstruction;
-        /// Entries whose lifetimes are provably disjoint because one is joined before the other is
-        /// spawned.
+        /// Entries whose lifetimes are provably disjoint: of every instance of one and every
+        /// instance of the other, one is joined before the other is spawned.
         std::unordered_set<EntryPair, EntryPairHash> sequencedEntryPairs;
         /// Entries a function starts and does not wait for, so its caller keeps running beside
         /// them once the call returns. An object that owns its thread is the usual source: the
