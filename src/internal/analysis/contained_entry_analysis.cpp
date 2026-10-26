@@ -133,6 +133,13 @@ namespace ctrace::concurrency::internal::analysis
                     const auto kind = classifier.classify(*call);
                     if (kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor)
                     {
+                        // A std::thread constructor handing its thread to another, as the
+                        // complete-object one does to the base-object one where the target has
+                        // no aliases (Darwin), starts no thread of its own: every call to it is a
+                        // start already counted where it is made.
+                        if (kind == CallKind::StdThreadCtor &&
+                            classifier.classify(function) == CallKind::StdThreadCtor)
+                            continue;
                         // A spawn whose entry is not known, or missing, starts a thread this
                         // expansion cannot weigh.
                         const unsigned operand = kind == CallKind::PThreadCreate ? 2 : 1;
