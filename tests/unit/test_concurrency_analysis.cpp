@@ -1324,6 +1324,81 @@ namespace
         return ok;
     }
 
+    /// A spawn binds an entry handed to its helper to the object the call hands only where
+    /// nothing else in the unit may run the entry. A call through a copy of its address, a helper
+    /// calling it, a table or a global holding it, code the unit does not define, a copy no call
+    /// settles, a spawn on an object no call names, helpers handing it down past those followed,
+    /// or an object passed down past the callers followed run it on another object, under
+    /// another lock: the entry is then bound to none, and its races with reader and with its other
+    /// run, and its inversion under another lock, stay reported. A copy carrying the entry to its
+    /// spawn, a comparison, as many helpers or callers as are followed, and a recursion passing
+    /// the object back down leave it bound. Each race is pinned by its places, and the deadlock by
+    /// its locks and places (#235).
+    bool testHandedEntryRunElsewhereIsBoundToNothing()
+    {
+        struct ExpectedPlaces
+        {
+            std::string_view fixture;
+            std::vector<std::string> places;
+        };
+        const std::vector<ExpectedPlaces> expectations = {
+            {"data_race_handed_entry_also_run_through_local_pointer_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_run_by_helper_parameter_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_run_by_spawning_helper_race.c",
+             {"reader:33 ~ writer:24"}},
+            {"data_race_handed_entry_also_run_through_table_race.c", {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_on_unnamed_object_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_through_five_helpers_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_on_object_from_five_frames_up_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_run_through_global_pointer_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_handed_to_undefined_code_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_through_ambiguous_copy_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_on_unnamed_object_a_helper_down_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_handed_through_local_copy_no_fp.c", {}},
+            {"data_race_handed_entry_also_compared_no_fp.c", {}},
+            {"data_race_handed_entry_handed_through_four_helpers_no_fp.c", {}},
+            {"data_race_handed_entry_started_on_object_from_four_frames_up_no_fp.c", {}},
+            {"data_race_handed_entry_started_on_object_passed_back_down_no_fp.c", {}},
+        };
+        bool passed = true;
+        for (const ExpectedPlaces& expected : expectations)
+        {
+            const std::optional<std::vector<std::string>> places = racingPlacesIn(expected.fixture);
+            passed = assertTrue(places.has_value() && *places == expected.places,
+                                std::string(expected.fixture) +
+                                    " should race exactly at its expected places") &&
+                     passed;
+        }
+
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/deadlock/"
+                           "deadlock_handed_entry_also_run_through_local_pointer_under_its_lock.c",
+                           AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic =
+            findFirstDiagnosticForRule(*report, RuleId::DeadlockLockOrder);
+        const std::vector<std::string> inversion = {"reverser:39", "writer:27"};
+        return assertTrue(report->diagnostics.size() == 1 && diagnostic != nullptr,
+                          "a run through a copy of the entry's address should keep its deadlock") &&
+               assertTrue(stringPropertyOf(*diagnostic, "firstLock") == "first" &&
+                              stringPropertyOf(*diagnostic, "secondLock") == "second",
+                          "the deadlock should invert first and second") &&
+               assertTrue(sortedPlaces(*diagnostic) == inversion,
+                          "the deadlock should join writer and reverser") &&
+               passed;
+    }
+
     bool testConsistentLockOrderHasNoDeadlock()
     {
         const std::optional<DiagnosticReport> report = analyzeFixture(
@@ -2756,6 +2831,11 @@ namespace
              .intent = "a lock a bound entry reacquires by name, or hands on, is one "
                        "reacquisition, whichever runs take it (#235)",
              .deadlock = 2},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_also_run_through_local_pointer_under_its_lock.c",
+             .intent = "a call through a copy of a handed entry's address holds the lock of what "
+                       "it passes, not the thread's (#235)",
+             .deadlock = 1},
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_helper_order_kept_where_taken.c",
              .intent = "calls that add no lock leave the helper's order where it is taken (#136)",
@@ -4719,6 +4799,87 @@ namespace
                        "excludes neither the thread nor reader",
              .dataRace = 2,
              .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_through_local_pointer_race.c",
+             .intent = "a call through a copy of a handed entry's address runs it where no spawn "
+                       "names its object (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_by_helper_parameter_race.c",
+             .intent = "a helper calling the entry it is handed runs it where no spawn names its "
+                       "object (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_by_spawning_helper_race.c",
+             .intent = "a helper starting the entry it is handed and calling it too runs it on "
+                       "another object (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_through_table_race.c",
+             .intent = "a handed entry kept in a table may run wherever the table is read (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_on_unnamed_object_race.c",
+             .intent = "a handed entry also started on an object no call names is bound to none "
+                       "(#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_through_five_helpers_race.c",
+             .intent = "a handed entry also started past the helpers followed is bound to none "
+                       "(#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_through_global_pointer_race.c",
+             .intent = "a handed entry's address stored in a global may be called wherever the "
+                       "global is read (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_handed_to_undefined_code_race.c",
+             .intent = "code the unit does not define may run a handed entry it is handed "
+                       "(#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_through_ambiguous_copy_race.c",
+             .intent = "a copy that may hold a handed entry starts it where no call settles it "
+                       "(#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_on_unnamed_object_a_helper_down_race.c",
+             .intent = "a helper handing an entry down to a spawn on an object no call names "
+                       "binds it to none (#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_handed_through_local_copy_no_fp.c",
+             .intent = "a copy carrying a handed entry to its spawn leaves it bound (#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_compared_no_fp.c",
+             .intent = "comparing a handed entry runs nothing and leaves it bound (#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_handed_through_four_helpers_no_fp.c",
+             .intent = "an entry handed down as many helpers as are followed stays bound (#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_on_object_from_five_frames_up_race.c",
+             .intent = "a handed entry also started on an object passed down past the callers "
+                       "followed is bound to none (#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_on_object_from_four_frames_up_no_fp.c",
+             .intent = "an object passed down as many callers as are followed binds the entry "
+                       "(#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_on_object_passed_back_down_no_fp.c",
+             .intent = "an object a recursion passes back down binds the entry (#235)"},
             // --- the object a thread reaches when its helper reads it out of the object the
             // helper is handed (#242) ---
             {.path = "tests/fixtures/concurrency/data-race/"
@@ -6265,6 +6426,7 @@ int main()
     ok = testHelperOrderReportedWhereTaken() && ok;
     ok = testKeptObjectLockIsNoGate() && ok;
     ok = testEachRunOfABoundEntryTakesItsOwnOrders() && ok;
+    ok = testHandedEntryRunElsewhereIsBoundToNothing() && ok;
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
