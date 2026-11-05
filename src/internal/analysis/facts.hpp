@@ -306,7 +306,8 @@ namespace ctrace::concurrency::internal::analysis
         std::string secondLockId;
         SourceLocation location;
         /// Every lock held at the acquisition, including `firstLockId`; used to detect a common
-        /// outer "gate" lock that serializes an otherwise inconsistent order.
+        /// outer "gate" lock that serializes an otherwise inconsistent order. A lock named after
+        /// an object its thread is kept on for lack of proof is left out, being no gate.
         std::set<std::string> heldLocks;
         bool inRootTask = false;
         ThreadEntrySet liveEntries;
