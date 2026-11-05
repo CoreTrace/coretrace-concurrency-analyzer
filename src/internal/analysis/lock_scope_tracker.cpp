@@ -82,11 +82,13 @@ namespace ctrace::concurrency::internal::analysis
         if (trackedAccesses.empty())
             return heldLocksByAccess;
 
+        // The object of an entry a direct call also runs names none of the locks it holds: that
+        // run holds the lock of what the call passes.
         const SharedObjectBinding* sharedObject = nullptr;
         if (sharedObjects_ != nullptr)
         {
             if (const auto it = sharedObjects_->find(functionId(function));
-                it != sharedObjects_->end())
+                it != sharedObjects_->end() && !it->second.runByDirectCalls)
             {
                 sharedObject = &it->second;
             }

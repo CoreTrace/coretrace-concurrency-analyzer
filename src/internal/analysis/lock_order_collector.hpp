@@ -40,12 +40,16 @@ namespace ctrace::concurrency::internal::analysis
 
         /// The orders `function` takes. An order naming the lock of one of its parameters, or
         /// `kLocksHeldByCaller`, is open: only a call to `function` can say which locks it
-        /// orders. `startedEntriesByInstruction` is the part of the live entries `function`
-        /// started itself.
+        /// orders. A thread entry bound to the object its spawns hand it names the locks it
+        /// reaches through that object after it, unless a direct call also runs it: those orders
+        /// then stay open for the calls, and `spawnedThread` asks for the spawned thread's own,
+        /// named after the object. `startedEntriesByInstruction` is the part of the live entries
+        /// `function` started itself.
         [[nodiscard]] std::vector<LockOrderFact>
         collect(const llvm::Function& function, const std::set<std::string>& initialHeldLocks = {},
                 const LiveEntriesByInstruction& liveEntriesByInstruction = {},
-                const LiveEntriesByInstruction& startedEntriesByInstruction = {}) const;
+                const LiveEntriesByInstruction& startedEntriesByInstruction = {},
+                bool spawnedThread = false) const;
 
       private:
         const ConcurrencySymbolClassifier& classifier_;

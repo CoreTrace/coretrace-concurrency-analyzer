@@ -82,6 +82,12 @@ namespace ctrace::concurrency::internal::analysis
         /// The class whose constructors start the entry on the object they construct: a thread
         /// of the entry never holds an object a later constructor call builds. Empty otherwise.
         std::string constructedClass;
+        /// Set when a direct call also runs the entry, on what the call passes: the object is the
+        /// spawned thread's alone. It then names none of the locks the entry's frame holds, around
+        /// its accesses or at its calls, which every run of the entry shares and each call names
+        /// after what it passes; only the spawned thread's lock orders are named after it, apart
+        /// from the calls' (#235).
+        bool runByDirectCalls = false;
     };
 
     /// Whether `access`, made by the spawning function over `byteSize` bytes starting `offset`

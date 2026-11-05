@@ -878,6 +878,15 @@ namespace ctrace::concurrency::internal::analysis
             bindings.emplace(entryFunctionId, std::move(binding));
         }
 
+        for (const DirectCallSite& site : directCallSites)
+        {
+            if (const auto bindingIt = bindings.find(site.calleeFunctionId);
+                bindingIt != bindings.end())
+            {
+                bindingIt->second.runByDirectCalls = true;
+            }
+        }
+
         return bindings;
     }
 } // namespace ctrace::concurrency::internal::analysis

@@ -157,11 +157,10 @@ namespace ctrace::concurrency::internal::analysis
             localObjects_ = sharedObjectNames(*sharedObjects_, SharedObjectKind::Local);
     }
 
-    std::vector<LockOrderFact>
-    LockOrderCollector::collect(const llvm::Function& function,
-                                const std::set<std::string>& initialHeldLocks,
-                                const LiveEntriesByInstruction& liveEntriesByInstruction,
-                                const LiveEntriesByInstruction& startedEntriesByInstruction) const
+    std::vector<LockOrderFact> LockOrderCollector::collect(
+        const llvm::Function& function, const std::set<std::string>& initialHeldLocks,
+        const LiveEntriesByInstruction& liveEntriesByInstruction,
+        const LiveEntriesByInstruction& startedEntriesByInstruction, bool spawnedThread) const
     {
         std::vector<LockOrderFact> facts;
         // The acquisitions each fact stands for: every one at its source location, which a macro
@@ -173,7 +172,7 @@ namespace ctrace::concurrency::internal::analysis
         if (sharedObjects_ != nullptr)
         {
             if (const auto it = sharedObjects_->find(functionId(function));
-                it != sharedObjects_->end())
+                it != sharedObjects_->end() && (spawnedThread || !it->second.runByDirectCalls))
             {
                 sharedObject = &it->second;
             }

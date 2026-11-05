@@ -321,6 +321,10 @@ namespace ctrace::concurrency::internal::analysis
         /// The second lock's type lets its owner take it again. A lock named after a parameter
         /// has no identity of its own to look this up by, so the order carries it.
         bool secondIsRecursive = false;
+        /// Taken by the thread a spawn starts on the object its function is bound to, on the
+        /// locks named after that object, and by no other run of the function: a direct call
+        /// takes the function's orders on what it passes, apart (#235).
+        bool boundBySpawn = false;
     };
 
     enum class ThreadHandleKind
