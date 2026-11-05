@@ -1218,6 +1218,38 @@ namespace
         return places;
     }
 
+    /// A thread on a handed entry, kept for lack of proof on the object its helper reads its own
+    /// out of, takes its object's lock around first then second, and main takes the lock of the
+    /// object passed around the opposite order. The lock named after the kept object is no gate:
+    /// the inversion of first and second stays reported between writer and main, which a count
+    /// alone would not tell from another cycle. Where the store is proven, the thread's lock is
+    /// main's, and still gates the inversion (#242).
+    bool testKeptObjectLockIsNoGate()
+    {
+        const AnalysisOptions deadlocks{.enabledRules = {RuleId::DeadlockLockOrder}};
+        const std::optional<DiagnosticReport> kept = analyzeFixture(
+            "tests/fixtures/concurrency/deadlock/deadlock_gate_of_object_read_from_handed_object.c",
+            deadlocks);
+        const std::optional<DiagnosticReport> proven =
+            analyzeFixture("tests/fixtures/concurrency/deadlock/"
+                           "deadlock_gate_of_proven_object_read_from_handed_object_no_diagnostic.c",
+                           deadlocks);
+        if (!kept.has_value() || !proven.has_value())
+            return false;
+
+        const Diagnostic* diagnostic = findFirstDiagnosticForRule(*kept, RuleId::DeadlockLockOrder);
+        const std::vector<std::string> inversion = {"main:47", "writer:27"};
+        return assertTrue(kept->diagnostics.size() == 1 && diagnostic != nullptr,
+                          "a gate named after a kept object should hide no deadlock") &&
+               assertTrue(stringPropertyOf(*diagnostic, "firstLock") == "first" &&
+                              stringPropertyOf(*diagnostic, "secondLock") == "second",
+                          "the deadlock should invert first and second") &&
+               assertTrue(sortedPlaces(*diagnostic) == inversion,
+                          "the deadlock should join writer and main") &&
+               assertTrue(proven->diagnostics.empty(),
+                          "the lock of the object a thread is proven to hold should gate");
+    }
+
     /// A direct call runs an entry its spawns bind to an object on what the call passes: the call
     /// takes the entry's orders, and those of the entry's calls, on that object's locks, under the
     /// locks it holds and beside the threads running at the call. The thread takes its own orders
@@ -2647,6 +2679,14 @@ namespace
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_gate_held_at_every_call_no_diagnostic.c",
              .intent = "a gate held at every call to the helpers (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_of_object_read_from_handed_object.c",
+             .intent = "a lock named after an object a thread is kept on for lack of proof is no "
+                       "gate (#242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_of_proven_object_read_from_handed_object_no_diagnostic.c",
+             .intent = "the lock of the object a thread is proven to hold is a gate (#242)"},
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_entry_called_directly_on_other_object.c",
              .intent = "a direct call of a bound entry takes its orders on what it passes (#235)",
@@ -6201,6 +6241,7 @@ int main()
     ok = testDeadlockBasicReportsLockOrderCycle() && ok;
     ok = testRecursiveDeadlockReportsReacquiredLock() && ok;
     ok = testHelperOrderReportedWhereTaken() && ok;
+    ok = testKeptObjectLockIsNoGate() && ok;
     ok = testEachRunOfABoundEntryTakesItsOwnOrders() && ok;
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
