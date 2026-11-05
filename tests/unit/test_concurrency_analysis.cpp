@@ -1084,6 +1084,83 @@ namespace
                           "taken (#136)");
     }
 
+    /// The places a deadlock joins, as `function:line`, in order.
+    std::vector<std::string> sortedPlaces(const Diagnostic& diagnostic)
+    {
+        std::vector<std::string> places = {diagnostic.location.function + ":" +
+                                           std::to_string(diagnostic.location.line)};
+        for (const ctrace::concurrency::RelatedLocation& related : diagnostic.relatedLocations)
+            places.push_back(related.location.function + ":" +
+                             std::to_string(related.location.line));
+        std::sort(places.begin(), places.end());
+        return places;
+    }
+
+    /// A direct call runs an entry its spawns bind to an object on what the call passes: the call
+    /// takes the entry's orders, and those of the entry's calls, on that object's locks, under the
+    /// locks it holds and beside the threads running at the call. The thread takes its own orders
+    /// on its object. Each deadlock is pinned by its locks and places, which a count alone would
+    /// not tell from another cycle (#235).
+    bool testEachRunOfABoundEntryTakesItsOwnOrders()
+    {
+        struct Cycle
+        {
+            std::string fixture;
+            std::string firstLock;
+            std::string secondLock;
+            std::vector<std::string> places;
+        };
+        const std::vector<Cycle> cycles = {
+            {"deadlock_entry_called_directly_on_other_object.c",
+             "gate",
+             "other",
+             {"main:51", "reverser:34"}},
+            {"deadlock_handed_entry_called_directly_on_other_object.c",
+             "gate",
+             "other",
+             {"main:52", "reverser:35"}},
+            {"deadlock_handed_entry_called_directly_orders_in_helper.c",
+             "gate",
+             "other",
+             {"main:57", "reverser:40"}},
+            {"deadlock_handed_entry_called_directly_under_its_argument_lock.c",
+             "first",
+             "second",
+             {"main:58", "reverser:41"}},
+            {"deadlock_handed_entry_called_directly_keeps_thread_order.c",
+             "gate",
+             "task",
+             {"reverser:36", "writer:26"}},
+        };
+
+        bool ok = true;
+        for (const Cycle& cycle : cycles)
+        {
+            const std::string path = "tests/fixtures/concurrency/deadlock/" + cycle.fixture;
+            const std::optional<DiagnosticReport> report =
+                analyzeFixture(path, AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}});
+            if (!report.has_value())
+            {
+                ok = false;
+                continue;
+            }
+
+            const Diagnostic* diagnostic =
+                findFirstDiagnosticForRule(*report, RuleId::DeadlockLockOrder);
+            ok = assertTrue(report->diagnostics.size() == 1 && diagnostic != nullptr,
+                            cycle.fixture + " should report one deadlock") &&
+                 assertTrue(stringPropertyOf(*diagnostic, "firstLock") == cycle.firstLock &&
+                                stringPropertyOf(*diagnostic, "secondLock") == cycle.secondLock,
+                            cycle.fixture + " should invert " + cycle.firstLock + " and " +
+                                cycle.secondLock) &&
+                 assertTrue(sortedPlaces(*diagnostic) == cycle.places,
+                            cycle.fixture + " should join " + cycle.places.front() + " and " +
+                                cycle.places.back()) &&
+                 ok;
+        }
+        return ok;
+    }
+
     bool testConsistentLockOrderHasNoDeadlock()
     {
         const std::optional<DiagnosticReport> report = analyzeFixture(
@@ -2446,6 +2523,53 @@ namespace
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_gate_held_at_every_call_no_diagnostic.c",
              .intent = "a gate held at every call to the helpers (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_entry_called_directly_on_other_object.c",
+             .intent = "a direct call of a bound entry takes its orders on what it passes (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_entry_called_directly_on_other_object_in_order_no_diagnostic.c",
+             .intent = "a direct call of a bound entry taking its orders in another thread's "
+                       "order closes no cycle (#235)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_on_other_object.c",
+             .intent = "a direct call of an entry a helper starts takes its orders on what it "
+                       "passes (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_on_other_object_in_order_no_diagnostic"
+                     ".c",
+             .intent = "a direct call of an entry a helper starts, taking its orders in another "
+                       "thread's order, closes no cycle (#235)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_orders_in_helper.c",
+             .intent = "a direct call of a bound entry takes its calls' orders on what it passes "
+                       "(#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_under_its_argument_lock.c",
+             .intent = "a direct call of a bound entry holds the lock of what it passes, not the "
+                       "thread's (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_under_thread_object_lock_no_diagnostic"
+                     ".c",
+             .intent = "a direct call passing a bound entry's object holds its lock, a gate the "
+                       "thread shares (#235)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_keeps_thread_order.c",
+             .intent = "a bound entry's thread keeps its orders on its object beside the entry's "
+                       "direct calls (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_entry_called_directly_after_its_thread_joined_no_diagnostic.c",
+             .intent = "a bound entry's thread takes its orders alone, not main, which calls the "
+                       "entry (#235)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_entry_called_directly_reacquires_lock_by_name.c",
+             .intent = "a lock a bound entry reacquires by name, or hands on, is one "
+                       "reacquisition, whichever runs take it (#235)",
+             .deadlock = 2},
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_helper_order_kept_where_taken.c",
              .intent = "calls that add no lock leave the helper's order where it is taken (#136)",
@@ -4403,6 +4527,12 @@ namespace
                      "data_race_entry_parameter_through_recursive_helper_race.c",
              .intent = "an entry handed on through a recursive helper is settled at the outer call",
              .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_called_directly_under_its_argument_lock_race.c",
+             .intent = "a direct call of a bound entry holds the lock of what it passes, which "
+                       "excludes neither the thread nor reader",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
             // --- a thread the copy of a std::thread argument starts (#200) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_argument_copy_starts_thread_joined_race.cpp",
@@ -5832,6 +5962,7 @@ int main()
     ok = testDeadlockBasicReportsLockOrderCycle() && ok;
     ok = testRecursiveDeadlockReportsReacquiredLock() && ok;
     ok = testHelperOrderReportedWhereTaken() && ok;
+    ok = testEachRunOfABoundEntryTakesItsOwnOrders() && ok;
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;
