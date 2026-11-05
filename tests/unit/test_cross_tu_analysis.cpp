@@ -36,8 +36,10 @@ namespace
     using ctrace::concurrency::ProjectAnalysisReport;
     using ctrace::concurrency::ProjectConcurrencyAnalyzer;
     using ctrace::concurrency::ProjectUnitSource;
+    using ctrace::concurrency::RelatedLocation;
     using ctrace::concurrency::RuleId;
     using ctrace::concurrency::SingleTUConcurrencyAnalyzer;
+    using ctrace::concurrency::SourceLocation;
 
     constexpr std::string_view kProjectRoot = "tests/fixtures/concurrency-project";
 
@@ -131,6 +133,40 @@ namespace
         }
 
         return count;
+    }
+
+    std::string placeOf(const SourceLocation& location)
+    {
+        return std::filesystem::path(location.file).filename().string() + ':' + location.function +
+               ':' + std::to_string(location.line);
+    }
+
+    /// Each race on a symbol as the accesses it joins, `file:function:line ~ ...`: which race is
+    /// reported, which a count alone would not tell from another one.
+    std::vector<std::string> racesOn(const DiagnosticReport& report, std::string_view symbol)
+    {
+        std::vector<std::string> races;
+        for (const Diagnostic& diagnostic : report.diagnostics)
+        {
+            const std::optional<std::string> reported = symbolOf(diagnostic);
+            if (diagnostic.ruleId != RuleId::DataRaceGlobal || !reported.has_value() ||
+                *reported != symbol)
+            {
+                continue;
+            }
+
+            std::vector<std::string> places = {placeOf(diagnostic.location)};
+            for (const RelatedLocation& related : diagnostic.relatedLocations)
+                places.push_back(placeOf(related.location));
+            std::sort(places.begin(), places.end());
+
+            std::string race;
+            for (const std::string& place : places)
+                race += (race.empty() ? "" : " ~ ") + place;
+            races.push_back(std::move(race));
+        }
+        std::sort(races.begin(), races.end());
+        return races;
     }
 
     /// The acceptance case for the project mode: the spawn lives in `main.c`, the racing body in
@@ -769,6 +805,68 @@ namespace
             ProjectConcurrencyAnalyzer().analyze(project.units()).report;
         return assertTrue(countRacesOn(report, "shared") == 1,
                           "reader races with the thread the other unit starts on other");
+    }
+
+    /// The run of a handed entry by another unit must reach the entry's unit even when the two
+    /// share no variable and no thread handle: only the other unit's reference to writer then
+    /// sends main.c back to analysis with the program known, and writer, run on the other unit's
+    /// own object, races with reader (#235).
+    bool testHandedEntryRunByAnotherUnitSharingNoVariableStillRaces()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-run-by-another-unit-sharing-no-variable/main.c") ||
+            !project.add("handed-entry-run-by-another-unit-sharing-no-variable/runs_entry.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(racesOn(report, "shared") ==
+                              std::vector<std::string>{"main.c:reader:34 ~ main.c:writer:25"},
+                          "reader's read races with writer's write, run on the other unit's "
+                          "object, and nothing else races on shared");
+    }
+
+    /// Likewise for a function passing a handed entry's helper its object: only the other unit's
+    /// call to startWriter, on an object of its own, sends main.c back to analysis, and the thread
+    /// it starts races with reader (#235).
+    bool testHandedEntryObjectPassedByAnotherUnitSharingNoVariableStillRaces()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-object-passed-by-another-unit-sharing-no-variable/main.c") ||
+            !project.add("handed-entry-object-passed-by-another-unit-sharing-no-variable/"
+                         "starts_through_helper.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(racesOn(report, "shared") ==
+                              std::vector<std::string>{"main.c:reader:35 ~ main.c:writer:26"},
+                          "reader's read races with the write of the thread the other unit "
+                          "starts on its object, and nothing else races on shared");
+    }
+
+    /// The control of the two above: a unit sharing no variable that refers neither to writer
+    /// nor to startWriter, the function passing its helper an object, leaves the binding to
+    /// main's task, and every run of writer holds task's lock, as reader does (#235).
+    bool testHandedEntryLeftAloneByUnitSharingNoVariableStaysBound()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-object-passed-by-another-unit-sharing-no-variable/main.c") ||
+            !project.add("handed-entry-object-passed-by-another-unit-sharing-no-variable/"
+                         "starts_nothing.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRule(report, RuleId::DataRaceGlobal) == 0,
+                          "every run of writer holds task's lock, as reader does, when the other "
+                          "unit refers to nothing of the entry");
     }
 
     /// Whether a helper calling a pointer-to-member joins its thread depends on the member each
@@ -1623,6 +1721,9 @@ int main()
     ok = testHandedEntryOtherUnitsLeaveAloneStaysBound() && ok;
     ok = testHandedEntryStartedByAnotherUnitStillRaces() && ok;
     ok = testHandedEntryObjectPassedByAnotherUnitStillRaces() && ok;
+    ok = testHandedEntryRunByAnotherUnitSharingNoVariableStillRaces() && ok;
+    ok = testHandedEntryObjectPassedByAnotherUnitSharingNoVariableStillRaces() && ok;
+    ok = testHandedEntryLeftAloneByUnitSharingNoVariableStaysBound() && ok;
     ok = testThreadingUnitAloneCannotSeeTheHelperJoin() && ok;
     ok = testMemberPointerHelperOfAnotherUnitIsNoJoin() && ok;
     ok = testHelperJoinReanalysisFollowsTheSelection() && ok;
