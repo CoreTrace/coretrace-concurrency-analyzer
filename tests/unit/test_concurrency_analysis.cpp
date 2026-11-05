@@ -1253,8 +1253,9 @@ namespace
     /// A direct call runs an entry its spawns bind to an object on what the call passes: the call
     /// takes the entry's orders, and those of the entry's calls, on that object's locks, under the
     /// locks it holds and beside the threads running at the call. The thread takes its own orders
-    /// on its object. Each deadlock is pinned by its locks and places, which a count alone would
-    /// not tell from another cycle (#235).
+    /// on its object. A kept object names the locks its thread holds at its calls, and gates none
+    /// of the orders taken there. Each deadlock is pinned by its locks and places, which a count
+    /// alone would not tell from another cycle (#235, #242).
     bool testEachRunOfABoundEntryTakesItsOwnOrders()
     {
         struct Cycle
@@ -1285,6 +1286,14 @@ namespace
              "gate",
              "task",
              {"reverser:36", "writer:26"}},
+            {"deadlock_nested_order_through_kept_object.c",
+             "gate",
+             "task",
+             {"main:50", "writer:34"}},
+            {"deadlock_gate_of_kept_object_at_nested_call.c",
+             "first",
+             "second",
+             {"main:53", "writer:36"}},
         };
 
         bool ok = true;
@@ -2687,6 +2696,19 @@ namespace
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_gate_of_proven_object_read_from_handed_object_no_diagnostic.c",
              .intent = "the lock of the object a thread is proven to hold is a gate (#242)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_of_kept_object_at_nested_call.c",
+             .intent = "a lock named after a kept object is no gate at the thread's calls either "
+                       "(#242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_of_proven_object_at_nested_call_no_diagnostic.c",
+             .intent = "the lock of a proven object is a gate at the thread's calls (#242)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_nested_order_through_kept_object.c",
+             .intent = "a kept object names the locks its thread holds at its calls, for the "
+                       "cycles they close (#242)",
+             .deadlock = 1},
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_entry_called_directly_on_other_object.c",
              .intent = "a direct call of a bound entry takes its orders on what it passes (#235)",
