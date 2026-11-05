@@ -1167,11 +1167,13 @@ namespace
         bool requiresCxx20 = false;
         /// The fixture is kept to exercise the compiler error path and is never analyzed.
         bool expectCompileFailure = false;
-        /// Counts are lower bounds rather than exact values. Reserved for fixtures whose
-        /// diagnostics depend on how a standard library lowers its own templates: libc++ and
-        /// libstdc++ expose a different number of intermediate accesses for the same source, and
-        /// pinning one of them would fail the other. What must not regress is that the race is
-        /// still found at all.
+        /// Counts are lower bounds rather than exact values. For fixtures whose diagnostics
+        /// depend on how a standard library lowers its own templates: libc++ and libstdc++ expose
+        /// a different number of intermediate accesses for the same source, and pinning one of
+        /// them would fail the other. Also for fixtures that report, beside the races they pin, a
+        /// false one an open issue tracks, which an exact count would pin: a test then names the
+        /// pairs that must race and those that must not, so that the extra diagnostic cannot hide
+        /// a wrong attribution. What must not regress is that the race is still found at all.
         bool countsAreMinimums = false;
         /// False missing joins open issues track, each excusing one diagnostic reported where it
         /// says. The missing-join count still covers every other one, and an entry no longer
@@ -4322,6 +4324,18 @@ namespace
                      "data_race_entry_parameter_on_one_object_in_loop_race.c",
              .intent = "two threads a loop starts through a helper on one object race",
              .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_handed_object_only_read_no_fp.c",
+             .intent = "a thread only reading the object its call hands it races with no read"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_handed_object_joined_in_helper_no_fp.c",
+             .intent = "a helper joining its thread on a handed entry ends its use of the object"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_directly_and_through_parameter_race.c",
+             .intent = "a direct spawn keeps its object when a call settles its entry on another; "
+                       "the self-race #239 tracks is not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_entry_parameter_through_recursive_helper_race.c",
              .intent = "an entry handed on through a recursive helper is settled at the outer call",
