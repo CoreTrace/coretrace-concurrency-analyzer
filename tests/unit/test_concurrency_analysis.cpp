@@ -415,6 +415,69 @@ namespace
         return passed;
     }
 
+    /// The places a data-race fixture's races join, one `function:line ~ function:line` per pair,
+    /// the two ends in order so that a pair reads the same whichever end the report starts from.
+    std::optional<std::vector<std::string>> racingPlacesIn(std::string_view fixture)
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/data-race/" + std::string(fixture),
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
+        if (!report.has_value())
+            return std::nullopt;
+
+        std::vector<std::string> places;
+        for (const Diagnostic& diagnostic : report->diagnostics)
+            for (const ctrace::concurrency::RelatedLocation& related : diagnostic.relatedLocations)
+            {
+                std::string one =
+                    diagnostic.location.function + ":" + std::to_string(diagnostic.location.line);
+                std::string other =
+                    related.location.function + ":" + std::to_string(related.location.line);
+                if (other < one)
+                    std::swap(one, other);
+                places.push_back(one + " ~ " + other);
+            }
+        std::sort(places.begin(), places.end());
+        places.erase(std::unique(places.begin(), places.end()), places.end());
+        return places;
+    }
+
+    /// A thread whose entry reaches its spawn as a parameter runs on the object the same call
+    /// hands it. One helper called with two entries and two objects, directly or through
+    /// launchers, keeps each entry on its own object, which the counts alone would not tell from
+    /// the entries swapped. A helper writing the object races with its thread, and nothing after
+    /// its join does. A direct spawn keeps its object when a call settles its entry on another,
+    /// so main's race with the direct thread stays reported (#235).
+    bool testEntryParameterThreadsKeepTheObjectOfTheirCall()
+    {
+        const std::optional<std::vector<std::string>> oneHelper =
+            racingPlacesIn("data_race_entry_parameter_two_entries_two_objects_race.c");
+        const std::optional<std::vector<std::string>> twoLaunchers =
+            racingPlacesIn("data_race_entry_parameter_settled_by_two_launchers_race.c");
+        const std::optional<std::vector<std::string>> helperWrites =
+            racingPlacesIn("data_race_entry_parameter_helper_writes_handed_object_race.c");
+        const std::optional<std::vector<std::string>> directAndSettled =
+            racingPlacesIn("data_race_entry_started_directly_and_through_parameter_race.c");
+        if (!oneHelper.has_value() || !twoLaunchers.has_value() || !helperWrites.has_value() ||
+            !directAndSettled.has_value())
+            return false;
+
+        const std::vector<std::string> oneHelperPlaces = {"add:18 ~ main:39", "main:40 ~ peek:25"};
+        const std::vector<std::string> twoLaunchersPlaces = {"add:17 ~ main:48",
+                                                             "main:49 ~ peek:24"};
+        const std::vector<std::string> helperWritesPlaces = {"add:17 ~ runWith:24"};
+        const bool directKept = std::find(directAndSettled->begin(), directAndSettled->end(),
+                                          "main:34 ~ write_value:19") != directAndSettled->end();
+        return assertTrue(*oneHelper == oneHelperPlaces,
+                          "one helper keeps add on first and peek on second") &&
+               assertTrue(*twoLaunchers == twoLaunchersPlaces,
+                          "two launchers keep add on first and peek on second") &&
+               assertTrue(*helperWrites == helperWritesPlaces,
+                          "the helper's write races with add, and main's read after its join "
+                          "with nothing") &&
+               assertTrue(directKept, "main's read of a still races with the direct thread on a");
+    }
+
     /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
     /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
     /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
@@ -5740,6 +5803,7 @@ int main()
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
     ok = testEntriesOrderedElsewhereStillRaceFirstAgainstSecond() && ok;
+    ok = testEntryParameterThreadsKeepTheObjectOfTheirCall() && ok;
     ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
     ok = testJoinSummariesKeepTheirOffsets() && ok;
     ok = testArgumentEffectsTellWritesFromKeeping() && ok;
