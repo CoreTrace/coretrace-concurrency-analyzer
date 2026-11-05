@@ -144,26 +144,21 @@ namespace ctrace::concurrency::internal::analysis
 
             return false;
         }
-
-        /// The locks held at an acquisition that may gate the orders it takes. A thread kept on
-        /// an object for lack of proof names the locks it reaches through it after that object:
-        /// the cycles they close are the thread's if it holds the object. It may hold another
-        /// one, though, and a lock named after the kept object would then gate the thread's
-        /// orders with the orders taken under the lock of the object it was mistaken for. Like a
-        /// lock named after a parameter, such a lock is no gate (#242).
-        LockSet gatesAmong(const LockSet& heldLocks, const SharedObjectBinding* sharedObject)
-        {
-            if (sharedObject == nullptr || !sharedObject->keptForLackOfProof)
-                return heldLocks;
-            LockSet gates;
-            for (const std::string& lockId : heldLocks)
-            {
-                if (lockIdRoot(lockId).symbol != sharedObject->object.symbol)
-                    gates.insert(lockId);
-            }
-            return gates;
-        }
     } // namespace
+
+    std::set<std::string> gatesAmong(const std::set<std::string>& heldLocks,
+                                     const SharedObjectBinding* sharedObject)
+    {
+        if (sharedObject == nullptr || !sharedObject->keptForLackOfProof)
+            return heldLocks;
+        std::set<std::string> gates;
+        for (const std::string& lockId : heldLocks)
+        {
+            if (lockIdRoot(lockId).symbol != sharedObject->object.symbol)
+                gates.insert(lockId);
+        }
+        return gates;
+    }
 
     LockOrderCollector::LockOrderCollector(const ConcurrencySymbolClassifier& classifier,
                                            LlvmFunctionAnalysisProvider& analyses,

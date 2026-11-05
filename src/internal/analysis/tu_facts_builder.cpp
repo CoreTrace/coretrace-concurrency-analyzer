@@ -1701,13 +1701,15 @@ namespace ctrace::concurrency::internal::analysis
                 {
                     callerObject = &objectIt->second;
                 }
-                // The locks a caller holds are named after its object only where its spawned thread
-                // is its one run. Otherwise the thread takes its orders at the call on the object
-                // apart, below, and the direct calls running the caller take them on what they
-                // pass.
+                // The locks a caller holds are named after its object only where the object is
+                // proven and its spawned thread is its one run. Otherwise the thread takes its
+                // orders at the call on the object apart, below, and the direct calls running the
+                // caller take them on what they pass.
                 const SharedObjectBinding* spawnedOn =
-                    callerObject != nullptr && callerObject->runByDirectCalls ? callerObject
-                                                                              : nullptr;
+                    callerObject != nullptr &&
+                            (callerObject->keptForLackOfProof || callerObject->runByDirectCalls)
+                        ? callerObject
+                        : nullptr;
                 const SynchronizationEffectResolver callerLocks(
                     classifier, module.getDataLayout(), &lockWrapperSummaries,
                     /*nameParameterLocks=*/false, spawnedOn == nullptr ? callerObject : nullptr,
@@ -1748,22 +1750,25 @@ namespace ctrace::concurrency::internal::analysis
                 }
                 // The orders every run of the caller takes alike at the call: kept once.
                 std::unordered_set<std::string> sharedOrders;
-                for (const LockOrderFact& order : calleeOrders)
+                if (spawnedOn == nullptr || spawnedOn->runByDirectCalls)
                 {
-                    for (LockOrderFact& instance : instantiateAtCall(order, call))
+                    for (const LockOrderFact& order : calleeOrders)
                     {
-                        if (isOpenLockOrder(instance))
+                        for (LockOrderFact& instance : instantiateAtCall(order, call))
                         {
-                            lockOrdersChanged =
-                                addOpenLockOrder(openLockOrders, std::move(instance)) ||
-                                lockOrdersChanged;
-                        }
-                        else
-                        {
-                            if (spawnedOn != nullptr)
-                                sharedOrders.insert(lockOrderIdentity(instance));
-                            addLockOrder(facts.lockOrders, lockOrderIndexByKey,
-                                         std::move(instance));
+                            if (isOpenLockOrder(instance))
+                            {
+                                lockOrdersChanged =
+                                    addOpenLockOrder(openLockOrders, std::move(instance)) ||
+                                    lockOrdersChanged;
+                            }
+                            else
+                            {
+                                if (spawnedOn != nullptr)
+                                    sharedOrders.insert(lockOrderIdentity(instance));
+                                addLockOrder(facts.lockOrders, lockOrderIndexByKey,
+                                             std::move(instance));
+                            }
                         }
                     }
                 }
@@ -1791,6 +1796,7 @@ namespace ctrace::concurrency::internal::analysis
                 {
                     for (LockOrderFact& instance : instantiateAtCall(order, spawnedCall))
                     {
+                        instance.heldLocks = gatesAmong(instance.heldLocks, spawnedOn);
                         if (isOpenLockOrder(instance) ||
                             sharedOrders.contains(lockOrderIdentity(instance)))
                         {
