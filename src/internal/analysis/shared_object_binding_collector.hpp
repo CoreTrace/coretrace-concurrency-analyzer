@@ -82,6 +82,12 @@ namespace ctrace::concurrency::internal::analysis
         /// The class whose constructors start the entry on the object they construct: a thread
         /// of the entry never holds an object a later constructor call builds. Empty otherwise.
         std::string constructedClass;
+        /// Set when the spawn reads the pointer it hands over out of an object it is handed, and
+        /// no proof settled what that pointer holds (#242). The object is then the one the call
+        /// passes, kept so that the alerts made before reads were told apart stay: the thread may
+        /// hold another object, whose races are missed. Such a binding grants no exemption above.
+        /// It proves nothing else: not an absence of alias, nor any reason to drop an alert.
+        bool keptForLackOfProof = false;
         /// Set when a direct call also runs the entry, on what the call passes: the object is the
         /// spawned thread's alone. It then names none of the locks the entry's frame holds, around
         /// its accesses or at its calls, which every run of the entry shares and each call names
