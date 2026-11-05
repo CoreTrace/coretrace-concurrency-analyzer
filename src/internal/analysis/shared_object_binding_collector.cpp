@@ -57,8 +57,42 @@ namespace ctrace::concurrency::internal::analysis
             bool insideLoop = false;
             /// The pointer the spawn hands over, as the entry receives it.
             const llvm::Value* handed = nullptr;
+            /// The entry, or the parameter of the spawning function it is taken from, which each
+            /// call to that function settles.
             const llvm::Function* entry = nullptr;
+            std::optional<unsigned> entryParameter;
         };
+
+        /// A spawn whose entry is parameter `entryIndex` of `functionId`, on `object` as that
+        /// function names it.
+        struct ParameterEntrySpawn
+        {
+            const llvm::Instruction* spawn = nullptr;
+            std::string functionId;
+            unsigned entryIndex = 0;
+            ObjectIdentity object;
+        };
+
+        /// The parameter an object key names: `arg:<function>:<index>`, followed by the path to
+        /// the part of it the pointer designates, which resolving the parameter at a call drops.
+        struct NamedParameter
+        {
+            std::string functionId;
+            unsigned index = 0;
+        };
+
+        std::optional<NamedParameter> namedParameterOf(const std::string& key)
+        {
+            // The path holds no `:`, so the last one ends the function's name.
+            const std::size_t separator = key.rfind(':');
+            if (!key.starts_with(kParameterPrefix) || separator < kParameterPrefix.size())
+                return std::nullopt;
+            return NamedParameter{
+                .functionId =
+                    key.substr(kParameterPrefix.size(), separator - kParameterPrefix.size()),
+                .index = static_cast<unsigned>(std::stoul(key.substr(separator + 1))),
+            };
+        }
 
         ObjectIdentity namedIdentity(RootBinding object, SharedObjectKind kind)
         {
@@ -435,8 +469,11 @@ namespace ctrace::concurrency::internal::analysis
             if (call.arg_size() <= objectIndex)
                 return std::nullopt;
 
-            const llvm::Function* entry = resolveFunctionValue(*call.getArgOperand(entryIndex));
-            if (entry == nullptr || entry->isDeclaration() || entry->arg_empty())
+            const std::optional<FunctionBinding> entry =
+                resolveFunctionBinding(*call.getArgOperand(entryIndex));
+            if (!entry.has_value() || (entry->function == nullptr && !entry->argumentIndex) ||
+                (entry->function != nullptr &&
+                 (entry->function->isDeclaration() || entry->function->arg_empty())))
                 return std::nullopt;
 
             // A heap object has no name of its own, but the variable the pointer is read from
@@ -455,14 +492,15 @@ namespace ctrace::concurrency::internal::analysis
                 return std::nullopt;
 
             return SpawnedObject{
-                .entryFunctionId = functionId(*entry),
+                .entryFunctionId = entry->function != nullptr ? functionId(*entry->function) : "",
                 .object = std::move(*identity),
                 // Both spawn forms deliver the object on the entry's first parameter: the `void*`
                 // of a pthread routine, and the `this` of a member function.
                 .argumentIndex = 0,
                 .insideLoop = insideLoop,
                 .handed = object,
-                .entry = entry,
+                .entry = entry->function,
+                .entryParameter = entry->function != nullptr ? std::nullopt : entry->argumentIndex,
             };
         }
     } // namespace
@@ -568,6 +606,8 @@ namespace ctrace::concurrency::internal::analysis
         // whether a spawn starts it otherwise.
         std::map<std::string, std::set<std::string>> constructedClasses;
         std::set<std::string> startedOtherwise;
+        // Spawns whose entry is a parameter of the spawning function, settled at its calls.
+        std::vector<ParameterEntrySpawn> parameterEntrySpawns;
 
         bool entryCalledDirectly = false;
         for (const DirectCallSite& site : directCallSites)
@@ -605,6 +645,17 @@ namespace ctrace::concurrency::internal::analysis
 
                     if (spawned->object.binding.has_value())
                         bindingsByKey.emplace(spawned->object.key, *spawned->object.binding);
+                    if (spawned->entryParameter.has_value())
+                    {
+                        parameterEntrySpawns.push_back(ParameterEntrySpawn{
+                            .spawn = &instruction,
+                            .functionId = functionId(function),
+                            .entryIndex = *spawned->entryParameter,
+                            .object = spawned->object,
+                        });
+                        continue;
+                    }
+
                     const auto key = std::pair{spawned->entryFunctionId, spawned->object.key};
                     sites[key].insert(&instruction);
                     sitesByObject[spawned->object.key].insert(&instruction);
@@ -644,34 +695,32 @@ namespace ctrace::concurrency::internal::analysis
         // owns. The step repeats because the chain has more than one link — a complete
         // constructor calls the base one, handing its own `this` along.
         constexpr unsigned kMaxCallerRounds = 4;
+        // What `site` passes as its argument `index`, kept so that a binding can be made of it.
+        const auto identityPassedAt = [&](const DirectCallSite& site,
+                                          unsigned index) -> std::optional<ObjectIdentity>
+        {
+            if (site.call == nullptr || site.call->arg_size() <= index)
+                return std::nullopt;
+            std::optional<ObjectIdentity> identity =
+                objectIdentityOf(*site.call->getArgOperand(index), layout, programDefined);
+            if (identity.has_value() && identity->binding.has_value())
+                bindingsByKey.emplace(identity->key, *identity->binding);
+            return identity;
+        };
         const auto callersOf = [&](const std::string& parameterId)
         {
             std::set<std::string> resolved;
-            // `arg:<function>:<index>` names the parameter the object arrived on.
-            const std::size_t indexSeparator = parameterId.rfind(':');
-            if (indexSeparator == std::string::npos)
+            const std::optional<NamedParameter> parameter = namedParameterOf(parameterId);
+            if (!parameter.has_value())
                 return resolved;
-
-            const std::string ownerFunctionId = parameterId.substr(
-                kParameterPrefix.size(), indexSeparator - kParameterPrefix.size());
-            const unsigned argumentIndex =
-                static_cast<unsigned>(std::stoul(parameterId.substr(indexSeparator + 1)));
 
             for (const DirectCallSite& site : directCallSites)
             {
-                if (site.calleeFunctionId != ownerFunctionId || site.call == nullptr ||
-                    site.call->arg_size() <= argumentIndex)
-                {
+                if (site.calleeFunctionId != parameter->functionId)
                     continue;
-                }
 
-                if (std::optional<ObjectIdentity> caller = objectIdentityOf(
-                        *site.call->getArgOperand(argumentIndex), layout, programDefined))
-                {
-                    if (caller->binding.has_value())
-                        bindingsByKey.emplace(caller->key, *caller->binding);
+                if (std::optional<ObjectIdentity> caller = identityPassedAt(site, parameter->index))
                     resolved.insert(std::move(caller->key));
-                }
             }
 
             return resolved;
@@ -683,6 +732,81 @@ namespace ctrace::concurrency::internal::analysis
         std::map<std::string, std::set<std::string>> objectsByEntry;
         for (const auto& [key, instructions] : sites)
             objectsByEntry[key.first].insert(key.second);
+
+        // A spawn whose entry is a parameter runs what each call passes there, on what the same
+        // call passes for the object: both are settled at that call, together, so that two calls
+        // handing one helper different entries and objects keep each entry on its own object. An
+        // entry the call takes from a parameter of its own is settled a frame up, within the bound
+        // objects are; anything else it passes names no entry, and the spawn is left out there as
+        // a spawn on an unresolved entry is.
+        std::map<std::string, std::set<std::string>> settledObjectsByEntry;
+        std::vector<std::pair<ParameterEntrySpawn, unsigned>> unsettled;
+        for (ParameterEntrySpawn& spawn : parameterEntrySpawns)
+            unsettled.emplace_back(std::move(spawn), 0);
+        while (!unsettled.empty())
+        {
+            auto [spawn, frames] = std::move(unsettled.back());
+            unsettled.pop_back();
+            for (const DirectCallSite& site : directCallSites)
+            {
+                if (site.calleeFunctionId != spawn.functionId || site.call == nullptr ||
+                    site.call->arg_size() <= spawn.entryIndex)
+                    continue;
+                const std::optional<FunctionBinding> entry =
+                    resolveFunctionBinding(*site.call->getArgOperand(spawn.entryIndex));
+                if (!entry.has_value())
+                    continue;
+
+                // The object arrived, if on a parameter, on one of the function the spawn is
+                // settled in: the call passes the object itself.
+                std::optional<ObjectIdentity> object = spawn.object;
+                if (const std::optional<NamedParameter> parameter =
+                        namedParameterOf(spawn.object.key))
+                {
+                    if (parameter->functionId != spawn.functionId)
+                        continue;
+                    object = identityPassedAt(site, parameter->index);
+                    if (!object.has_value())
+                        continue;
+                }
+
+                if (entry->function == nullptr)
+                {
+                    if (entry->argumentIndex.has_value() && frames + 1 < kMaxCallerRounds)
+                    {
+                        unsettled.emplace_back(
+                            ParameterEntrySpawn{
+                                .spawn = spawn.spawn,
+                                .functionId = site.callerFunctionId,
+                                .entryIndex = *entry->argumentIndex,
+                                .object = std::move(*object),
+                            },
+                            frames + 1);
+                    }
+                    continue;
+                }
+                if (entry->function->isDeclaration() || entry->function->arg_empty())
+                    continue;
+
+                const std::string entryFunctionId = functionId(*entry->function);
+                settledObjectsByEntry[entryFunctionId].insert(object->key);
+                // It hands the object out too, which rules out an element of its own per thread.
+                sitesByObject[object->key].insert(spawn.spawn);
+            }
+        }
+
+        // The spawns settled at calls name an entry only when no spawn names it directly. One
+        // that does keeps the identity it has: a call settling the entry on another object would
+        // otherwise withdraw it under the rule above, and lose the races its own threads make on
+        // the object it names. The settled threads' accesses then count as made on that object,
+        // as they did while their spawns were left out (#239). A settled spawn grants none of the
+        // exemptions a constructor's spawn on its own object does.
+        std::set<std::string> settledOnly;
+        for (auto& [entryFunctionId, objects] : settledObjectsByEntry)
+        {
+            if (objectsByEntry.emplace(entryFunctionId, std::move(objects)).second)
+                settledOnly.insert(entryFunctionId);
+        }
 
         const auto spawnedOnce = [&](const std::string& entryFunctionId)
         {
@@ -739,10 +863,11 @@ namespace ctrace::concurrency::internal::analysis
 
             // Each thread has an element of its own only when this is the one spawn of the
             // entry and the one spawn handing out the object's elements: two spawns may hand
-            // the same element to two threads.
+            // the same element to two threads. A spawn settled at a call is not in the program's
+            // entry, where the elements are handed out.
             const auto objectSitesIt = sitesByObject.find(*candidates.begin());
-            if (objectSitesIt != sitesByObject.end() && objectSitesIt->second.size() == 1 &&
-                spawnedOnce(entryFunctionId))
+            if (!settledOnly.contains(entryFunctionId) && objectSitesIt != sitesByObject.end() &&
+                objectSitesIt->second.size() == 1 && spawnedOnce(entryFunctionId))
             {
                 if (const auto elementsIt = elementsBySite.find(*objectSitesIt->second.begin());
                     elementsIt != elementsBySite.end())
