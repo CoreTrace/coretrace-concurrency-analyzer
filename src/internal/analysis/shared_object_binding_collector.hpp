@@ -97,6 +97,11 @@ namespace ctrace::concurrency::internal::analysis
         /// after what it passes; only the spawned thread's lock orders are named after it, apart
         /// from the calls' (#235).
         bool runByDirectCalls = false;
+        /// Empty unless calls handing the entry down to a helper that starts it name the object,
+        /// no spawn naming the entry itself. The unit then sees every run of the entry, or binds
+        /// it to nothing; these are the entry and the functions whose parameters carry the object
+        /// to those calls, which another unit calling one may run on whatever it passes (#235).
+        std::vector<const llvm::Function*> settledThrough;
     };
 
     /// Whether `access`, made by the spawning function over `byteSize` bytes starting `offset`

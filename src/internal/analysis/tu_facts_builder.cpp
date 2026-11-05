@@ -1174,23 +1174,37 @@ namespace ctrace::concurrency::internal::analysis
         SharedObjectBindings sharedObjectBindings;
         std::unordered_set<std::string> sharedObjectIds;
         std::unordered_set<std::string> localObjectIds;
+        std::unordered_set<std::string> settlingFunctions;
         if (selection.lockState())
         {
             sharedObjectBindings =
                 SharedObjectBindingCollector(classifier, analyses)
                     .collect(module, directCallSites, programDefined, &spawnFacts.entryConcurrency);
 
-            // A thread entry another unit also starts may receive the same element there.
+            // A thread entry another unit also starts may receive the same element there. One the
+            // calls of this unit bind, another unit calling the entry, or a function carrying its
+            // object, may run on whatever it passes: no spawn names its object then (#235).
             if (crossTU)
             {
                 for (const llvm::Function& function : module)
                 {
                     const auto bindingIt = sharedObjectBindings.find(functionId(function));
-                    if (bindingIt != sharedObjectBindings.end() &&
-                        program->spawnCount(programSymbol(function)) > 1)
+                    if (bindingIt == sharedObjectBindings.end())
+                        continue;
+
+                    bool calledElsewhere = false;
+                    for (const llvm::Function* settling : bindingIt->second.settledThrough)
                     {
-                        bindingIt->second.elementPerThread.reset();
+                        if (settling->hasLocalLinkage())
+                            continue;
+                        std::string symbol = programSymbol(*settling);
+                        calledElsewhere = calledElsewhere || program->isDeclaredElsewhere(symbol);
+                        settlingFunctions.insert(std::move(symbol));
                     }
+                    if (calledElsewhere)
+                        sharedObjectBindings.erase(bindingIt);
+                    else if (program->spawnCount(programSymbol(function)) > 1)
+                        bindingIt->second.elementPerThread.reset();
                 }
             }
             sharedObjectIds =
@@ -1815,7 +1829,10 @@ namespace ctrace::concurrency::internal::analysis
         // Reads the lifecycle facts, not the accesses, so it can precede them; the rest of this
         // function is the access pipeline, which only a rule reading accesses pays for.
         if (selection.program)
+        {
             facts.program = collectProgramSymbolFacts(module, facts);
+            facts.program.settlingFunctions = std::move(settlingFunctions);
+        }
         if (!selection.accesses)
             return facts;
 

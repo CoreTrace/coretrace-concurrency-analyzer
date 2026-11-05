@@ -53,6 +53,11 @@ namespace ctrace::concurrency::internal::analysis
         [[nodiscard]] std::size_t spawnCount(const std::string& symbol) const;
         [[nodiscard]] bool spawnedInLoop(const std::string& symbol) const;
 
+        /// True when some unit only declares this function: it calls it, starts it or takes its
+        /// address there, on whatever that unit passes. Asked by the unit defining it, which
+        /// never declares it too.
+        [[nodiscard]] bool isDeclaredElsewhere(const std::string& symbol) const;
+
         /// True when some unit of the program starts a thread. A `fork` is judged against the
         /// whole program, not against the unit it happens to sit in: the unit that forks and the
         /// unit that spawns are routinely different files.
@@ -105,6 +110,7 @@ namespace ctrace::concurrency::internal::analysis
         };
 
         std::unordered_map<std::string, EntrySpawns> spawnSitesByEntry_;
+        std::unordered_set<std::string> declaredFunctions_;
         ProgramDefinedGlobals definedGlobals_;
         std::unordered_map<std::string, std::vector<ParameterLockEffect>> lockSummariesBySymbol_;
         std::unordered_set<std::string> resolvedHandleSymbols_;

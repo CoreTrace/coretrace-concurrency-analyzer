@@ -503,6 +503,11 @@ namespace ctrace::concurrency::internal::analysis
         /// Functions this unit only declares; every other symbol in `functionSymbolsById` is
         /// defined here.
         std::unordered_set<std::string> declaredFunctions;
+        /// Functions of this unit other units may call that a thread entry's object relies on,
+        /// where calls handing the entry down settle it: the entry, and those whose parameters
+        /// carry the object to the calls. Called elsewhere, one may run the entry on another
+        /// object (#235).
+        std::unordered_set<std::string> settlingFunctions;
         /// Program symbol of the global behind each handle group id this unit creates or
         /// resolves. Absent when the id does not name a global of this module.
         std::unordered_map<std::string, std::string> handleSymbolsByGroupId;

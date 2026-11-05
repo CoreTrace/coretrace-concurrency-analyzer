@@ -24,12 +24,14 @@
 #include <llvm/IR/Operator.h>
 #include <llvm/Support/CheckedArithmetic.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <limits>
 #include <map>
 #include <string_view>
 #include <optional>
 #include <set>
+#include <utility>
 
 namespace ctrace::concurrency::internal::analysis
 {
@@ -752,6 +754,118 @@ namespace ctrace::concurrency::internal::analysis
                 .entryParameter = entry->function != nullptr ? std::nullopt : entry->argumentIndex,
             };
         }
+
+        /// The entry operand of each spawn whose entry is a parameter of the spawning function,
+        /// by spawn and operand index: the parameter it passes.
+        using ParameterSpawnOperands =
+            std::map<std::pair<const llvm::CallBase*, unsigned>, const llvm::Argument*>;
+        /// A parameter of a helper an entry is handed down through, by helper and index.
+        using HandingParameter = std::pair<const llvm::Function*, unsigned>;
+
+        /// Whether `entry` runs nowhere but at its direct calls and at the spawns its calls
+        /// settle. Its address is followed through the slots holding it and into the parameters
+        /// of the helpers it is handed to, `maxHelpers` deep, each handing call as a call
+        /// settling a spawn resolves it. Anything else may run the entry where no spawn names
+        /// its object: a call through a copy of its address, a store elsewhere than in a slot,
+        /// a constant such as a table, code the unit does not define, a spawn no call settles,
+        /// or a helper parameter handing it to a spawn on an object nothing names. A comparison
+        /// runs nothing.
+        bool runsOnlyWhereSettled(const llvm::Function& entry,
+                                  const ParameterSpawnOperands& spawnOperands,
+                                  const std::set<HandingParameter>& unnamedObjects,
+                                  const ConcurrencySymbolClassifier& classifier,
+                                  unsigned maxHelpers)
+        {
+            struct Flow
+            {
+                const llvm::Value* value = nullptr;
+                /// The helper parameter the value carries the entry in, or null in the frame
+                /// naming the entry itself.
+                const llvm::Argument* parameter = nullptr;
+                unsigned helpers = 0;
+            };
+            std::vector<Flow> pending = {Flow{.value = &entry}};
+            std::set<const llvm::Value*> seen;
+            while (!pending.empty())
+            {
+                const Flow flow = pending.back();
+                pending.pop_back();
+                if (!seen.insert(flow.value).second)
+                    continue;
+
+                for (const llvm::Use& use : flow.value->uses())
+                {
+                    const llvm::User* user = use.getUser();
+                    if (llvm::isa<llvm::ICmpInst>(user))
+                        continue;
+
+                    // A slot holding the address hands it to every read of the slot.
+                    if (llvm::isa<llvm::AllocaInst>(flow.value))
+                    {
+                        if (const auto* load = llvm::dyn_cast<llvm::LoadInst>(user))
+                        {
+                            pending.push_back(Flow{load, flow.parameter, flow.helpers});
+                            continue;
+                        }
+                        if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user);
+                            store != nullptr && store->getPointerOperand() == flow.value)
+                        {
+                            continue;
+                        }
+                    }
+                    else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+                    {
+                        const auto* slot =
+                            llvm::dyn_cast<llvm::AllocaInst>(store->getPointerOperand());
+                        if (store->getValueOperand() != flow.value || slot == nullptr)
+                            return false;
+                        pending.push_back(Flow{slot, flow.parameter, flow.helpers});
+                        continue;
+                    }
+
+                    const auto* call = llvm::dyn_cast<llvm::CallBase>(user);
+                    if (call == nullptr)
+                        return false;
+                    if (call->isCallee(&use))
+                    {
+                        // A direct call is a run each call names; a call through a copy is not.
+                        if (flow.value == &entry)
+                            continue;
+                        return false;
+                    }
+                    if (!call->isArgOperand(&use))
+                        return false;
+
+                    const unsigned index = call->getArgOperandNo(&use);
+                    if (const auto spawn = spawnOperands.find({call, index});
+                        spawn != spawnOperands.end())
+                    {
+                        if (flow.parameter != nullptr && spawn->second == flow.parameter)
+                            continue;
+                        return false;
+                    }
+
+                    const llvm::Function* helper = classifier.directCallee(*call);
+                    const std::optional<FunctionBinding> handed =
+                        resolveFunctionBinding(*call->getArgOperand(index));
+                    const bool settledHere =
+                        handed.has_value() &&
+                        (flow.parameter == nullptr
+                             ? handed->function == &entry
+                             : handed->argumentIndex == flow.parameter->getArgNo() &&
+                                   call->getFunction() == flow.parameter->getParent());
+                    if (helper == nullptr || helper->isDeclaration() ||
+                        index >= helper->arg_size() || !settledHere || flow.helpers >= maxHelpers ||
+                        unnamedObjects.contains({helper, index}))
+                    {
+                        return false;
+                    }
+                    pending.push_back(
+                        Flow{helper->getArg(index), helper->getArg(index), flow.helpers + 1});
+                }
+            }
+            return true;
+        }
     } // namespace
 
     SharedObjectBindingCollector::SharedObjectBindingCollector(
@@ -864,8 +978,10 @@ namespace ctrace::concurrency::internal::analysis
         // whether a spawn starts it otherwise.
         std::map<std::string, std::set<std::string>> constructedClasses;
         std::set<std::string> startedOtherwise;
-        // Spawns whose entry is a parameter of the spawning function, settled at its calls.
+        // Spawns whose entry is a parameter of the spawning function, settled at its calls, and
+        // the operand each takes its entry from.
         std::vector<ParameterEntrySpawn> parameterEntrySpawns;
+        ParameterSpawnOperands parameterSpawnOperands;
 
         bool entryCalledDirectly = false;
         for (const DirectCallSite& site : directCallSites)
@@ -896,8 +1012,9 @@ namespace ctrace::concurrency::internal::analysis
                     if (call == nullptr)
                         continue;
 
-                    const std::optional<SpawnedObject> spawned = spawnedObjectAt(
-                        *call, classifier_.classify(*call), insideLoop, layout, programDefined);
+                    const CallKind kind = classifier_.classify(*call);
+                    const std::optional<SpawnedObject> spawned =
+                        spawnedObjectAt(*call, kind, insideLoop, layout, programDefined);
                     if (!spawned.has_value())
                         continue;
 
@@ -910,6 +1027,11 @@ namespace ctrace::concurrency::internal::analysis
                             .entryIndex = *spawned->entryParameter,
                             .object = spawned->object,
                         });
+                        const unsigned entryOperand = kind == CallKind::PThreadCreate
+                                                          ? kPThreadEntryOperandIndex
+                                                          : kStdThreadCallableOperandIndex;
+                        parameterSpawnOperands.emplace(std::pair{call, entryOperand},
+                                                       function.getArg(*spawned->entryParameter));
                         continue;
                     }
 
@@ -1057,8 +1179,13 @@ namespace ctrace::concurrency::internal::analysis
         // objects are; anything else it passes names no entry, and the spawn is left out there as
         // a spawn on an unresolved entry is.
         std::map<std::string, std::set<std::string>> settledObjectsByEntry;
+        std::map<std::string, const llvm::Function*> settledEntries;
         // Entries a call settles on an object kept for lack of proof.
         std::set<std::string> settledOnKeptObject;
+        // Entries a call hands to a spawn on an object no call names, and the helper parameters
+        // handing an entry down to one: a thread may then hold any object.
+        std::set<std::string> startedOnUnnamedObject;
+        std::set<HandingParameter> handingToUnnamedObject;
         std::vector<std::pair<ParameterEntrySpawn, unsigned>> unsettled;
         for (ParameterEntrySpawn& spawn : parameterEntrySpawns)
             unsettled.emplace_back(std::move(spawn), 0);
@@ -1082,19 +1209,26 @@ namespace ctrace::concurrency::internal::analysis
                 if (const std::optional<NamedParameter> parameter =
                         namedParameterOf(spawn.object.key))
                 {
-                    if (parameter->functionId != spawn.functionId)
-                        continue;
-                    object = identityPassedAt(site, parameter->index);
-                    if (!object.has_value())
-                        continue;
+                    object = parameter->functionId == spawn.functionId
+                                 ? identityPassedAt(site, parameter->index)
+                                 : std::nullopt;
                 }
                 else if (spawn.object.read.has_value())
                 {
-                    if (functionId(*spawn.object.read->function) != spawn.functionId)
-                        continue;
-                    object = readAt(site, *spawn.object.read);
-                    if (!object.has_value())
-                        continue;
+                    object = functionId(*spawn.object.read->function) == spawn.functionId
+                                 ? readAt(site, *spawn.object.read)
+                                 : std::nullopt;
+                }
+                if (!object.has_value())
+                {
+                    // The thread may hold any object: whatever entry this call hands down is
+                    // bound to none.
+                    if (entry->function != nullptr)
+                        startedOnUnnamedObject.insert(functionId(*entry->function));
+                    else if (entry->argumentIndex.has_value())
+                        handingToUnnamedObject.emplace(site.call->getFunction(),
+                                                       *entry->argumentIndex);
+                    continue;
                 }
                 // An object kept for lack of proof a frame down stays so, whatever names it here.
                 object->keptForLackOfProof =
@@ -1120,6 +1254,7 @@ namespace ctrace::concurrency::internal::analysis
 
                 const std::string entryFunctionId = functionId(*entry->function);
                 settledObjectsByEntry[entryFunctionId].insert(object->key);
+                settledEntries.emplace(entryFunctionId, entry->function);
                 if (object->keptForLackOfProof)
                     settledOnKeptObject.insert(entryFunctionId);
                 // It hands the object out too, which rules out an element of its own per thread.
@@ -1156,7 +1291,24 @@ namespace ctrace::concurrency::internal::analysis
         SharedObjectBindings bindings;
         for (const auto& [entryFunctionId, objects] : objectsByEntry)
         {
+            // A spawn a call settles binds its entry only where the unit sees every run of it:
+            // the entry's address reaches nothing but its direct calls and the spawns calls
+            // settle, each on an object a call names. Run anywhere else, the entry may hold
+            // another object, under another lock, and is bound to none (#235).
+            const bool settled = settledOnly.contains(entryFunctionId);
+            if (settled &&
+                (startedOnUnnamedObject.contains(entryFunctionId) ||
+                 !runsOnlyWhereSettled(*settledEntries.at(entryFunctionId), parameterSpawnOperands,
+                                       handingToUnnamedObject, classifier_, kMaxCallerRounds)))
+            {
+                continue;
+            }
+
             std::set<std::string> candidates = objects;
+            // The candidates the last round started from, and the functions whose parameters
+            // carried the object up to the calls naming it.
+            std::set<std::string> lastRound;
+            std::set<std::string> carriers;
             bool kept = keptEntries.contains(entryFunctionId);
             for (unsigned round = 0; round < kMaxCallerRounds; ++round)
             {
@@ -1172,13 +1324,27 @@ namespace ctrace::concurrency::internal::analysis
                     }
 
                     parameterised = true;
+                    if (const auto read = readsByKey.find(candidate); read != readsByKey.end())
+                        carriers.insert(functionId(*read->second.function));
+                    else if (const std::optional<NamedParameter> parameter =
+                                 namedParameterOf(candidate))
+                        carriers.insert(parameter->functionId);
                     const std::set<std::string> callers = callersOf(candidate, kept);
                     next.insert(callers.begin(), callers.end());
                 }
 
-                candidates = std::move(next);
+                lastRound = std::exchange(candidates, std::move(next));
                 if (!parameterised)
                     break;
+            }
+
+            // Still moving once the rounds are spent, the object comes from callers further up,
+            // which may pass any: an entry calls settle is bound to none. A candidate that only
+            // stays parameterised stands for the objects already named, passed back down.
+            if (settled && candidates != lastRound &&
+                std::any_of(candidates.begin(), candidates.end(), namedByCallers))
+            {
+                continue;
             }
 
             // Anything still parameterised is an object no construction site names, and more
@@ -1195,6 +1361,15 @@ namespace ctrace::concurrency::internal::analysis
             SharedObjectBinding binding = bindingIt->second;
             binding.argumentIndex = 0;
             binding.keptForLackOfProof = kept;
+            if (settled)
+            {
+                binding.settledThrough.push_back(settledEntries.at(entryFunctionId));
+                for (const llvm::Function& function : module)
+                {
+                    if (carriers.contains(functionId(function)))
+                        binding.settledThrough.push_back(&function);
+                }
+            }
             // An object kept for lack of proof grants no exemption: the thread may hold another
             // one, which another spawn's elements, or a constructor's object, say nothing of.
             if (kept)

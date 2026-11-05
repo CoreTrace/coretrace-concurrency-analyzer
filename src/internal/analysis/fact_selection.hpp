@@ -23,7 +23,9 @@ namespace ctrace::concurrency::internal::analysis
         bool externGlobals = false;
         /// What a helper another unit defines does to the lock it is handed.
         bool helperLockEffects = false;
-        /// How many instances of an entry the program runs, including spawns in other units.
+        /// How many instances of an entry the program runs, including spawns in other units, and
+        /// whether another unit calls a function an entry's object relies on, which may pass
+        /// another there.
         bool entryConcurrency = false;
         /// Whether some unit starts a thread, which makes a fork elsewhere unsafe.
         bool programThreads = false;
