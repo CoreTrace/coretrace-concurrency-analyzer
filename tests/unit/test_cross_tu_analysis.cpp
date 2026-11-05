@@ -700,6 +700,77 @@ namespace
                assertTrue(countRule(report, RuleId::MissingJoin) == 0, "every thread is joined");
     }
 
+    /// A spawn binds an entry handed to its helper to the object the call hands only where no
+    /// other unit refers to the entry: one that does may run it on what it passes, under another
+    /// lock. Its run on other races with reader, which holds task's lock as the thread does
+    /// (#235).
+    bool testHandedEntryRunByAnotherUnitStillRaces()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-run-by-another-unit/main.c") ||
+            !project.add("handed-entry-run-by-another-unit/runs_entry.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRacesOn(report, "shared") == 1,
+                          "reader races with writer's run in the other unit, under other's lock");
+    }
+
+    /// The control: another unit that refers to nothing of the entry leaves it bound to task, and
+    /// every run of writer holds task's lock, as reader does (#235).
+    bool testHandedEntryOtherUnitsLeaveAloneStaysBound()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-run-by-another-unit/main.c") ||
+            !project.add("handed-entry-run-by-another-unit/runs_nothing.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRule(report, RuleId::DataRaceGlobal) == 0,
+                          "every run of writer holds task's lock, as reader does");
+    }
+
+    /// Another unit starting a handed entry on another object runs it under another lock: the
+    /// thread it starts races with the one the helper starts on task, and with reader (#235).
+    bool testHandedEntryStartedByAnotherUnitStillRaces()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-started-by-another-unit/main.c") ||
+            !project.add("handed-entry-started-by-another-unit/starts_entry.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRacesOn(report, "shared") == 2,
+                          "the thread on other races with the thread on task and with reader");
+    }
+
+    /// Another unit calling a function that passes a handed entry's helper its object may pass
+    /// another: startWriter, called there on other, starts writer under other's lock, which
+    /// excludes nothing reader holds (#235).
+    bool testHandedEntryObjectPassedByAnotherUnitStillRaces()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-object-passed-by-another-unit/main.c") ||
+            !project.add("handed-entry-object-passed-by-another-unit/starts_through_helper.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRacesOn(report, "shared") == 1,
+                          "reader races with the thread the other unit starts on other");
+    }
+
     /// Whether a helper calling a pointer-to-member joins its thread depends on the member each
     /// caller hands it: that conclusion stays in the helper's unit, and a caller of another unit
     /// handing it detach still races.
@@ -1548,6 +1619,10 @@ int main()
     ok = testThreadsJoinedByAHelperInAnotherUnitAreFinished() && ok;
     ok = testElementHandedOutInAnotherUnitTooStillRaces() && ok;
     ok = testElementKeptByAnotherUnitStillRaces() && ok;
+    ok = testHandedEntryRunByAnotherUnitStillRaces() && ok;
+    ok = testHandedEntryOtherUnitsLeaveAloneStaysBound() && ok;
+    ok = testHandedEntryStartedByAnotherUnitStillRaces() && ok;
+    ok = testHandedEntryObjectPassedByAnotherUnitStillRaces() && ok;
     ok = testThreadingUnitAloneCannotSeeTheHelperJoin() && ok;
     ok = testMemberPointerHelperOfAnotherUnitIsNoJoin() && ok;
     ok = testHelperJoinReanalysisFollowsTheSelection() && ok;
