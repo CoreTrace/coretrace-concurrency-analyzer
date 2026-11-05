@@ -502,7 +502,9 @@ namespace
     /// on what that pointer holds, not on the object handed. Where the caller's store is proven,
     /// the race is on the object stored there and never on the one passed; where it is not, the
     /// object passed is kept for lack of proof, and the race on it, which the field may well
-    /// designate, stays. The counts alone would not tell the two objects apart (#242).
+    /// designate, stays. The counts alone would not tell the two objects apart (#242). Kept, the
+    /// object names none of the locks its thread holds and grants it no exemption, which would
+    /// hide the races of the object the thread may hold instead.
     bool testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds()
     {
         struct ExpectedPlaces
@@ -550,8 +552,20 @@ namespace
             {"data_race_object_read_from_handed_object_own_address_stored_at_unknown_place_race.c",
              {"main:35 ~ writer:18"}},
         };
+        // Kept, the object passed names none of the locks the thread holds, which may be those of
+        // another object: main's read of shared under task's lock races with writer's write under
+        // other's, a frame or two above the spawn. The lock around the accesses the thread is
+        // taken to make to the object kept is still named after it: they race with main's only
+        // if the thread holds that object, whose lock it then takes.
+        const std::vector<ExpectedPlaces> keptLocks = {
+            {"data_race_object_read_from_handed_object_under_its_own_lock_race.c",
+             {"main:41 ~ writer:24"}},
+            {"data_race_entry_parameter_object_read_from_handed_object_under_its_own_lock_race.c",
+             {"main:49 ~ writer:26"}},
+            {"data_race_object_read_from_handed_object_under_its_own_lock_no_fp.c", {}},
+        };
         bool passed = true;
-        for (const std::vector<ExpectedPlaces>* group : {&proven, &kept})
+        for (const std::vector<ExpectedPlaces>* group : {&proven, &kept, &keptLocks})
             for (const ExpectedPlaces& expected : *group)
             {
                 const std::optional<std::vector<std::string>> places =
@@ -574,6 +588,14 @@ namespace
         // other, the object the field held before it. It runs on moved, a race this misses.
         passed = racesInclude("data_race_object_read_from_handed_object_written_at_unknown_place.c",
                               {}, {"main:39 ~ writer:20"}) &&
+                 passed;
+        // Kept, the elements passed grant their readers no exemption: the readers, which all run
+        // on common, race with each other. Reported on the elements they are kept on, the pair is
+        // pinned so that it is not dropped; nodes is a conservative attribution, not the object
+        // they share. start's write of an element races with the worker on it; the readers' races
+        // with both are false.
+        passed = racesInclude("data_race_object_read_from_each_handed_element_race.c",
+                              {"reader:35 ~ reader:35", "start:41 ~ worker:28"}, {}) &&
                  passed;
         return passed;
     }
@@ -4726,6 +4748,28 @@ namespace
              .intent = "a write where only the run knows keeps the object passed; the race on "
                        "moved it misses is not pinned",
              .dataRace = 0,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_under_its_own_lock_race.c",
+             .intent = "a thread kept on the object passed takes no lock named after it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_object_read_from_handed_object_under_its_own_lock_race.c",
+             .intent = "a thread on a handed entry kept on the object passed two frames up takes "
+                       "no lock named after it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_under_its_own_lock_no_fp.c",
+             .intent = "a thread kept on the object passed accesses it under the lock named after "
+                       "it"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_each_handed_element_race.c",
+             .intent = "threads kept on the elements passed are not exempt from racing with each "
+                       "other, a race attributed conservatively to the elements; their false "
+                       "races with the elements' other users are not pinned",
+             .dataRace = 2,
              .countsAreMinimums = true},
             // --- a thread the copy of a std::thread argument starts (#200) ---
             {.path = "tests/fixtures/concurrency/data-race/"
