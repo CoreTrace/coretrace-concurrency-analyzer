@@ -478,6 +478,45 @@ namespace
                assertTrue(directKept, "main's read of a still races with the direct thread on a");
     }
 
+    /// A thread its helper starts on a pointer read out of the object the helper is handed runs
+    /// on what that pointer holds, not on the object handed: where the caller's store is proven,
+    /// the race is on the object stored there and never on the one passed. The counts alone would
+    /// not tell the two objects apart (#242).
+    bool testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds()
+    {
+        struct ExpectedPlaces
+        {
+            std::string_view fixture;
+            std::vector<std::string> places;
+        };
+        // The store is proven: main's read of the object stored races, that of the object passed,
+        // when it is another one, does not.
+        const std::vector<ExpectedPlaces> proven = {
+            {"data_race_object_read_from_handed_object_race.c", {"main:35 ~ writer:19"}},
+            {"data_race_entry_parameter_object_read_from_handed_object_race.c",
+             {"main:34 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_pointing_to_itself_race.c",
+             {"main:33 ~ writer:18"}},
+            {"data_race_entry_parameter_object_read_from_handed_object_pointing_to_itself_race.c",
+             {"main:33 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_last_store_race.c", {"main:34 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_two_frames_race.c", {"main:38 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_store_after_call_race.c",
+             {"main:33 ~ writer:17"}},
+            {"data_race_object_read_from_member_of_handed_object_race.c", {"main:40 ~ writer:23"}},
+        };
+        bool passed = true;
+        for (const ExpectedPlaces& expected : proven)
+        {
+            const std::optional<std::vector<std::string>> places = racingPlacesIn(expected.fixture);
+            passed = assertTrue(places.has_value() && *places == expected.places,
+                                std::string(expected.fixture) +
+                                    " should race exactly at its expected places") &&
+                     passed;
+        }
+        return passed;
+    }
+
     /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
     /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
     /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
@@ -4533,6 +4572,40 @@ namespace
                        "excludes neither the thread nor reader",
              .dataRace = 2,
              .racingSymbol = "shared"},
+            // --- the object a thread reaches when its helper reads it out of the object the
+            // helper is handed (#242) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_race.c",
+             .intent = "a thread runs on the object its helper reads out of the one it is handed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_object_read_from_handed_object_race.c",
+             .intent = "a thread on a handed entry runs on the object read out of the handed one",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_pointing_to_itself_race.c",
+             .intent = "a field pointing back at the handed object keeps the thread on it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_object_read_from_handed_object_pointing_to_itself_race.c",
+             .intent = "a thread on a handed entry stays on the object its field points back at",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_last_store_race.c",
+             .intent = "the last store before the call is what the helper reads",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_two_frames_race.c",
+             .intent = "a read is settled through an outer helper that writes nothing first",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_store_after_call_race.c",
+             .intent = "a store after the call leaves what the helper read",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_member_of_handed_object_race.c",
+             .intent = "the field read is the member's own, not the outer object's",
+             .dataRace = 1},
             // --- a thread the copy of a std::thread argument starts (#200) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_argument_copy_starts_thread_joined_race.cpp",
@@ -5934,6 +6007,7 @@ int main()
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
     ok = testEntriesOrderedElsewhereStillRaceFirstAgainstSecond() && ok;
     ok = testEntryParameterThreadsKeepTheObjectOfTheirCall() && ok;
+    ok = testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds() && ok;
     ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
     ok = testJoinSummariesKeepTheirOffsets() && ok;
     ok = testArgumentEffectsTellWritesFromKeeping() && ok;
