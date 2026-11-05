@@ -478,10 +478,31 @@ namespace
                assertTrue(directKept, "main's read of a still races with the direct thread on a");
     }
 
+    /// Whether every place `wanted` names is among the races `fixture` reports, and none of
+    /// `unwanted`: the races a fixture also reports beside them are not pinned.
+    bool racesInclude(std::string_view fixture, const std::vector<std::string>& wanted,
+                      const std::vector<std::string>& unwanted)
+    {
+        const std::optional<std::vector<std::string>> places = racingPlacesIn(fixture);
+        if (!assertTrue(places.has_value(), std::string(fixture) + " should be analyzed"))
+            return false;
+        bool passed = true;
+        for (const std::string& place : wanted)
+            passed = assertTrue(std::find(places->begin(), places->end(), place) != places->end(),
+                                std::string(fixture) + " should race at " + place) &&
+                     passed;
+        for (const std::string& place : unwanted)
+            passed = assertTrue(std::find(places->begin(), places->end(), place) == places->end(),
+                                std::string(fixture) + " should not race at " + place) &&
+                     passed;
+        return passed;
+    }
+
     /// A thread its helper starts on a pointer read out of the object the helper is handed runs
-    /// on what that pointer holds, not on the object handed: where the caller's store is proven,
-    /// the race is on the object stored there and never on the one passed. The counts alone would
-    /// not tell the two objects apart (#242).
+    /// on what that pointer holds, not on the object handed. Where the caller's store is proven,
+    /// the race is on the object stored there and never on the one passed; where it is not, the
+    /// object passed is kept for lack of proof, and the race on it, which the field may well
+    /// designate, stays. The counts alone would not tell the two objects apart (#242).
     bool testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds()
     {
         struct ExpectedPlaces
@@ -505,15 +526,55 @@ namespace
              {"main:33 ~ writer:17"}},
             {"data_race_object_read_from_member_of_handed_object_race.c", {"main:40 ~ writer:23"}},
         };
+        // Nothing proves what the field holds, and it may hold the object passed: the object passed
+        // is kept, and main's read of it still races.
+        const std::vector<ExpectedPlaces> kept = {
+            {"data_race_object_read_from_handed_object_stored_on_one_path_race.c",
+             {"main:35 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_address_copied_race.c",
+             {"main:34 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_repointed_by_helper_race.c",
+             {"main:37 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_repointed_by_spawning_helper_race.c",
+             {"main:33 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_repointed_by_outer_helper_race.c",
+             {"main:37 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_struct_copied_over_race.c",
+             {"main:35 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_store_not_on_every_path_race.c",
+             {"main:35 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_own_address_read_back_race.c",
+             {"main:36 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_own_address_copied_out_race.c",
+             {"main:35 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_own_address_stored_at_unknown_place_race.c",
+             {"main:35 ~ writer:18"}},
+        };
         bool passed = true;
-        for (const ExpectedPlaces& expected : proven)
-        {
-            const std::optional<std::vector<std::string>> places = racingPlacesIn(expected.fixture);
-            passed = assertTrue(places.has_value() && *places == expected.places,
-                                std::string(expected.fixture) +
-                                    " should race exactly at its expected places") &&
-                     passed;
-        }
+        for (const std::vector<ExpectedPlaces>* group : {&proven, &kept})
+            for (const ExpectedPlaces& expected : *group)
+            {
+                const std::optional<std::vector<std::string>> places =
+                    racingPlacesIn(expected.fixture);
+                passed = assertTrue(places.has_value() && *places == expected.places,
+                                    std::string(expected.fixture) +
+                                        " should race exactly at its expected places") &&
+                         passed;
+            }
+        // Kept too, beside races these fixtures also report: the field race with the thread
+        // repointing it, and the second thread's on the object passed. The loop's first thread
+        // runs on other, a race the kept object misses.
+        passed = racesInclude("data_race_object_read_from_handed_object_repointed_by_thread_race.c",
+                              {"main:40 ~ repoint:30", "main:43 ~ writer:19"}, {}) &&
+                 passed;
+        passed = racesInclude("data_race_object_read_from_handed_object_repointed_in_loop_race.c",
+                              {"main:36 ~ writer:19"}, {}) &&
+                 passed;
+        // A write where only the run knows leaves the read unproven: writer is not taken to run on
+        // other, the object the field held before it. It runs on moved, a race this misses.
+        passed = racesInclude("data_race_object_read_from_handed_object_written_at_unknown_place.c",
+                              {}, {"main:39 ~ writer:20"}) &&
+                 passed;
         return passed;
     }
 
@@ -1352,7 +1413,9 @@ namespace
         /// them would fail the other. Also for fixtures that report, beside the races they pin, a
         /// false one an open issue tracks, which an exact count would pin: a test then names the
         /// pairs that must race and those that must not, so that the extra diagnostic cannot hide
-        /// a wrong attribution. What must not regress is that the race is still found at all.
+        /// a wrong attribution. What must not regress is that the race is still found at all. And
+        /// for a fixture whose race the analysis misses, which an exact count of zero would pin:
+        /// the test then names the false race it must not report in its stead.
         bool countsAreMinimums = false;
         /// False missing joins open issues track, each excusing one diagnostic reported where it
         /// says. The missing-join count still covers every other one, and an entry no longer
@@ -4606,6 +4669,64 @@ namespace
                      "data_race_object_read_from_member_of_handed_object_race.c",
              .intent = "the field read is the member's own, not the outer object's",
              .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_stored_on_one_path_race.c",
+             .intent = "a store on one path keeps the object passed, and its race",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_address_copied_race.c",
+             .intent = "a store through a copied address keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_by_helper_race.c",
+             .intent = "a helper repointing the field before the call keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_by_spawning_helper_race.c",
+             .intent = "a helper repointing the field before its read keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_by_thread_race.c",
+             .intent = "a thread repointing the field while it is read keeps the object passed",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_in_loop_race.c",
+             .intent = "a helper repointing the field after its read, called in a loop, keeps "
+                       "the object passed; the threads racing with each other or with the call "
+                       "are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_by_outer_helper_race.c",
+             .intent = "an outer helper repointing the field keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_struct_copied_over_race.c",
+             .intent = "a struct copied over the object keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_store_not_on_every_path_race.c",
+             .intent = "a store missing from one path keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_own_address_read_back_race.c",
+             .intent = "the object's own address read back keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_own_address_copied_out_race.c",
+             .intent = "the object copied out with its own address keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_own_address_stored_at_unknown_place_race.c",
+             .intent = "the object's address stored where only the run knows keeps the object "
+                       "passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_written_at_unknown_place.c",
+             .intent = "a write where only the run knows keeps the object passed; the race on "
+                       "moved it misses is not pinned",
+             .dataRace = 0,
+             .countsAreMinimums = true},
             // --- a thread the copy of a std::thread argument starts (#200) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_argument_copy_starts_thread_joined_race.cpp",
