@@ -4292,6 +4292,40 @@ namespace
              .intent = "a helper writing while its thread on a handed entry runs races with it",
              .dataRace = 1,
              .racingSymbol = "shared"},
+            // --- the object a thread on an entry handed as a parameter is handed (#235) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_on_handed_object_race.c",
+             .intent = "a thread on a handed entry reaches the object its call hands it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_two_entries_two_objects_race.c",
+             .intent = "two calls of one helper keep each entry on the object they hand it",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_on_handed_object_two_frames_race.c",
+             .intent = "an entry and an object handed on through two helpers stay together",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_on_global_object_race.c",
+             .intent = "a thread on a handed entry reaches the global its helper hands it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_helper_writes_handed_object_race.c",
+             .intent = "a helper writing the object it hands its thread on a handed entry races",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_settled_by_two_launchers_race.c",
+             .intent = "entries settled a frame above the spawn keep the objects of their calls",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_on_one_object_in_loop_race.c",
+             .intent = "two threads a loop starts through a helper on one object race",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_through_recursive_helper_race.c",
+             .intent = "an entry handed on through a recursive helper is settled at the outer call",
+             .dataRace = 1},
             // --- a thread the copy of a std::thread argument starts (#200) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_argument_copy_starts_thread_joined_race.cpp",
