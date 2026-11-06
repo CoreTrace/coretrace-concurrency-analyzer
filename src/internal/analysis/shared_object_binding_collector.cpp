@@ -31,6 +31,7 @@
 #include <string_view>
 #include <optional>
 #include <set>
+#include <tuple>
 #include <utility>
 
 namespace ctrace::concurrency::internal::analysis
@@ -761,18 +762,23 @@ namespace ctrace::concurrency::internal::analysis
             std::map<std::pair<const llvm::CallBase*, unsigned>, const llvm::Argument*>;
         /// A parameter of a helper an entry is handed down through, by helper and index.
         using HandingParameter = std::pair<const llvm::Function*, unsigned>;
+        /// A call handing an entry down, by call and the operand it hands it at.
+        using HandingCall = std::pair<const llvm::CallBase*, unsigned>;
 
         /// Whether `entry` runs nowhere but at its direct calls and at the spawns its calls
         /// settle. Its address is followed through the slots holding it and into the parameters
-        /// of the helpers it is handed to, `maxHelpers` deep, each handing call as a call
-        /// settling a spawn resolves it. Anything else may run the entry where no spawn names
-        /// its object: a call through a copy of its address, a store elsewhere than in a slot,
-        /// a constant such as a table, code the unit does not define, a spawn no call settles,
-        /// or a helper parameter handing it to a spawn on an object nothing names. A comparison
-        /// runs nothing.
+        /// of the helpers it is handed to, `maxHelpers` deep along every way down, each handing
+        /// call as a call settling a spawn resolves it. Anything else may run the entry where no
+        /// spawn names its object: a call through a copy of its address, a store elsewhere than
+        /// in a slot, a constant such as a table, code the unit does not define, a spawn no call
+        /// settles, or a helper parameter handing it to a spawn on an object nothing names. A
+        /// comparison runs nothing, and neither does a call of `repeatingCalls`: a recursion
+        /// handing the entry back where the settling found it, with the same object, which
+        /// leads to no run that parameter does not lead to already.
         bool runsOnlyWhereSettled(const llvm::Function& entry,
                                   const ParameterSpawnOperands& spawnOperands,
                                   const std::set<HandingParameter>& unnamedObjects,
+                                  const std::set<HandingCall>& repeatingCalls,
                                   const ConcurrencySymbolClassifier& classifier,
                                   unsigned maxHelpers)
         {
@@ -785,12 +791,14 @@ namespace ctrace::concurrency::internal::analysis
                 unsigned helpers = 0;
             };
             std::vector<Flow> pending = {Flow{.value = &entry}};
-            std::set<const llvm::Value*> seen;
+            // A value is visited once per parameter and depth: reached in fewer helpers, it would
+            // vouch for a way down handing it past `maxHelpers`. The depth bounds the visits.
+            std::set<std::tuple<const llvm::Value*, const llvm::Argument*, unsigned>> seen;
             while (!pending.empty())
             {
                 const Flow flow = pending.back();
                 pending.pop_back();
-                if (!seen.insert(flow.value).second)
+                if (!seen.emplace(flow.value, flow.parameter, flow.helpers).second)
                     continue;
 
                 for (const llvm::Use& use : flow.value->uses())
@@ -844,6 +852,8 @@ namespace ctrace::concurrency::internal::analysis
                             continue;
                         return false;
                     }
+                    if (repeatingCalls.contains({call, index}))
+                        continue;
 
                     const llvm::Function* helper = classifier.directCallee(*call);
                     const std::optional<FunctionBinding> handed =
@@ -1186,6 +1196,12 @@ namespace ctrace::concurrency::internal::analysis
         // handing an entry down to one: a thread may then hold any object.
         std::set<std::string> startedOnUnnamedObject;
         std::set<HandingParameter> handingToUnnamedObject;
+        // Calls of a recursion handing a spawn's entry back to the parameter it is settled from,
+        // with the spawn's object: the state a frame up is the one being settled, which settles
+        // nothing new however deep the recursion. A call repeating the state of one spawn and not
+        // of another repeats none.
+        std::set<HandingCall> repeatingCalls;
+        std::set<HandingCall> advancingCalls;
         std::vector<std::pair<ParameterEntrySpawn, unsigned>> unsettled;
         for (ParameterEntrySpawn& spawn : parameterEntrySpawns)
             unsettled.emplace_back(std::move(spawn), 0);
@@ -1236,7 +1252,20 @@ namespace ctrace::concurrency::internal::analysis
 
                 if (entry->function == nullptr)
                 {
-                    if (entry->argumentIndex.has_value() && frames + 1 < kMaxCallerRounds)
+                    if (!entry->argumentIndex.has_value())
+                        continue;
+                    if (site.callerFunctionId == spawn.functionId &&
+                        *entry->argumentIndex == spawn.entryIndex)
+                    {
+                        const bool repeats =
+                            object->key == spawn.object.key &&
+                            object->keptForLackOfProof == spawn.object.keptForLackOfProof;
+                        (repeats ? repeatingCalls : advancingCalls)
+                            .emplace(site.call, spawn.entryIndex);
+                        if (repeats)
+                            continue;
+                    }
+                    if (frames + 1 < kMaxCallerRounds)
                     {
                         unsettled.emplace_back(
                             ParameterEntrySpawn{
@@ -1261,6 +1290,8 @@ namespace ctrace::concurrency::internal::analysis
                 sitesByObject[object->key].insert(spawn.spawn);
             }
         }
+        std::erase_if(repeatingCalls,
+                      [&](const HandingCall& call) { return advancingCalls.contains(call); });
 
         // The spawns settled at calls name an entry only when no spawn names it directly. One
         // that does keeps the identity it has: a call settling the entry on another object would
@@ -1296,10 +1327,10 @@ namespace ctrace::concurrency::internal::analysis
             // settle, each on an object a call names. Run anywhere else, the entry may hold
             // another object, under another lock, and is bound to none (#235).
             const bool settled = settledOnly.contains(entryFunctionId);
-            if (settled &&
-                (startedOnUnnamedObject.contains(entryFunctionId) ||
-                 !runsOnlyWhereSettled(*settledEntries.at(entryFunctionId), parameterSpawnOperands,
-                                       handingToUnnamedObject, classifier_, kMaxCallerRounds)))
+            if (settled && (startedOnUnnamedObject.contains(entryFunctionId) ||
+                            !runsOnlyWhereSettled(*settledEntries.at(entryFunctionId),
+                                                  parameterSpawnOperands, handingToUnnamedObject,
+                                                  repeatingCalls, classifier_, kMaxCallerRounds)))
             {
                 continue;
             }
