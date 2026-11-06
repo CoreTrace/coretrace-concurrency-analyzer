@@ -1328,12 +1328,14 @@ namespace
     /// nothing else in the unit may run the entry. A call through a copy of its address, a helper
     /// calling it, a table or a global holding it, code the unit does not define, a copy no call
     /// settles, a spawn on an object no call names, helpers handing it down past those followed,
-    /// or an object passed down past the callers followed run it on another object, under
+    /// whichever shorter way down reaches the same helpers first, an object passed down past the
+    /// callers followed, or a recursion handing the entry back with another object, with one no
+    /// proof settles, or as it found it for one spawn only, run it on another object, under
     /// another lock: the entry is then bound to none, and its races with reader and with its other
-    /// run, and its inversion under another lock, stay reported. A copy carrying the entry to its
-    /// spawn, a comparison, as many helpers or callers as are followed, and a recursion passing
-    /// the object back down leave it bound. Each race is pinned by its places, and the deadlock by
-    /// its locks and places (#235).
+    /// run, and its inversion under another lock, stay reported. A copy carrying the entry to its spawn, a comparison, as many helpers
+    /// or callers as are followed along every way down, and a recursion passing the object back
+    /// down leave it bound. Each race is pinned by its places, and the deadlock by its locks and
+    /// places (#235).
     bool testHandedEntryRunElsewhereIsBoundToNothing()
     {
         struct ExpectedPlaces
@@ -1353,6 +1355,16 @@ namespace
              {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
             {"data_race_handed_entry_also_started_through_five_helpers_race.c",
              {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_through_five_helpers_after_two_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_through_five_helpers_before_two_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_started_by_recursion_swapping_objects_race.c",
+             {"reader:35 ~ writer:26"}},
+            {"data_race_handed_entry_started_by_recursion_rereading_object_race.c",
+             {"reader:35 ~ writer:26"}},
+            {"data_race_handed_entry_started_by_recursion_changing_one_object_race.c",
+             {"reader:36 ~ writer:27"}},
             {"data_race_handed_entry_also_started_on_object_from_five_frames_up_race.c",
              {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
             {"data_race_handed_entry_also_run_through_global_pointer_race.c",
@@ -1366,6 +1378,7 @@ namespace
             {"data_race_handed_entry_handed_through_local_copy_no_fp.c", {}},
             {"data_race_handed_entry_also_compared_no_fp.c", {}},
             {"data_race_handed_entry_handed_through_four_helpers_no_fp.c", {}},
+            {"data_race_handed_entry_handed_through_two_and_four_helpers_no_fp.c", {}},
             {"data_race_handed_entry_started_on_object_from_four_frames_up_no_fp.c", {}},
             {"data_race_handed_entry_started_on_object_passed_back_down_no_fp.c", {}},
         };
@@ -4835,6 +4848,36 @@ namespace
              .dataRace = 2,
              .racingSymbol = "shared"},
             {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_through_five_helpers_after_two_race.c",
+             .intent = "a shorter way down to the same helpers, followed first, does not vouch "
+                       "for a handed entry started past the helpers followed (#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_through_five_helpers_before_two_race.c",
+             .intent = "a shorter way down to the same helpers, followed last, does not vouch for "
+                       "a handed entry started past the helpers followed (#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_by_recursion_swapping_objects_race.c",
+             .intent = "a recursion handing a handed entry back with another object settles it "
+                       "there too (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_by_recursion_rereading_object_race.c",
+             .intent = "a recursion handing itself the object it read settles a handed entry on "
+                       "no proven object (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_by_recursion_changing_one_object_race.c",
+             .intent = "a recursion handing a handed entry back as it found it for one spawn only "
+                       "is a helper more for the other (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_handed_entry_also_run_through_global_pointer_race.c",
              .intent = "a handed entry's address stored in a global may be called wherever the "
                        "global is read (#235)",
@@ -4867,6 +4910,10 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_handed_entry_handed_through_four_helpers_no_fp.c",
              .intent = "an entry handed down as many helpers as are followed stays bound (#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_handed_through_two_and_four_helpers_no_fp.c",
+             .intent = "an entry handed down two ways, each within the helpers followed, stays "
+                       "bound (#235)"},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_handed_entry_also_started_on_object_from_five_frames_up_race.c",
              .intent = "a handed entry also started on an object passed down past the callers "
