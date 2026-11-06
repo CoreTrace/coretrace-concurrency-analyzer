@@ -1256,8 +1256,11 @@ namespace
     /// takes the entry's orders, and those of the entry's calls, on that object's locks, under the
     /// locks it holds and beside the threads running at the call. The thread takes its own orders
     /// on its object. A kept object names the locks its thread holds at its calls, and gates none
-    /// of the orders taken there. Each deadlock is pinned by its locks and places, which a count
-    /// alone would not tell from another cycle (#235, #242).
+    /// of the orders taken there. Every order the entry takes reaches the call, however many, and
+    /// so does every order a plain helper takes, and every order a recursion brings on the locks
+    /// they name: only what a recursion brings on a lock of its own is bounded. Each deadlock is
+    /// pinned by its locks and places, which a count alone would not tell from another cycle
+    /// (#235, #242).
     bool testEachRunOfABoundEntryTakesItsOwnOrders()
     {
         struct Cycle
@@ -1296,6 +1299,22 @@ namespace
              "first",
              "second",
              {"main:53", "writer:36"}},
+            {"deadlock_handed_entry_called_after_its_thread_takes_eleven_locks.c",
+             "gate",
+             "task",
+             {"main:73", "reverse:60"}},
+            {"deadlock_handed_entry_called_through_helper_takes_eleven_locks.c",
+             "gate",
+             "task",
+             {"main:79", "reverse:61"}},
+            {"deadlock_helper_takes_eleven_parameter_locks_before_gate.c",
+             "gate",
+             "task",
+             {"main:69", "reverse:59"}},
+            {"deadlock_handed_entry_recursion_under_recursive_lock_takes_first_lock_last.c",
+             "outer",
+             "task",
+             {"main:85", "reverse:68"}},
         };
 
         bool ok = true;
@@ -2603,6 +2622,15 @@ namespace
              .intent = "hand-over-hand locking by a recursion moving its pointer, one direction "
                        "(#114)"},
             {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_mutual_recursion_moving_pointer_no_diagnostic.c",
+             .intent = "hand-over-hand locking by two functions calling each other on the next "
+                       "node, one direction, ends (#242)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_helper_takes_eleven_parameter_locks_before_gate.c",
+             .intent = "a helper outside a recursion keeps every order it takes on what it is "
+                       "handed, however many (#242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_transfer_helper_gated_calls_no_diagnostic.c",
              .intent = "the gate held at both concurrent calls serializes the helper's orders "
                        "(#114)"},
@@ -2854,6 +2882,22 @@ namespace
                      "deadlock_handed_entry_called_directly_keeps_thread_order.c",
              .intent = "a bound entry's thread keeps its orders on its object beside the entry's "
                        "direct calls (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_after_its_thread_takes_eleven_locks.c",
+             .intent = "a direct call of a bound entry takes every order the entry takes, however "
+                       "many, outside a recursion (#235, #242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_through_helper_takes_eleven_locks.c",
+             .intent = "a helper calling a bound entry outside a recursion passes on every order "
+                       "it takes (#235, #242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_recursion_under_recursive_lock_takes_first_lock_last"
+                     ".c",
+             .intent = "a recursion naming only the locks its function names brings every order "
+                       "it takes, the last one too (#235, #242)",
              .deadlock = 1},
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_entry_called_directly_after_its_thread_joined_no_diagnostic.c",
