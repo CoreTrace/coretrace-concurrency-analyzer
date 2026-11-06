@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <iterator>
 #include <tuple>
 #include <optional>
 #include <sstream>
@@ -546,11 +547,14 @@ namespace ctrace::concurrency::internal::analysis
             return locks;
         }
 
-        /// Bounds the orders a function keeps open for its callers. A recursion that moves the
-        /// pointer it passes names a new lock at every step, so a fixpoint alone would not end.
-        /// Past the bound, the orders kept no longer change: an order, or a thread beside one, is
-        /// lost, never invented.
-        constexpr std::size_t kMaxOpenLockOrdersPerFunction = 64;
+        /// Bounds the orders the calls of a recursion bring a function on a lock only a recursion
+        /// names there. A recursion that moves the pointer it passes names a new lock at every
+        /// step, so a fixpoint alone would not end. Past the bound, such orders no longer change
+        /// the function's: an order, or a thread beside one, is lost, never invented. Every other
+        /// order is kept whole: the function's own, those its calls outside a recursion bring,
+        /// which only a cycle of calls could make endless, and those a recursion brings on the
+        /// locks the others name, finitely many locks taken at finitely many places.
+        constexpr std::size_t kMaxOrdersOnLocksOnlyARecursionNames = 64;
 
         /// True for a lock only a call site can name: one reached through a parameter, or what
         /// the caller holds.
@@ -630,17 +634,38 @@ namespace ctrace::concurrency::internal::analysis
         {
             std::vector<LockOrderFact> orders;
             std::unordered_map<std::string, std::size_t> indexByKey;
+            /// The locks the orders brought by no recursion name.
+            std::unordered_set<std::string> lockIdsOutsideRecursion;
+            /// How many orders a call closing a cycle of calls brought on a lock only a recursion
+            /// names.
+            std::size_t ordersOnLocksOnlyARecursionNames = 0;
         };
 
         /// False when the function's open orders gained nothing: it already keeps the order with
-        /// every thread beside it, or keeps as many orders as it may, which then stay as they are.
+        /// every thread beside it, or `throughRecursion` brings it on a lock only a recursion
+        /// names once the recursions brought as many such orders as they may, past which these
+        /// stay as they are.
         bool addOpenLockOrder(std::unordered_map<std::string, OpenLockOrders>& openByFunction,
-                              LockOrderFact order)
+                              LockOrderFact order, bool throughRecursion)
         {
             OpenLockOrders& open = openByFunction[order.functionId];
-            if (open.indexByKey.size() >= kMaxOpenLockOrdersPerFunction)
+            if (!throughRecursion)
+            {
+                open.lockIdsOutsideRecursion.insert(order.firstLockId);
+                open.lockIdsOutsideRecursion.insert(order.secondLockId);
+                return keepLockOrder(open.orders, open.indexByKey, std::move(order));
+            }
+            if (open.lockIdsOutsideRecursion.contains(order.firstLockId) &&
+                open.lockIdsOutsideRecursion.contains(order.secondLockId))
+            {
+                return keepLockOrder(open.orders, open.indexByKey, std::move(order));
+            }
+            if (open.ordersOnLocksOnlyARecursionNames >= kMaxOrdersOnLocksOnlyARecursionNames)
                 return false;
-            return keepLockOrder(open.orders, open.indexByKey, std::move(order));
+            const std::size_t known = open.orders.size();
+            const bool changed = keepLockOrder(open.orders, open.indexByKey, std::move(order));
+            open.ordersOnLocksOnlyARecursionNames += open.orders.size() - known;
+            return changed;
         }
 
         /// The lock a callee names `calleeLockId`, as the caller of `call` names it. A named lock
@@ -1654,7 +1679,8 @@ namespace ctrace::concurrency::internal::analysis
                 lockOrder.inRootTask = inRootTask;
                 if (isOpenLockOrder(lockOrder))
                 {
-                    addOpenLockOrder(openLockOrders, std::move(lockOrder));
+                    addOpenLockOrder(openLockOrders, std::move(lockOrder),
+                                     /*throughRecursion=*/false);
                 }
                 else if ((runOnlyByCalls || spawnedApart) &&
                          lockOrder.firstLockId != lockOrder.secondLockId &&
@@ -1696,6 +1722,17 @@ namespace ctrace::concurrency::internal::analysis
         // closed orders left to the calls become the caller's own orders the same way.
         const std::set<std::string> noLocks;
         const ThreadEntrySet noEntries;
+        // The calls followed here that close a cycle of them: the only calls that may bring a
+        // function orders without end.
+        std::unordered_set<const llvm::CallBase*> recursionCalls;
+        if (selection.lockOrders)
+        {
+            std::vector<DirectCallSite> followedCalls;
+            std::ranges::copy_if(directCallSites, std::back_inserter(followedCalls),
+                                 [&](const DirectCallSite& site)
+                                 { return takesCalleeLockOrders(site, classifier); });
+            recursionCalls = callsClosingCycles(followedCalls);
+        }
         bool lockOrdersChanged = selection.lockOrders;
         while (lockOrdersChanged)
         {
@@ -1767,6 +1804,7 @@ namespace ctrace::concurrency::internal::analysis
                 std::unordered_set<std::string> sharedOrders;
                 if (spawnedOn == nullptr || spawnedOn->runByDirectCalls)
                 {
+                    const bool throughRecursion = recursionCalls.contains(site.call);
                     for (const LockOrderFact& order : calleeOrders)
                     {
                         for (LockOrderFact& instance : instantiateAtCall(order, call))
@@ -1774,7 +1812,8 @@ namespace ctrace::concurrency::internal::analysis
                             if (isOpenLockOrder(instance))
                             {
                                 lockOrdersChanged =
-                                    addOpenLockOrder(openLockOrders, std::move(instance)) ||
+                                    addOpenLockOrder(openLockOrders, std::move(instance),
+                                                     throughRecursion) ||
                                     lockOrdersChanged;
                             }
                             else
