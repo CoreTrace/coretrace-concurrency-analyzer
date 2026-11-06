@@ -869,6 +869,71 @@ namespace
                           "unit refers to nothing of the entry");
     }
 
+    /// The control for a function local to another unit: a writer of its own there, run on an
+    /// object of its own, is not main.c's writer, whatever its name, and leaves that one bound to
+    /// main's task (#235).
+    bool testHandedEntryNamesakeInAnotherUnitStaysBound()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-run-by-another-unit-sharing-no-variable/main.c") ||
+            !project.add("handed-entry-run-by-another-unit-sharing-no-variable/runs_namesake.c"))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRule(report, RuleId::DataRaceGlobal) == 0,
+                          "every run of main.c's writer holds task's lock, as reader does, beside "
+                          "a writer local to the other unit");
+    }
+
+    std::vector<std::string> inlineEntryArgs()
+    {
+        return {"-std=c++20",
+                "-I" + projectFixturePath("handed-entry-defined-inline-in-a-header").string()};
+    }
+
+    /// An entry defined inline is declared by no unit: each unit using it defines a copy of its
+    /// own. A unit running it on an object of its own still runs it under another lock, and
+    /// writer's race with reader stays reported (#235).
+    bool testHandedEntryDefinedInlineInTwoUnitsStillRaces()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-defined-inline-in-a-header/main.cpp", inlineEntryArgs()) ||
+            !project.add("handed-entry-defined-inline-in-a-header/runs_entry.cpp",
+                         inlineEntryArgs()))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(racesOn(report, "shared") ==
+                              std::vector<std::string>{"main.cpp:reader:20 ~ worker.hpp:writer:19"},
+                          "reader's read races with writer's write, run by the other unit's copy "
+                          "on its own object, and nothing else races on shared");
+    }
+
+    /// The control: a unit including the header without using writer defines no copy of it, and
+    /// leaves writer bound to main's task (#235).
+    bool testHandedEntryDefinedInlineInOneUnitStaysBound()
+    {
+        CompiledProject project;
+        if (!project.add("handed-entry-defined-inline-in-a-header/main.cpp", inlineEntryArgs()) ||
+            !project.add("handed-entry-defined-inline-in-a-header/includes_entry.cpp",
+                         inlineEntryArgs()))
+        {
+            return false;
+        }
+
+        const DiagnosticReport& report =
+            ProjectConcurrencyAnalyzer().analyze(project.units()).report;
+        return assertTrue(countRule(report, RuleId::DataRaceGlobal) == 0,
+                          "every run of writer holds task's lock, as reader does, when the other "
+                          "unit only includes the header defining it");
+    }
+
     /// Whether a helper calling a pointer-to-member joins its thread depends on the member each
     /// caller hands it: that conclusion stays in the helper's unit, and a caller of another unit
     /// handing it detach still races.
@@ -1724,6 +1789,9 @@ int main()
     ok = testHandedEntryRunByAnotherUnitSharingNoVariableStillRaces() && ok;
     ok = testHandedEntryObjectPassedByAnotherUnitSharingNoVariableStillRaces() && ok;
     ok = testHandedEntryLeftAloneByUnitSharingNoVariableStaysBound() && ok;
+    ok = testHandedEntryNamesakeInAnotherUnitStaysBound() && ok;
+    ok = testHandedEntryDefinedInlineInTwoUnitsStillRaces() && ok;
+    ok = testHandedEntryDefinedInlineInOneUnitStaysBound() && ok;
     ok = testThreadingUnitAloneCannotSeeTheHelperJoin() && ok;
     ok = testMemberPointerHelperOfAnotherUnitIsNoJoin() && ok;
     ok = testHelperJoinReanalysisFollowsTheSelection() && ok;
