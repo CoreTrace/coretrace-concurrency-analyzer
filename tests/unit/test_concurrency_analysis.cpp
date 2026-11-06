@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
+#include "internal/analysis/cross_tu/program_symbol_index.hpp"
+#include "internal/analysis/facts.hpp"
 #include "internal/analysis/held_member_analysis.hpp"
 #include "internal/analysis/thread_completion_analysis.hpp"
 #include "internal/diagnostics/diagnostic_catalog.hpp"
@@ -1410,6 +1412,24 @@ namespace
                assertTrue(sortedPlaces(*diagnostic) == inversion,
                           "the deadlock should join writer and reverser") &&
                passed;
+    }
+
+    /// A function is in several units only when two units show it, declared or defined: the
+    /// same unit added again, as a reanalysis of it would be, is still one unit (#235).
+    bool testProgramIndexCountsEachUnitOnce()
+    {
+        ctrace::concurrency::internal::analysis::TUFacts facts;
+        facts.program.functionSymbolsById.emplace("writer", "writer");
+        ctrace::concurrency::internal::analysis::ProgramSymbolIndex index;
+        index.addUnit(0, facts);
+        index.addUnit(0, facts);
+        const bool oneUnit = !index.appearsInSeveralUnits("writer");
+        index.addUnit(1, facts);
+        return assertTrue(oneUnit, "a unit added twice should show writer in one unit") &&
+               assertTrue(index.appearsInSeveralUnits("writer"),
+                          "two units showing writer should show it in several") &&
+               assertTrue(!index.appearsInSeveralUnits("reader"),
+                          "a function no unit shows should be in no unit");
     }
 
     bool testConsistentLockOrderHasNoDeadlock()
@@ -6474,6 +6494,7 @@ int main()
     ok = testKeptObjectLockIsNoGate() && ok;
     ok = testEachRunOfABoundEntryTakesItsOwnOrders() && ok;
     ok = testHandedEntryRunElsewhereIsBoundToNothing() && ok;
+    ok = testProgramIndexCountsEachUnitOnce() && ok;
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;

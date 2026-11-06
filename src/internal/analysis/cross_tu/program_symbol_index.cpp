@@ -12,12 +12,17 @@ namespace ctrace::concurrency::internal::analysis
         return value.getGlobalIdentifier();
     }
 
-    void ProgramSymbolIndex::addUnit(const TUFacts& facts)
+    void ProgramSymbolIndex::addUnit(std::size_t unit, const TUFacts& facts)
     {
         const ProgramSymbolFacts& program = facts.program;
         definedGlobals_.insert(program.definedGlobals.begin(), program.definedGlobals.end());
-        declaredFunctions_.insert(program.declaredFunctions.begin(),
-                                  program.declaredFunctions.end());
+        for (const auto& [functionId, symbol] : program.functionSymbolsById)
+        {
+            const auto [units, firstSeen] =
+                unitsByFunction_.try_emplace(symbol, FunctionUnits{.first = unit});
+            if (!firstSeen && units->second.first != unit)
+                units->second.several = true;
+        }
         reapsChildren_ = reapsChildren_ || facts.reapsChildProcesses;
 
         // `entryConcurrency` is already corrected by this unit's own may-happen-in-parallel
@@ -102,9 +107,10 @@ namespace ctrace::concurrency::internal::analysis
         return it != spawnSitesByEntry_.end() && it->second.insideLoop;
     }
 
-    bool ProgramSymbolIndex::isDeclaredElsewhere(const std::string& symbol) const
+    bool ProgramSymbolIndex::appearsInSeveralUnits(const std::string& symbol) const
     {
-        return declaredFunctions_.contains(symbol);
+        const auto it = unitsByFunction_.find(symbol);
+        return it != unitsByFunction_.end() && it->second.several;
     }
 
     bool ProgramSymbolIndex::isDefinedSomewhere(const std::string& symbol) const

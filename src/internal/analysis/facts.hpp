@@ -505,8 +505,8 @@ namespace ctrace::concurrency::internal::analysis
         std::unordered_set<std::string> declaredFunctions;
         /// Functions of this unit other units may call that a thread entry's object relies on,
         /// where calls handing the entry down settle it: the entry, and those whose parameters
-        /// carry the object to the calls. Called elsewhere, one may run the entry on another
-        /// object (#235).
+        /// carry the object to the calls. Called elsewhere, or defined there too, one may run the
+        /// entry on another object (#235).
         std::unordered_set<std::string> settlingFunctions;
         /// Program symbol of the global behind each handle group id this unit creates or
         /// resolves. Absent when the id does not name a global of this module.

@@ -1183,7 +1183,8 @@ namespace ctrace::concurrency::internal::analysis
 
             // A thread entry another unit also starts may receive the same element there. One the
             // calls of this unit bind, another unit calling the entry, or a function carrying its
-            // object, may run on whatever it passes: no spawn names its object then (#235).
+            // object, may run on whatever it passes, and so may one defining its own copy of it:
+            // no spawn names its object then (#235).
             if (crossTU)
             {
                 for (const llvm::Function& function : module)
@@ -1198,7 +1199,7 @@ namespace ctrace::concurrency::internal::analysis
                         if (settling->hasLocalLinkage())
                             continue;
                         std::string symbol = programSymbol(*settling);
-                        calledElsewhere = calledElsewhere || program->isDeclaredElsewhere(symbol);
+                        calledElsewhere = calledElsewhere || program->appearsInSeveralUnits(symbol);
                         settlingFunctions.insert(std::move(symbol));
                     }
                     if (calledElsewhere)
