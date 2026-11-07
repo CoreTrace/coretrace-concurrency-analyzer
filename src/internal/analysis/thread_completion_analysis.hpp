@@ -7,12 +7,14 @@
 #include <optional>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 namespace llvm
 {
     class BasicBlock;
     class CallBase;
+    class DataLayout;
     class DominatorTree;
     class Function;
     class Instruction;
@@ -47,6 +49,16 @@ namespace ctrace::concurrency::internal::analysis
     /// makes is read as that join, with `PThreadJoin` as its kind.
     [[nodiscard]] std::optional<JoinSuccess> joinSuccessOf(const llvm::CallBase& join,
                                                            CallKind kind);
+
+    /// The value the pointer `address` is a constant number of bytes past, and that number,
+    /// `extra` added: through the locals unoptimized code keeps a pointer in, as
+    /// `invariantValue` follows them, and the in-bounds offsets the data layout computes
+    /// exactly. Any step LLVM cannot compute exactly stops there, so the value found is the
+    /// pointer that step produces; a sum that overflows, or locals forwarding a pointer around
+    /// a cycle, give nothing.
+    [[nodiscard]] std::optional<std::pair<const llvm::Value*, std::int64_t>>
+    constantOffsetFrom(const llvm::Value& address, std::int64_t extra,
+                       const llvm::DataLayout& layout);
 
     /// Whether every return of the function holding `call` hands back what `call` returns: directly,
     /// or read back from a local only it is stored into. Other reads of the result, logging it for

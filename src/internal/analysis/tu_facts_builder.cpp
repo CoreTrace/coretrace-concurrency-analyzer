@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <iterator>
 #include <tuple>
 #include <optional>
 #include <sstream>
@@ -529,8 +530,8 @@ namespace ctrace::concurrency::internal::analysis
             return locks;
         }
 
-        /// The locks of a thread entry's access to the object it was handed, named after that
-        /// object.
+        /// The locks a thread entry holds, around an access or at a call, named after the object
+        /// it was handed. A lock reached through another parameter names nothing the thread holds.
         std::set<std::string> locksOnSharedObject(const std::set<std::string>& entryLocks,
                                                   const SharedObjectBinding& binding)
         {
@@ -546,11 +547,14 @@ namespace ctrace::concurrency::internal::analysis
             return locks;
         }
 
-        /// Bounds the orders a function keeps open for its callers. A recursion that moves the
-        /// pointer it passes names a new lock at every step, so a fixpoint alone would not end.
-        /// Past the bound, the orders kept no longer change: an order, or a thread beside one, is
-        /// lost, never invented.
-        constexpr std::size_t kMaxOpenLockOrdersPerFunction = 64;
+        /// Bounds the orders the calls of a recursion bring a function on a lock only a recursion
+        /// names there. A recursion that moves the pointer it passes names a new lock at every
+        /// step, so a fixpoint alone would not end. Past the bound, such orders no longer change
+        /// the function's: an order, or a thread beside one, is lost, never invented. Every other
+        /// order is kept whole: the function's own, those its calls outside a recursion bring,
+        /// which only a cycle of calls could make endless, and those a recursion brings on the
+        /// locks the others name, finitely many locks taken at finitely many places.
+        constexpr std::size_t kMaxOrdersOnLocksOnlyARecursionNames = 64;
 
         /// True for a lock only a call site can name: one reached through a parameter, or what
         /// the caller holds.
@@ -566,13 +570,31 @@ namespace ctrace::concurrency::internal::analysis
 
         /// Identifies an order in its function. Instantiated at a call, every order a callee takes
         /// on two locks gets the call's location: the address mark keeps an order taken either way
-        /// apart from one taken lower address first, which would otherwise hide it.
+        /// apart from one taken lower address first, which would otherwise hide it. The spawn mark
+        /// keeps the order a bound thread takes apart from one its function's direct calls take on
+        /// the same locks, under other locks and beside other threads.
         std::string lockOrderKey(const LockOrderFact& order)
         {
             return order.functionId + "|" + order.firstLockId + "|" + order.secondLockId + "|" +
                    order.location.file + "|" + std::to_string(order.location.line) + "|" +
                    std::to_string(order.location.column) +
-                   (order.lowerAddressFirst ? "|lower-address-first" : "");
+                   (order.lowerAddressFirst ? "|lower-address-first" : "") +
+                   (order.boundBySpawn ? "|bound-by-spawn" : "");
+        }
+
+        /// An order as the analysis reads it: its key, and for an order on two locks the locks that
+        /// may gate it. A reacquisition deadlocks whatever else is held.
+        std::string lockOrderIdentity(const LockOrderFact& order)
+        {
+            std::string identity = lockOrderKey(order);
+            if (order.firstLockId == order.secondLockId)
+                return identity;
+            for (const std::string& lockId : order.heldLocks)
+            {
+                if (!namesCallerFrame(lockId))
+                    identity += "|" + lockId;
+            }
+            return identity;
         }
 
         /// Keeps one copy of `order` in `orders`. At a call, two acquisitions of the callee may
@@ -612,17 +634,38 @@ namespace ctrace::concurrency::internal::analysis
         {
             std::vector<LockOrderFact> orders;
             std::unordered_map<std::string, std::size_t> indexByKey;
+            /// The locks the orders brought by no recursion name.
+            std::unordered_set<std::string> lockIdsOutsideRecursion;
+            /// How many orders a call closing a cycle of calls brought on a lock only a recursion
+            /// names.
+            std::size_t ordersOnLocksOnlyARecursionNames = 0;
         };
 
         /// False when the function's open orders gained nothing: it already keeps the order with
-        /// every thread beside it, or keeps as many orders as it may, which then stay as they are.
+        /// every thread beside it, or `throughRecursion` brings it on a lock only a recursion
+        /// names once the recursions brought as many such orders as they may, past which these
+        /// stay as they are.
         bool addOpenLockOrder(std::unordered_map<std::string, OpenLockOrders>& openByFunction,
-                              LockOrderFact order)
+                              LockOrderFact order, bool throughRecursion)
         {
             OpenLockOrders& open = openByFunction[order.functionId];
-            if (open.indexByKey.size() >= kMaxOpenLockOrdersPerFunction)
+            if (!throughRecursion)
+            {
+                open.lockIdsOutsideRecursion.insert(order.firstLockId);
+                open.lockIdsOutsideRecursion.insert(order.secondLockId);
+                return keepLockOrder(open.orders, open.indexByKey, std::move(order));
+            }
+            if (open.lockIdsOutsideRecursion.contains(order.firstLockId) &&
+                open.lockIdsOutsideRecursion.contains(order.secondLockId))
+            {
+                return keepLockOrder(open.orders, open.indexByKey, std::move(order));
+            }
+            if (open.ordersOnLocksOnlyARecursionNames >= kMaxOrdersOnLocksOnlyARecursionNames)
                 return false;
-            return keepLockOrder(open.orders, open.indexByKey, std::move(order));
+            const std::size_t known = open.orders.size();
+            const bool changed = keepLockOrder(open.orders, open.indexByKey, std::move(order));
+            open.ordersOnLocksOnlyARecursionNames += open.orders.size() - known;
+            return changed;
         }
 
         /// The lock a callee names `calleeLockId`, as the caller of `call` names it. A named lock
@@ -1156,23 +1199,38 @@ namespace ctrace::concurrency::internal::analysis
         SharedObjectBindings sharedObjectBindings;
         std::unordered_set<std::string> sharedObjectIds;
         std::unordered_set<std::string> localObjectIds;
+        std::unordered_set<std::string> settlingFunctions;
         if (selection.lockState())
         {
             sharedObjectBindings =
                 SharedObjectBindingCollector(classifier, analyses)
                     .collect(module, directCallSites, programDefined, &spawnFacts.entryConcurrency);
 
-            // A thread entry another unit also starts may receive the same element there.
+            // A thread entry another unit also starts may receive the same element there. One the
+            // calls of this unit bind, another unit calling the entry, or a function carrying its
+            // object, may run on whatever it passes, and so may one defining its own copy of it:
+            // no spawn names its object then (#235).
             if (crossTU)
             {
                 for (const llvm::Function& function : module)
                 {
                     const auto bindingIt = sharedObjectBindings.find(functionId(function));
-                    if (bindingIt != sharedObjectBindings.end() &&
-                        program->spawnCount(programSymbol(function)) > 1)
+                    if (bindingIt == sharedObjectBindings.end())
+                        continue;
+
+                    bool calledElsewhere = false;
+                    for (const llvm::Function* settling : bindingIt->second.settledThrough)
                     {
-                        bindingIt->second.elementPerThread.reset();
+                        if (settling->hasLocalLinkage())
+                            continue;
+                        std::string symbol = programSymbol(*settling);
+                        calledElsewhere = calledElsewhere || program->appearsInSeveralUnits(symbol);
+                        settlingFunctions.insert(std::move(symbol));
                     }
+                    if (calledElsewhere)
+                        sharedObjectBindings.erase(bindingIt);
+                    else if (program->spawnCount(programSymbol(function)) > 1)
+                        bindingIt->second.elementPerThread.reset();
                 }
             }
             sharedObjectIds =
@@ -1574,8 +1632,9 @@ namespace ctrace::concurrency::internal::analysis
         // some calls hold and others do not, which its entry locks leave out. Either may be a
         // gate the calls that run together share. Such an order, in a function run only by direct
         // calls, is judged at each call instead, with the locks held and the threads running
-        // there. A reacquisition needs no other thread, and no gate prevents it: it is judged
-        // where it is taken.
+        // there; so is it in an entry a direct call also runs, whose spawned thread takes its
+        // own orders apart. A reacquisition needs no other thread, and no gate prevents it: it is
+        // judged where it is taken.
         std::unordered_set<std::string> runOnlyByDirectCalls;
         std::unordered_set<std::string> calledUnderDifferentLocks;
         if (selection.lockOrders)
@@ -1604,25 +1663,54 @@ namespace ctrace::concurrency::internal::analysis
             const bool runOnlyByCalls = runOnlyByDirectCalls.contains(functionId(function));
             const bool callsHoldDifferentLocks =
                 calledUnderDifferentLocks.contains(functionId(function));
+            // A direct call runs an entry on what it passes, not on the object its spawns hand it:
+            // the entry's orders are the calls', and its spawned thread takes its own apart.
+            const auto bindingIt = sharedObjectBindings.find(functionId(function));
+            const bool spawnedApart =
+                bindingIt != sharedObjectBindings.end() && bindingIt->second.runByDirectCalls;
             std::vector<LockOrderFact> functionLockOrders = lockOrderCollector.collect(
                 function, functionEntryLocks, taskConcurrency.liveEntriesAtInstruction,
                 taskConcurrency.startedEntriesAtInstruction);
+            // The orders every run of the function takes alike: kept once, beside every thread
+            // running it.
+            std::unordered_set<std::string> sharedOrders;
             for (LockOrderFact& lockOrder : functionLockOrders)
             {
                 lockOrder.inRootTask = inRootTask;
                 if (isOpenLockOrder(lockOrder))
                 {
-                    addOpenLockOrder(openLockOrders, std::move(lockOrder));
+                    addOpenLockOrder(openLockOrders, std::move(lockOrder),
+                                     /*throughRecursion=*/false);
                 }
-                else if (runOnlyByCalls && lockOrder.firstLockId != lockOrder.secondLockId &&
+                else if ((runOnlyByCalls || spawnedApart) &&
+                         lockOrder.firstLockId != lockOrder.secondLockId &&
                          (callsHoldDifferentLocks || isHeldThroughParameter(lockOrder)))
                 {
                     ordersJudgedAtCalls[functionId(function)].push_back(std::move(lockOrder));
                 }
                 else
                 {
+                    if (spawnedApart)
+                        sharedOrders.insert(lockOrderIdentity(lockOrder));
                     addLockOrder(facts.lockOrders, lockOrderIndexByKey, std::move(lockOrder));
                 }
+            }
+            if (!spawnedApart)
+                continue;
+
+            // The spawned thread starts holding nothing, and nothing names its other parameters:
+            // what it leaves open is no order of its own.
+            for (LockOrderFact& lockOrder : lockOrderCollector.collect(
+                     function, functionEntryLocks, taskConcurrency.liveEntriesAtInstruction,
+                     taskConcurrency.startedEntriesAtInstruction, /*spawnedThread=*/true))
+            {
+                if (isOpenLockOrder(lockOrder) ||
+                    sharedOrders.contains(lockOrderIdentity(lockOrder)))
+                {
+                    continue;
+                }
+                lockOrder.boundBySpawn = true;
+                addLockOrder(facts.lockOrders, lockOrderIndexByKey, std::move(lockOrder));
             }
         }
 
@@ -1634,6 +1722,17 @@ namespace ctrace::concurrency::internal::analysis
         // closed orders left to the calls become the caller's own orders the same way.
         const std::set<std::string> noLocks;
         const ThreadEntrySet noEntries;
+        // The calls followed here that close a cycle of them: the only calls that may bring a
+        // function orders without end.
+        std::unordered_set<const llvm::CallBase*> recursionCalls;
+        if (selection.lockOrders)
+        {
+            std::vector<DirectCallSite> followedCalls;
+            std::ranges::copy_if(directCallSites, std::back_inserter(followedCalls),
+                                 [&](const DirectCallSite& site)
+                                 { return takesCalleeLockOrders(site, classifier); });
+            recursionCalls = callsClosingCycles(followedCalls);
+        }
         bool lockOrdersChanged = selection.lockOrders;
         while (lockOrdersChanged)
         {
@@ -1654,10 +1753,19 @@ namespace ctrace::concurrency::internal::analysis
                 {
                     callerObject = &objectIt->second;
                 }
+                // The locks a caller holds are named after its object only where the object is
+                // proven and its spawned thread is its one run. Otherwise the thread takes its
+                // orders at the call on the object apart, below, and the direct calls running the
+                // caller take them on what they pass.
+                const SharedObjectBinding* spawnedOn =
+                    callerObject != nullptr &&
+                            (callerObject->keptForLackOfProof || callerObject->runByDirectCalls)
+                        ? callerObject
+                        : nullptr;
                 const SynchronizationEffectResolver callerLocks(
                     classifier, module.getDataLayout(), &lockWrapperSummaries,
-                    /*nameParameterLocks=*/false, callerObject, &localObjectIds,
-                    /*nameParameterFieldLocks=*/true);
+                    /*nameParameterLocks=*/false, spawnedOn == nullptr ? callerObject : nullptr,
+                    &localObjectIds, /*nameParameterFieldLocks=*/true);
 
                 const auto heldIt = lockPropagation.effectiveHeldLocksByCall.find(site.call);
                 const auto entryIt =
@@ -1692,21 +1800,64 @@ namespace ctrace::concurrency::internal::analysis
                     calleeOrders.insert(calleeOrders.end(), closedIt->second.begin(),
                                         closedIt->second.end());
                 }
+                // The orders every run of the caller takes alike at the call: kept once.
+                std::unordered_set<std::string> sharedOrders;
+                if (spawnedOn == nullptr || spawnedOn->runByDirectCalls)
+                {
+                    const bool throughRecursion = recursionCalls.contains(site.call);
+                    for (const LockOrderFact& order : calleeOrders)
+                    {
+                        for (LockOrderFact& instance : instantiateAtCall(order, call))
+                        {
+                            if (isOpenLockOrder(instance))
+                            {
+                                lockOrdersChanged =
+                                    addOpenLockOrder(openLockOrders, std::move(instance),
+                                                     throughRecursion) ||
+                                    lockOrdersChanged;
+                            }
+                            else
+                            {
+                                if (spawnedOn != nullptr)
+                                    sharedOrders.insert(lockOrderIdentity(instance));
+                                addLockOrder(facts.lockOrders, lockOrderIndexByKey,
+                                             std::move(instance));
+                            }
+                        }
+                    }
+                }
+                if (spawnedOn == nullptr)
+                    continue;
+
+                // The spawned thread holds at the call the locks of its object the caller's frame
+                // holds there. It starts holding nothing, and nothing names its other parameters:
+                // what it leaves open is no order of its own.
+                const SynchronizationEffectResolver objectLocks(
+                    classifier, module.getDataLayout(), &lockWrapperSummaries,
+                    /*nameParameterLocks=*/false, spawnedOn, &localObjectIds,
+                    /*nameParameterFieldLocks=*/true);
+                const std::set<std::string> heldOnObject =
+                    locksOnSharedObject(call.heldAtCall, *spawnedOn);
+                const LockOrderCall spawnedCall{
+                    .site = site,
+                    .callerLocks = objectLocks,
+                    .heldAtCall = heldOnObject,
+                    .calleeEntryLocks = call.calleeEntryLocks,
+                    .liveAtCall = call.liveAtCall,
+                    .startedAtCall = call.startedAtCall,
+                };
                 for (const LockOrderFact& order : calleeOrders)
                 {
-                    for (LockOrderFact& instance : instantiateAtCall(order, call))
+                    for (LockOrderFact& instance : instantiateAtCall(order, spawnedCall))
                     {
-                        if (isOpenLockOrder(instance))
+                        instance.heldLocks = gatesAmong(instance.heldLocks, spawnedOn);
+                        if (isOpenLockOrder(instance) ||
+                            sharedOrders.contains(lockOrderIdentity(instance)))
                         {
-                            lockOrdersChanged =
-                                addOpenLockOrder(openLockOrders, std::move(instance)) ||
-                                lockOrdersChanged;
+                            continue;
                         }
-                        else
-                        {
-                            addLockOrder(facts.lockOrders, lockOrderIndexByKey,
-                                         std::move(instance));
-                        }
+                        instance.boundBySpawn = true;
+                        addLockOrder(facts.lockOrders, lockOrderIndexByKey, std::move(instance));
                     }
                 }
             }
@@ -1718,7 +1869,10 @@ namespace ctrace::concurrency::internal::analysis
         // Reads the lifecycle facts, not the accesses, so it can precede them; the rest of this
         // function is the access pipeline, which only a rule reading accesses pays for.
         if (selection.program)
+        {
             facts.program = collectProgramSymbolFacts(module, facts);
+            facts.program.settlingFunctions = std::move(settlingFunctions);
+        }
         if (!selection.accesses)
             return facts;
 

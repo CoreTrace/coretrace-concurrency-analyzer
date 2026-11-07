@@ -146,6 +146,20 @@ namespace ctrace::concurrency::internal::analysis
         }
     } // namespace
 
+    std::set<std::string> gatesAmong(const std::set<std::string>& heldLocks,
+                                     const SharedObjectBinding* sharedObject)
+    {
+        if (sharedObject == nullptr || !sharedObject->keptForLackOfProof)
+            return heldLocks;
+        std::set<std::string> gates;
+        for (const std::string& lockId : heldLocks)
+        {
+            if (lockIdRoot(lockId).symbol != sharedObject->object.symbol)
+                gates.insert(lockId);
+        }
+        return gates;
+    }
+
     LockOrderCollector::LockOrderCollector(const ConcurrencySymbolClassifier& classifier,
                                            LlvmFunctionAnalysisProvider& analyses,
                                            const LockWrapperSummaries* summaries,
@@ -157,11 +171,10 @@ namespace ctrace::concurrency::internal::analysis
             localObjects_ = sharedObjectNames(*sharedObjects_, SharedObjectKind::Local);
     }
 
-    std::vector<LockOrderFact>
-    LockOrderCollector::collect(const llvm::Function& function,
-                                const std::set<std::string>& initialHeldLocks,
-                                const LiveEntriesByInstruction& liveEntriesByInstruction,
-                                const LiveEntriesByInstruction& startedEntriesByInstruction) const
+    std::vector<LockOrderFact> LockOrderCollector::collect(
+        const llvm::Function& function, const std::set<std::string>& initialHeldLocks,
+        const LiveEntriesByInstruction& liveEntriesByInstruction,
+        const LiveEntriesByInstruction& startedEntriesByInstruction, bool spawnedThread) const
     {
         std::vector<LockOrderFact> facts;
         // The acquisitions each fact stands for: every one at its source location, which a macro
@@ -173,7 +186,7 @@ namespace ctrace::concurrency::internal::analysis
         if (sharedObjects_ != nullptr)
         {
             if (const auto it = sharedObjects_->find(functionId(function));
-                it != sharedObjects_->end())
+                it != sharedObjects_->end() && (spawnedThread || !it->second.runByDirectCalls))
             {
                 sharedObject = &it->second;
             }
@@ -250,6 +263,7 @@ namespace ctrace::concurrency::internal::analysis
                         {
                             startedEntries = startedIt->second;
                         }
+                        const LockSet gates = gatesAmong(currentLocks, sharedObject);
 
                         for (const std::string& acquiredLock : change.orderedAcquired)
                         {
@@ -282,7 +296,7 @@ namespace ctrace::concurrency::internal::analysis
                                     .firstLockId = heldLock,
                                     .secondLockId = acquiredLock,
                                     .location = location,
-                                    .heldLocks = currentLocks,
+                                    .heldLocks = gates,
                                     .liveEntries = liveEntries,
                                     .startedEntries = startedEntries,
                                     .secondIsRecursive = recursive,

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
+#include "internal/analysis/cross_tu/program_symbol_index.hpp"
+#include "internal/analysis/facts.hpp"
 #include "internal/analysis/held_member_analysis.hpp"
 #include "internal/analysis/thread_completion_analysis.hpp"
 #include "internal/diagnostics/diagnostic_catalog.hpp"
@@ -412,6 +414,191 @@ namespace
             passed = assertTrue(firstAgainstSecond, path + " should report first against second") &&
                      passed;
         }
+        return passed;
+    }
+
+    /// The places a data-race fixture's races join, one `function:line ~ function:line` per pair,
+    /// the two ends in order so that a pair reads the same whichever end the report starts from.
+    std::optional<std::vector<std::string>> racingPlacesIn(std::string_view fixture)
+    {
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/data-race/" + std::string(fixture),
+                           AnalysisOptions{.enabledRules = {RuleId::DataRaceGlobal}});
+        if (!report.has_value())
+            return std::nullopt;
+
+        std::vector<std::string> places;
+        for (const Diagnostic& diagnostic : report->diagnostics)
+            for (const ctrace::concurrency::RelatedLocation& related : diagnostic.relatedLocations)
+            {
+                std::string one =
+                    diagnostic.location.function + ":" + std::to_string(diagnostic.location.line);
+                std::string other =
+                    related.location.function + ":" + std::to_string(related.location.line);
+                if (other < one)
+                    std::swap(one, other);
+                places.push_back(one + " ~ " + other);
+            }
+        std::sort(places.begin(), places.end());
+        places.erase(std::unique(places.begin(), places.end()), places.end());
+        return places;
+    }
+
+    /// A thread whose entry reaches its spawn as a parameter runs on the object the same call
+    /// hands it. One helper called with two entries and two objects, directly or through
+    /// launchers, keeps each entry on its own object, which the counts alone would not tell from
+    /// the entries swapped. A helper writing the object races with its thread, and nothing after
+    /// its join does. A direct spawn keeps its object when a call settles its entry on another,
+    /// so main's race with the direct thread stays reported (#235).
+    bool testEntryParameterThreadsKeepTheObjectOfTheirCall()
+    {
+        const std::optional<std::vector<std::string>> oneHelper =
+            racingPlacesIn("data_race_entry_parameter_two_entries_two_objects_race.c");
+        const std::optional<std::vector<std::string>> twoLaunchers =
+            racingPlacesIn("data_race_entry_parameter_settled_by_two_launchers_race.c");
+        const std::optional<std::vector<std::string>> helperWrites =
+            racingPlacesIn("data_race_entry_parameter_helper_writes_handed_object_race.c");
+        const std::optional<std::vector<std::string>> directAndSettled =
+            racingPlacesIn("data_race_entry_started_directly_and_through_parameter_race.c");
+        if (!oneHelper.has_value() || !twoLaunchers.has_value() || !helperWrites.has_value() ||
+            !directAndSettled.has_value())
+            return false;
+
+        const std::vector<std::string> oneHelperPlaces = {"add:18 ~ main:39", "main:40 ~ peek:25"};
+        const std::vector<std::string> twoLaunchersPlaces = {"add:17 ~ main:48",
+                                                             "main:49 ~ peek:24"};
+        const std::vector<std::string> helperWritesPlaces = {"add:17 ~ runWith:24"};
+        const bool directKept = std::find(directAndSettled->begin(), directAndSettled->end(),
+                                          "main:34 ~ write_value:19") != directAndSettled->end();
+        return assertTrue(*oneHelper == oneHelperPlaces,
+                          "one helper keeps add on first and peek on second") &&
+               assertTrue(*twoLaunchers == twoLaunchersPlaces,
+                          "two launchers keep add on first and peek on second") &&
+               assertTrue(*helperWrites == helperWritesPlaces,
+                          "the helper's write races with add, and main's read after its join "
+                          "with nothing") &&
+               assertTrue(directKept, "main's read of a still races with the direct thread on a");
+    }
+
+    /// Whether every place `wanted` names is among the races `fixture` reports, and none of
+    /// `unwanted`: the races a fixture also reports beside them are not pinned.
+    bool racesInclude(std::string_view fixture, const std::vector<std::string>& wanted,
+                      const std::vector<std::string>& unwanted)
+    {
+        const std::optional<std::vector<std::string>> places = racingPlacesIn(fixture);
+        if (!assertTrue(places.has_value(), std::string(fixture) + " should be analyzed"))
+            return false;
+        bool passed = true;
+        for (const std::string& place : wanted)
+            passed = assertTrue(std::find(places->begin(), places->end(), place) != places->end(),
+                                std::string(fixture) + " should race at " + place) &&
+                     passed;
+        for (const std::string& place : unwanted)
+            passed = assertTrue(std::find(places->begin(), places->end(), place) == places->end(),
+                                std::string(fixture) + " should not race at " + place) &&
+                     passed;
+        return passed;
+    }
+
+    /// A thread its helper starts on a pointer read out of the object the helper is handed runs
+    /// on what that pointer holds, not on the object handed. Where the caller's store is proven,
+    /// the race is on the object stored there and never on the one passed; where it is not, the
+    /// object passed is kept for lack of proof, and the race on it, which the field may well
+    /// designate, stays. The counts alone would not tell the two objects apart (#242). Kept, the
+    /// object names none of the locks its thread holds and grants it no exemption, which would
+    /// hide the races of the object the thread may hold instead.
+    bool testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds()
+    {
+        struct ExpectedPlaces
+        {
+            std::string_view fixture;
+            std::vector<std::string> places;
+        };
+        // The store is proven: main's read of the object stored races, that of the object passed,
+        // when it is another one, does not.
+        const std::vector<ExpectedPlaces> proven = {
+            {"data_race_object_read_from_handed_object_race.c", {"main:35 ~ writer:19"}},
+            {"data_race_entry_parameter_object_read_from_handed_object_race.c",
+             {"main:34 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_pointing_to_itself_race.c",
+             {"main:33 ~ writer:18"}},
+            {"data_race_entry_parameter_object_read_from_handed_object_pointing_to_itself_race.c",
+             {"main:33 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_last_store_race.c", {"main:34 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_two_frames_race.c", {"main:38 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_store_after_call_race.c",
+             {"main:33 ~ writer:17"}},
+            {"data_race_object_read_from_member_of_handed_object_race.c", {"main:40 ~ writer:23"}},
+        };
+        // Nothing proves what the field holds, and it may hold the object passed: the object passed
+        // is kept, and main's read of it still races.
+        const std::vector<ExpectedPlaces> kept = {
+            {"data_race_object_read_from_handed_object_stored_on_one_path_race.c",
+             {"main:35 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_address_copied_race.c",
+             {"main:34 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_repointed_by_helper_race.c",
+             {"main:37 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_repointed_by_spawning_helper_race.c",
+             {"main:33 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_repointed_by_outer_helper_race.c",
+             {"main:37 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_struct_copied_over_race.c",
+             {"main:35 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_store_not_on_every_path_race.c",
+             {"main:35 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_own_address_read_back_race.c",
+             {"main:36 ~ writer:18"}},
+            {"data_race_object_read_from_handed_object_own_address_copied_out_race.c",
+             {"main:35 ~ writer:17"}},
+            {"data_race_object_read_from_handed_object_own_address_stored_at_unknown_place_race.c",
+             {"main:35 ~ writer:18"}},
+        };
+        // Kept, the object passed names none of the locks the thread holds, which may be those of
+        // another object: main's read of shared under task's lock races with writer's write under
+        // other's, a frame or two above the spawn. The lock around the accesses the thread is
+        // taken to make to the object kept is still named after it: they race with main's only
+        // if the thread holds that object, whose lock it then takes.
+        const std::vector<ExpectedPlaces> keptLocks = {
+            {"data_race_object_read_from_handed_object_under_its_own_lock_race.c",
+             {"main:41 ~ writer:24"}},
+            {"data_race_entry_parameter_object_read_from_handed_object_under_its_own_lock_race.c",
+             {"main:49 ~ writer:26"}},
+            {"data_race_object_read_from_handed_object_under_its_own_lock_no_fp.c", {}},
+        };
+        bool passed = true;
+        for (const std::vector<ExpectedPlaces>* group : {&proven, &kept, &keptLocks})
+            for (const ExpectedPlaces& expected : *group)
+            {
+                const std::optional<std::vector<std::string>> places =
+                    racingPlacesIn(expected.fixture);
+                passed = assertTrue(places.has_value() && *places == expected.places,
+                                    std::string(expected.fixture) +
+                                        " should race exactly at its expected places") &&
+                         passed;
+            }
+        // Kept too, beside races these fixtures also report: the field race with the thread
+        // repointing it, and the second thread's on the object passed. The loop's first thread
+        // runs on other, a race the kept object misses.
+        passed = racesInclude("data_race_object_read_from_handed_object_repointed_by_thread_race.c",
+                              {"main:40 ~ repoint:30", "main:43 ~ writer:19"}, {}) &&
+                 passed;
+        passed = racesInclude("data_race_object_read_from_handed_object_repointed_in_loop_race.c",
+                              {"main:36 ~ writer:19"}, {}) &&
+                 passed;
+        // A write where only the run knows leaves the read unproven: writer is not taken to run on
+        // other, the object the field held before it. It runs on moved, a race this misses.
+        passed = racesInclude("data_race_object_read_from_handed_object_written_at_unknown_place.c",
+                              {}, {"main:39 ~ writer:20"}) &&
+                 passed;
+        // Kept, the elements passed grant their readers no exemption: the readers, which all run
+        // on common, race with each other. Reported on the elements they are kept on, the pair is
+        // pinned so that it is not dropped; nodes is a conservative attribution, not the object
+        // they share. start's write of an element races with the worker on it; the readers' races
+        // with both are false.
+        passed = racesInclude("data_race_object_read_from_each_handed_element_race.c",
+                              {"reader:35 ~ reader:35", "start:41 ~ worker:28"}, {}) &&
+                 passed;
         return passed;
     }
 
@@ -1021,6 +1208,249 @@ namespace
                           "taken (#136)");
     }
 
+    /// The places a deadlock joins, as `function:line`, in order.
+    std::vector<std::string> sortedPlaces(const Diagnostic& diagnostic)
+    {
+        std::vector<std::string> places = {diagnostic.location.function + ":" +
+                                           std::to_string(diagnostic.location.line)};
+        for (const ctrace::concurrency::RelatedLocation& related : diagnostic.relatedLocations)
+            places.push_back(related.location.function + ":" +
+                             std::to_string(related.location.line));
+        std::sort(places.begin(), places.end());
+        return places;
+    }
+
+    /// A thread on a handed entry, kept for lack of proof on the object its helper reads its own
+    /// out of, takes its object's lock around first then second, and main takes the lock of the
+    /// object passed around the opposite order. The lock named after the kept object is no gate:
+    /// the inversion of first and second stays reported between writer and main, which a count
+    /// alone would not tell from another cycle. Where the store is proven, the thread's lock is
+    /// main's, and still gates the inversion (#242).
+    bool testKeptObjectLockIsNoGate()
+    {
+        const AnalysisOptions deadlocks{.enabledRules = {RuleId::DeadlockLockOrder}};
+        const std::optional<DiagnosticReport> kept = analyzeFixture(
+            "tests/fixtures/concurrency/deadlock/deadlock_gate_of_object_read_from_handed_object.c",
+            deadlocks);
+        const std::optional<DiagnosticReport> proven =
+            analyzeFixture("tests/fixtures/concurrency/deadlock/"
+                           "deadlock_gate_of_proven_object_read_from_handed_object_no_diagnostic.c",
+                           deadlocks);
+        if (!kept.has_value() || !proven.has_value())
+            return false;
+
+        const Diagnostic* diagnostic = findFirstDiagnosticForRule(*kept, RuleId::DeadlockLockOrder);
+        const std::vector<std::string> inversion = {"main:47", "writer:27"};
+        return assertTrue(kept->diagnostics.size() == 1 && diagnostic != nullptr,
+                          "a gate named after a kept object should hide no deadlock") &&
+               assertTrue(stringPropertyOf(*diagnostic, "firstLock") == "first" &&
+                              stringPropertyOf(*diagnostic, "secondLock") == "second",
+                          "the deadlock should invert first and second") &&
+               assertTrue(sortedPlaces(*diagnostic) == inversion,
+                          "the deadlock should join writer and main") &&
+               assertTrue(proven->diagnostics.empty(),
+                          "the lock of the object a thread is proven to hold should gate");
+    }
+
+    /// A direct call runs an entry its spawns bind to an object on what the call passes: the call
+    /// takes the entry's orders, and those of the entry's calls, on that object's locks, under the
+    /// locks it holds and beside the threads running at the call. The thread takes its own orders
+    /// on its object. A kept object names the locks its thread holds at its calls, and gates none
+    /// of the orders taken there. Every order the entry takes reaches the call, however many, and
+    /// so does every order a plain helper takes, and every order a recursion brings on the locks
+    /// they name: only what a recursion brings on a lock of its own is bounded. Each deadlock is
+    /// pinned by its locks and places, which a count alone would not tell from another cycle
+    /// (#235, #242).
+    bool testEachRunOfABoundEntryTakesItsOwnOrders()
+    {
+        struct Cycle
+        {
+            std::string fixture;
+            std::string firstLock;
+            std::string secondLock;
+            std::vector<std::string> places;
+        };
+        const std::vector<Cycle> cycles = {
+            {"deadlock_entry_called_directly_on_other_object.c",
+             "gate",
+             "other",
+             {"main:51", "reverser:34"}},
+            {"deadlock_handed_entry_called_directly_on_other_object.c",
+             "gate",
+             "other",
+             {"main:52", "reverser:35"}},
+            {"deadlock_handed_entry_called_directly_orders_in_helper.c",
+             "gate",
+             "other",
+             {"main:57", "reverser:40"}},
+            {"deadlock_handed_entry_called_directly_under_its_argument_lock.c",
+             "first",
+             "second",
+             {"main:58", "reverser:41"}},
+            {"deadlock_handed_entry_called_directly_keeps_thread_order.c",
+             "gate",
+             "task",
+             {"reverser:36", "writer:26"}},
+            {"deadlock_nested_order_through_kept_object.c",
+             "gate",
+             "task",
+             {"main:50", "writer:34"}},
+            {"deadlock_gate_of_kept_object_at_nested_call.c",
+             "first",
+             "second",
+             {"main:53", "writer:36"}},
+            {"deadlock_handed_entry_called_after_its_thread_takes_eleven_locks.c",
+             "gate",
+             "task",
+             {"main:73", "reverse:60"}},
+            {"deadlock_handed_entry_called_through_helper_takes_eleven_locks.c",
+             "gate",
+             "task",
+             {"main:79", "reverse:61"}},
+            {"deadlock_helper_takes_eleven_parameter_locks_before_gate.c",
+             "gate",
+             "task",
+             {"main:69", "reverse:59"}},
+            {"deadlock_handed_entry_recursion_under_recursive_lock_takes_first_lock_last.c",
+             "outer",
+             "task",
+             {"main:85", "reverse:68"}},
+        };
+
+        bool ok = true;
+        for (const Cycle& cycle : cycles)
+        {
+            const std::string path = "tests/fixtures/concurrency/deadlock/" + cycle.fixture;
+            const std::optional<DiagnosticReport> report =
+                analyzeFixture(path, AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}});
+            if (!report.has_value())
+            {
+                ok = false;
+                continue;
+            }
+
+            const Diagnostic* diagnostic =
+                findFirstDiagnosticForRule(*report, RuleId::DeadlockLockOrder);
+            ok = assertTrue(report->diagnostics.size() == 1 && diagnostic != nullptr,
+                            cycle.fixture + " should report one deadlock") &&
+                 assertTrue(stringPropertyOf(*diagnostic, "firstLock") == cycle.firstLock &&
+                                stringPropertyOf(*diagnostic, "secondLock") == cycle.secondLock,
+                            cycle.fixture + " should invert " + cycle.firstLock + " and " +
+                                cycle.secondLock) &&
+                 assertTrue(sortedPlaces(*diagnostic) == cycle.places,
+                            cycle.fixture + " should join " + cycle.places.front() + " and " +
+                                cycle.places.back()) &&
+                 ok;
+        }
+        return ok;
+    }
+
+    /// A spawn binds an entry handed to its helper to the object the call hands only where
+    /// nothing else in the unit may run the entry. A call through a copy of its address, a helper
+    /// calling it, a table or a global holding it, code the unit does not define, a copy no call
+    /// settles, a spawn on an object no call names, helpers handing it down past those followed,
+    /// whichever shorter way down reaches the same helpers first, an object passed down past the
+    /// callers followed, or a recursion handing the entry back with another object, with one no
+    /// proof settles, or as it found it for one spawn only, run it on another object, under
+    /// another lock: the entry is then bound to none, and its races with reader and with its other
+    /// run, and its inversion under another lock, stay reported. A copy carrying the entry to its spawn, a comparison, as many helpers
+    /// or callers as are followed along every way down, and a recursion passing the object back
+    /// down leave it bound. Each race is pinned by its places, and the deadlock by its locks and
+    /// places (#235).
+    bool testHandedEntryRunElsewhereIsBoundToNothing()
+    {
+        struct ExpectedPlaces
+        {
+            std::string_view fixture;
+            std::vector<std::string> places;
+        };
+        const std::vector<ExpectedPlaces> expectations = {
+            {"data_race_handed_entry_also_run_through_local_pointer_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_run_by_helper_parameter_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_run_by_spawning_helper_race.c",
+             {"reader:33 ~ writer:24"}},
+            {"data_race_handed_entry_also_run_through_table_race.c", {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_on_unnamed_object_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_through_five_helpers_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_through_five_helpers_after_two_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_through_five_helpers_before_two_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_started_by_recursion_swapping_objects_race.c",
+             {"reader:35 ~ writer:26"}},
+            {"data_race_handed_entry_started_by_recursion_rereading_object_race.c",
+             {"reader:35 ~ writer:26"}},
+            {"data_race_handed_entry_started_by_recursion_changing_one_object_race.c",
+             {"reader:36 ~ writer:27"}},
+            {"data_race_handed_entry_also_started_on_object_from_five_frames_up_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_also_run_through_global_pointer_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_handed_to_undefined_code_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_through_ambiguous_copy_race.c",
+             {"reader:34 ~ writer:25"}},
+            {"data_race_handed_entry_also_started_on_unnamed_object_a_helper_down_race.c",
+             {"reader:34 ~ writer:25", "writer:25 ~ writer:25"}},
+            {"data_race_handed_entry_handed_through_local_copy_no_fp.c", {}},
+            {"data_race_handed_entry_also_compared_no_fp.c", {}},
+            {"data_race_handed_entry_handed_through_four_helpers_no_fp.c", {}},
+            {"data_race_handed_entry_handed_through_two_and_four_helpers_no_fp.c", {}},
+            {"data_race_handed_entry_started_on_object_from_four_frames_up_no_fp.c", {}},
+            {"data_race_handed_entry_started_on_object_passed_back_down_no_fp.c", {}},
+        };
+        bool passed = true;
+        for (const ExpectedPlaces& expected : expectations)
+        {
+            const std::optional<std::vector<std::string>> places = racingPlacesIn(expected.fixture);
+            passed = assertTrue(places.has_value() && *places == expected.places,
+                                std::string(expected.fixture) +
+                                    " should race exactly at its expected places") &&
+                     passed;
+        }
+
+        const std::optional<DiagnosticReport> report =
+            analyzeFixture("tests/fixtures/concurrency/deadlock/"
+                           "deadlock_handed_entry_also_run_through_local_pointer_under_its_lock.c",
+                           AnalysisOptions{.enabledRules = {RuleId::DeadlockLockOrder}});
+        if (!report.has_value())
+            return false;
+
+        const Diagnostic* diagnostic =
+            findFirstDiagnosticForRule(*report, RuleId::DeadlockLockOrder);
+        const std::vector<std::string> inversion = {"reverser:39", "writer:27"};
+        return assertTrue(report->diagnostics.size() == 1 && diagnostic != nullptr,
+                          "a run through a copy of the entry's address should keep its deadlock") &&
+               assertTrue(stringPropertyOf(*diagnostic, "firstLock") == "first" &&
+                              stringPropertyOf(*diagnostic, "secondLock") == "second",
+                          "the deadlock should invert first and second") &&
+               assertTrue(sortedPlaces(*diagnostic) == inversion,
+                          "the deadlock should join writer and reverser") &&
+               passed;
+    }
+
+    /// A function is in several units only when two units show it, declared or defined: the
+    /// same unit added again, as a reanalysis of it would be, is still one unit (#235).
+    bool testProgramIndexCountsEachUnitOnce()
+    {
+        ctrace::concurrency::internal::analysis::TUFacts facts;
+        facts.program.functionSymbolsById.emplace("writer", "writer");
+        ctrace::concurrency::internal::analysis::ProgramSymbolIndex index;
+        index.addUnit(0, facts);
+        index.addUnit(0, facts);
+        const bool oneUnit = !index.appearsInSeveralUnits("writer");
+        index.addUnit(1, facts);
+        return assertTrue(oneUnit, "a unit added twice should show writer in one unit") &&
+               assertTrue(index.appearsInSeveralUnits("writer"),
+                          "two units showing writer should show it in several") &&
+               assertTrue(!index.appearsInSeveralUnits("reader"),
+                          "a function no unit shows should be in no unit");
+    }
+
     bool testConsistentLockOrderHasNoDeadlock()
     {
         const std::optional<DiagnosticReport> report = analyzeFixture(
@@ -1167,11 +1597,15 @@ namespace
         bool requiresCxx20 = false;
         /// The fixture is kept to exercise the compiler error path and is never analyzed.
         bool expectCompileFailure = false;
-        /// Counts are lower bounds rather than exact values. Reserved for fixtures whose
-        /// diagnostics depend on how a standard library lowers its own templates: libc++ and
-        /// libstdc++ expose a different number of intermediate accesses for the same source, and
-        /// pinning one of them would fail the other. What must not regress is that the race is
-        /// still found at all.
+        /// Counts are lower bounds rather than exact values. For fixtures whose diagnostics
+        /// depend on how a standard library lowers its own templates: libc++ and libstdc++ expose
+        /// a different number of intermediate accesses for the same source, and pinning one of
+        /// them would fail the other. Also for fixtures that report, beside the races they pin, a
+        /// false one an open issue tracks, which an exact count would pin: a test then names the
+        /// pairs that must race and those that must not, so that the extra diagnostic cannot hide
+        /// a wrong attribution. What must not regress is that the race is still found at all. And
+        /// for a fixture whose race the analysis misses, which an exact count of zero would pin:
+        /// the test then names the false race it must not report in its stead.
         bool countsAreMinimums = false;
         /// False missing joins open issues track, each excusing one diagnostic reported where it
         /// says. The missing-join count still covers every other one, and an entry no longer
@@ -2188,6 +2622,15 @@ namespace
              .intent = "hand-over-hand locking by a recursion moving its pointer, one direction "
                        "(#114)"},
             {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_mutual_recursion_moving_pointer_no_diagnostic.c",
+             .intent = "hand-over-hand locking by two functions calling each other on the next "
+                       "node, one direction, ends (#242)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_helper_takes_eleven_parameter_locks_before_gate.c",
+             .intent = "a helper outside a recursion keeps every order it takes on what it is "
+                       "handed, however many (#242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_transfer_helper_gated_calls_no_diagnostic.c",
              .intent = "the gate held at both concurrent calls serializes the helper's orders "
                        "(#114)"},
@@ -2381,6 +2824,95 @@ namespace
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_gate_held_at_every_call_no_diagnostic.c",
              .intent = "a gate held at every call to the helpers (#136)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_of_object_read_from_handed_object.c",
+             .intent = "a lock named after an object a thread is kept on for lack of proof is no "
+                       "gate (#242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_of_proven_object_read_from_handed_object_no_diagnostic.c",
+             .intent = "the lock of the object a thread is proven to hold is a gate (#242)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_of_kept_object_at_nested_call.c",
+             .intent = "a lock named after a kept object is no gate at the thread's calls either "
+                       "(#242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_gate_of_proven_object_at_nested_call_no_diagnostic.c",
+             .intent = "the lock of a proven object is a gate at the thread's calls (#242)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_nested_order_through_kept_object.c",
+             .intent = "a kept object names the locks its thread holds at its calls, for the "
+                       "cycles they close (#242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_entry_called_directly_on_other_object.c",
+             .intent = "a direct call of a bound entry takes its orders on what it passes (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_entry_called_directly_on_other_object_in_order_no_diagnostic.c",
+             .intent = "a direct call of a bound entry taking its orders in another thread's "
+                       "order closes no cycle (#235)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_on_other_object.c",
+             .intent = "a direct call of an entry a helper starts takes its orders on what it "
+                       "passes (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_on_other_object_in_order_no_diagnostic"
+                     ".c",
+             .intent = "a direct call of an entry a helper starts, taking its orders in another "
+                       "thread's order, closes no cycle (#235)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_orders_in_helper.c",
+             .intent = "a direct call of a bound entry takes its calls' orders on what it passes "
+                       "(#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_under_its_argument_lock.c",
+             .intent = "a direct call of a bound entry holds the lock of what it passes, not the "
+                       "thread's (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_under_thread_object_lock_no_diagnostic"
+                     ".c",
+             .intent = "a direct call passing a bound entry's object holds its lock, a gate the "
+                       "thread shares (#235)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_directly_keeps_thread_order.c",
+             .intent = "a bound entry's thread keeps its orders on its object beside the entry's "
+                       "direct calls (#235)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_after_its_thread_takes_eleven_locks.c",
+             .intent = "a direct call of a bound entry takes every order the entry takes, however "
+                       "many, outside a recursion (#235, #242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_called_through_helper_takes_eleven_locks.c",
+             .intent = "a helper calling a bound entry outside a recursion passes on every order "
+                       "it takes (#235, #242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_recursion_under_recursive_lock_takes_first_lock_last"
+                     ".c",
+             .intent = "a recursion naming only the locks its function names brings every order "
+                       "it takes, the last one too (#235, #242)",
+             .deadlock = 1},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_entry_called_directly_after_its_thread_joined_no_diagnostic.c",
+             .intent = "a bound entry's thread takes its orders alone, not main, which calls the "
+                       "entry (#235)"},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_entry_called_directly_reacquires_lock_by_name.c",
+             .intent = "a lock a bound entry reacquires by name, or hands on, is one "
+                       "reacquisition, whichever runs take it (#235)",
+             .deadlock = 2},
+            {.path = "tests/fixtures/concurrency/deadlock/"
+                     "deadlock_handed_entry_also_run_through_local_pointer_under_its_lock.c",
+             .intent = "a call through a copy of a handed entry's address holds the lock of what "
+                       "it passes, not the thread's (#235)",
+             .deadlock = 1},
             {.path = "tests/fixtures/concurrency/deadlock/"
                      "deadlock_helper_order_kept_where_taken.c",
              .intent = "calls that add no lock leave the helper's order where it is taken (#136)",
@@ -4292,6 +4824,287 @@ namespace
              .intent = "a helper writing while its thread on a handed entry runs races with it",
              .dataRace = 1,
              .racingSymbol = "shared"},
+            // --- the object a thread on an entry handed as a parameter is handed (#235) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_on_handed_object_race.c",
+             .intent = "a thread on a handed entry reaches the object its call hands it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_two_entries_two_objects_race.c",
+             .intent = "two calls of one helper keep each entry on the object they hand it",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_on_handed_object_two_frames_race.c",
+             .intent = "an entry and an object handed on through two helpers stay together",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_on_global_object_race.c",
+             .intent = "a thread on a handed entry reaches the global its helper hands it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_helper_writes_handed_object_race.c",
+             .intent = "a helper writing the object it hands its thread on a handed entry races",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_settled_by_two_launchers_race.c",
+             .intent = "entries settled a frame above the spawn keep the objects of their calls",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_on_one_object_in_loop_race.c",
+             .intent = "two threads a loop starts through a helper on one object race",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_handed_object_only_read_no_fp.c",
+             .intent = "a thread only reading the object its call hands it races with no read"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_handed_object_joined_in_helper_no_fp.c",
+             .intent = "a helper joining its thread on a handed entry ends its use of the object"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_started_directly_and_through_parameter_race.c",
+             .intent = "a direct spawn keeps its object when a call settles its entry on another; "
+                       "the self-race #239 tracks is not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_through_recursive_helper_race.c",
+             .intent = "an entry handed on through a recursive helper is settled at the outer call",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_called_directly_under_its_argument_lock_race.c",
+             .intent = "a direct call of a bound entry holds the lock of what it passes, which "
+                       "excludes neither the thread nor reader",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_through_local_pointer_race.c",
+             .intent = "a call through a copy of a handed entry's address runs it where no spawn "
+                       "names its object (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_by_helper_parameter_race.c",
+             .intent = "a helper calling the entry it is handed runs it where no spawn names its "
+                       "object (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_by_spawning_helper_race.c",
+             .intent = "a helper starting the entry it is handed and calling it too runs it on "
+                       "another object (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_through_table_race.c",
+             .intent = "a handed entry kept in a table may run wherever the table is read (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_on_unnamed_object_race.c",
+             .intent = "a handed entry also started on an object no call names is bound to none "
+                       "(#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_through_five_helpers_race.c",
+             .intent = "a handed entry also started past the helpers followed is bound to none "
+                       "(#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_through_five_helpers_after_two_race.c",
+             .intent = "a shorter way down to the same helpers, followed first, does not vouch "
+                       "for a handed entry started past the helpers followed (#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_through_five_helpers_before_two_race.c",
+             .intent = "a shorter way down to the same helpers, followed last, does not vouch for "
+                       "a handed entry started past the helpers followed (#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_by_recursion_swapping_objects_race.c",
+             .intent = "a recursion handing a handed entry back with another object settles it "
+                       "there too (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_by_recursion_rereading_object_race.c",
+             .intent = "a recursion handing itself the object it read settles a handed entry on "
+                       "no proven object (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_by_recursion_changing_one_object_race.c",
+             .intent = "a recursion handing a handed entry back as it found it for one spawn only "
+                       "is a helper more for the other (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_run_through_global_pointer_race.c",
+             .intent = "a handed entry's address stored in a global may be called wherever the "
+                       "global is read (#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_handed_to_undefined_code_race.c",
+             .intent = "code the unit does not define may run a handed entry it is handed "
+                       "(#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_through_ambiguous_copy_race.c",
+             .intent = "a copy that may hold a handed entry starts it where no call settles it "
+                       "(#235)",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_on_unnamed_object_a_helper_down_race.c",
+             .intent = "a helper handing an entry down to a spawn on an object no call names "
+                       "binds it to none (#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_handed_through_local_copy_no_fp.c",
+             .intent = "a copy carrying a handed entry to its spawn leaves it bound (#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_compared_no_fp.c",
+             .intent = "comparing a handed entry runs nothing and leaves it bound (#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_handed_through_four_helpers_no_fp.c",
+             .intent = "an entry handed down as many helpers as are followed stays bound (#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_handed_through_two_and_four_helpers_no_fp.c",
+             .intent = "an entry handed down two ways, each within the helpers followed, stays "
+                       "bound (#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_also_started_on_object_from_five_frames_up_race.c",
+             .intent = "a handed entry also started on an object passed down past the callers "
+                       "followed is bound to none (#235)",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_on_object_from_four_frames_up_no_fp.c",
+             .intent = "an object passed down as many callers as are followed binds the entry "
+                       "(#235)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handed_entry_started_on_object_passed_back_down_no_fp.c",
+             .intent = "an object a recursion passes back down binds the entry (#235)"},
+            // --- the object a thread reaches when its helper reads it out of the object the
+            // helper is handed (#242) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_race.c",
+             .intent = "a thread runs on the object its helper reads out of the one it is handed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_object_read_from_handed_object_race.c",
+             .intent = "a thread on a handed entry runs on the object read out of the handed one",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_pointing_to_itself_race.c",
+             .intent = "a field pointing back at the handed object keeps the thread on it",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_object_read_from_handed_object_pointing_to_itself_race.c",
+             .intent = "a thread on a handed entry stays on the object its field points back at",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_last_store_race.c",
+             .intent = "the last store before the call is what the helper reads",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_two_frames_race.c",
+             .intent = "a read is settled through an outer helper that writes nothing first",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_store_after_call_race.c",
+             .intent = "a store after the call leaves what the helper read",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_member_of_handed_object_race.c",
+             .intent = "the field read is the member's own, not the outer object's",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_stored_on_one_path_race.c",
+             .intent = "a store on one path keeps the object passed, and its race",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_address_copied_race.c",
+             .intent = "a store through a copied address keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_by_helper_race.c",
+             .intent = "a helper repointing the field before the call keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_by_spawning_helper_race.c",
+             .intent = "a helper repointing the field before its read keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_by_thread_race.c",
+             .intent = "a thread repointing the field while it is read keeps the object passed",
+             .dataRace = 2},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_in_loop_race.c",
+             .intent = "a helper repointing the field after its read, called in a loop, keeps "
+                       "the object passed; the threads racing with each other or with the call "
+                       "are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_repointed_by_outer_helper_race.c",
+             .intent = "an outer helper repointing the field keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_struct_copied_over_race.c",
+             .intent = "a struct copied over the object keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_store_not_on_every_path_race.c",
+             .intent = "a store missing from one path keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_own_address_read_back_race.c",
+             .intent = "the object's own address read back keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_own_address_copied_out_race.c",
+             .intent = "the object copied out with its own address keeps the object passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_own_address_stored_at_unknown_place_race.c",
+             .intent = "the object's address stored where only the run knows keeps the object "
+                       "passed",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_written_at_unknown_place.c",
+             .intent = "a write where only the run knows keeps the object passed; the race on "
+                       "moved it misses is not pinned",
+             .dataRace = 0,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_under_its_own_lock_race.c",
+             .intent = "a thread kept on the object passed takes no lock named after it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_object_read_from_handed_object_under_its_own_lock_race.c",
+             .intent = "a thread on a handed entry kept on the object passed two frames up takes "
+                       "no lock named after it",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_handed_object_under_its_own_lock_no_fp.c",
+             .intent = "a thread kept on the object passed accesses it under the lock named after "
+                       "it"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_object_read_from_each_handed_element_race.c",
+             .intent = "threads kept on the elements passed are not exempt from racing with each "
+                       "other, a race attributed conservatively to the elements; their false "
+                       "races with the elements' other users are not pinned",
+             .dataRace = 2,
+             .countsAreMinimums = true},
             // --- a thread the copy of a std::thread argument starts (#200) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "cpp_thread_argument_copy_starts_thread_joined_race.cpp",
@@ -5692,6 +6505,8 @@ int main()
     ok = testAtomicVsNonAtomicReportsSharedState() && ok;
     ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
     ok = testEntriesOrderedElsewhereStillRaceFirstAgainstSecond() && ok;
+    ok = testEntryParameterThreadsKeepTheObjectOfTheirCall() && ok;
+    ok = testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds() && ok;
     ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
     ok = testJoinSummariesKeepTheirOffsets() && ok;
     ok = testArgumentEffectsTellWritesFromKeeping() && ok;
@@ -5720,6 +6535,10 @@ int main()
     ok = testDeadlockBasicReportsLockOrderCycle() && ok;
     ok = testRecursiveDeadlockReportsReacquiredLock() && ok;
     ok = testHelperOrderReportedWhereTaken() && ok;
+    ok = testKeptObjectLockIsNoGate() && ok;
+    ok = testEachRunOfABoundEntryTakesItsOwnOrders() && ok;
+    ok = testHandedEntryRunElsewhereIsBoundToNothing() && ok;
+    ok = testProgramIndexCountsEachUnitOnce() && ok;
     ok = testConsistentLockOrderHasNoDeadlock() && ok;
     ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
     ok = testIndependentLocksHaveNoDeadlock() && ok;

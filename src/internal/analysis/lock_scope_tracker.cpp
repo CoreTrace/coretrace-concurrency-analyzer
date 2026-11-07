@@ -82,11 +82,16 @@ namespace ctrace::concurrency::internal::analysis
         if (trackedAccesses.empty())
             return heldLocksByAccess;
 
+        // An object kept for lack of proof names no lock: the thread may hold another object, and
+        // a lock named after this one would make its accesses look excluded from those made
+        // under the lock of the object it was mistaken for. Nor does the object of an entry a
+        // direct call also runs: that run holds the lock of what the call passes.
         const SharedObjectBinding* sharedObject = nullptr;
         if (sharedObjects_ != nullptr)
         {
             if (const auto it = sharedObjects_->find(functionId(function));
-                it != sharedObjects_->end())
+                it != sharedObjects_->end() && !it->second.keptForLackOfProof &&
+                !it->second.runByDirectCalls)
             {
                 sharedObject = &it->second;
             }

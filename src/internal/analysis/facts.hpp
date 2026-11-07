@@ -306,7 +306,8 @@ namespace ctrace::concurrency::internal::analysis
         std::string secondLockId;
         SourceLocation location;
         /// Every lock held at the acquisition, including `firstLockId`; used to detect a common
-        /// outer "gate" lock that serializes an otherwise inconsistent order.
+        /// outer "gate" lock that serializes an otherwise inconsistent order. A lock named after
+        /// an object its thread is kept on for lack of proof is left out, being no gate.
         std::set<std::string> heldLocks;
         bool inRootTask = false;
         ThreadEntrySet liveEntries;
@@ -321,6 +322,10 @@ namespace ctrace::concurrency::internal::analysis
         /// The second lock's type lets its owner take it again. A lock named after a parameter
         /// has no identity of its own to look this up by, so the order carries it.
         bool secondIsRecursive = false;
+        /// Taken by the thread a spawn starts on the object its function is bound to, on the
+        /// locks named after that object, and by no other run of the function: a direct call
+        /// takes the function's orders on what it passes, apart (#235).
+        bool boundBySpawn = false;
     };
 
     enum class ThreadHandleKind
@@ -498,6 +503,11 @@ namespace ctrace::concurrency::internal::analysis
         /// Functions this unit only declares; every other symbol in `functionSymbolsById` is
         /// defined here.
         std::unordered_set<std::string> declaredFunctions;
+        /// Functions of this unit other units may call that a thread entry's object relies on,
+        /// where calls handing the entry down settle it: the entry, and those whose parameters
+        /// carry the object to the calls. Called elsewhere, or defined there too, one may run the
+        /// entry on another object (#235).
+        std::unordered_set<std::string> settlingFunctions;
         /// Program symbol of the global behind each handle group id this unit creates or
         /// resolves. Absent when the id does not name a global of this module.
         std::unordered_map<std::string, std::string> handleSymbolsByGroupId;

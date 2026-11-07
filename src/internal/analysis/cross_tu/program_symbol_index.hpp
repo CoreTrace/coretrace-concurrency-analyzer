@@ -40,8 +40,9 @@ namespace ctrace::concurrency::internal::analysis
       public:
         /// Records what a unit defines and what it spawns, reading the spawn counts from the
         /// facts its own single-unit analysis produced. Safe to call per unit in any order; the
-        /// result does not depend on it.
-        void addUnit(const TUFacts& facts);
+        /// result does not depend on it. `unit` tells the units apart: the functions a unit
+        /// shows are counted once for it, however often it is added.
+        void addUnit(std::size_t unit, const TUFacts& facts);
 
         /// True when some translation unit passes this function to a thread creation API, even
         /// if the spawn site is in another unit.
@@ -52,6 +53,13 @@ namespace ctrace::concurrency::internal::analysis
         /// visible from the unit holding `main`.
         [[nodiscard]] std::size_t spawnCount(const std::string& symbol) const;
         [[nodiscard]] bool spawnedInLoop(const std::string& symbol) const;
+
+        /// True when this function appears in more than one unit, declared or defined: one
+        /// calls it, starts it or takes its address, on whatever it passes, and so does one
+        /// defining a copy of its own, as every unit using an inline function does. Asked by a
+        /// unit defining it, another unit may run it. A function local to a unit is one per
+        /// unit: its symbol names the unit's file.
+        [[nodiscard]] bool appearsInSeveralUnits(const std::string& symbol) const;
 
         /// True when some unit of the program starts a thread. A `fork` is judged against the
         /// whole program, not against the unit it happens to sit in: the unit that forks and the
@@ -104,7 +112,15 @@ namespace ctrace::concurrency::internal::analysis
             bool insideLoop = false;
         };
 
+        /// The first unit a function appears in, and whether another one shows it too.
+        struct FunctionUnits
+        {
+            std::size_t first = 0;
+            bool several = false;
+        };
+
         std::unordered_map<std::string, EntrySpawns> spawnSitesByEntry_;
+        std::unordered_map<std::string, FunctionUnits> unitsByFunction_;
         ProgramDefinedGlobals definedGlobals_;
         std::unordered_map<std::string, std::vector<ParameterLockEffect>> lockSummariesBySymbol_;
         std::unordered_set<std::string> resolvedHandleSymbols_;

@@ -148,47 +148,44 @@ namespace ctrace::concurrency::internal::analysis
             }
             return nullptr;
         }
+    } // namespace
 
-        /// The value the pointer `address` is a constant number of bytes past, and that number,
-        /// `extra` added: through the locals unoptimized code keeps a pointer in, as
-        /// `invariantValue` follows them, and the in-bounds offsets the data layout computes
-        /// exactly. Any step LLVM cannot compute exactly stops there, so the value found is the
-        /// pointer that step produces; a sum that overflows, or locals forwarding a pointer around
-        /// a cycle, give nothing.
-        std::optional<std::pair<const llvm::Value*, std::int64_t>>
-        constantOffsetFrom(const llvm::Value& address, std::int64_t extra,
-                           const llvm::DataLayout& layout)
+    std::optional<std::pair<const llvm::Value*, std::int64_t>>
+    constantOffsetFrom(const llvm::Value& address, std::int64_t extra,
+                       const llvm::DataLayout& layout)
+    {
+        if (!address.getType()->isPointerTy())
+            return std::nullopt;
+        llvm::APInt offset(layout.getIndexTypeSizeInBits(address.getType()),
+                           static_cast<std::uint64_t>(extra), /*isSigned=*/true);
+        const llvm::Value* value = &address;
+        llvm::SmallPtrSet<const llvm::Value*, 8> visited;
+        while (true)
         {
-            if (!address.getType()->isPointerTy())
+            if (!visited.insert(value).second)
                 return std::nullopt;
-            llvm::APInt offset(layout.getIndexTypeSizeInBits(address.getType()),
-                               static_cast<std::uint64_t>(extra), /*isSigned=*/true);
-            const llvm::Value* value = &address;
-            llvm::SmallPtrSet<const llvm::Value*, 8> visited;
-            while (true)
-            {
-                if (!visited.insert(value).second)
-                    return std::nullopt;
-                const llvm::Value* forwarded = invariantValue(value);
-                if (forwarded == nullptr || !forwarded->getType()->isPointerTy())
-                    return std::nullopt;
-                llvm::APInt step(offset.getBitWidth(), 0);
-                const llvm::Value* base = forwarded->stripAndAccumulateConstantOffsets(
-                    layout, step, /*AllowNonInbounds=*/false);
-                bool overflow = false;
-                offset = offset.sadd_ov(step, overflow);
-                if (overflow)
-                    return std::nullopt;
-                if (base == value)
-                    break;
-                value = base;
-            }
-            const std::optional<std::int64_t> bytes = offset.trySExtValue();
-            if (!bytes)
+            const llvm::Value* forwarded = invariantValue(value);
+            if (forwarded == nullptr || !forwarded->getType()->isPointerTy())
                 return std::nullopt;
-            return std::pair{value, *bytes};
+            llvm::APInt step(offset.getBitWidth(), 0);
+            const llvm::Value* base = forwarded->stripAndAccumulateConstantOffsets(
+                layout, step, /*AllowNonInbounds=*/false);
+            bool overflow = false;
+            offset = offset.sadd_ov(step, overflow);
+            if (overflow)
+                return std::nullopt;
+            if (base == value)
+                break;
+            value = base;
         }
+        const std::optional<std::int64_t> bytes = offset.trySExtValue();
+        if (!bytes)
+            return std::nullopt;
+        return std::pair{value, *bytes};
+    }
 
+    namespace
+    {
         /// A call that waits for the thread whose handle is one of its operands: a join, or a
         /// call to a helper that joins that parameter on every normal return.
         struct JoinSite

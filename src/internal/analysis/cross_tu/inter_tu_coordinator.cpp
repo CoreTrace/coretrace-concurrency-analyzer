@@ -113,9 +113,16 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
                 }
             }
 
-            // An entry of this unit is spawned more often, or in a loop, somewhere else.
+            // An entry of this unit is spawned more often, or in a loop, somewhere else; or another
+            // unit calls a function the object of one relies on, or defines its own copy of it,
+            // and may pass another.
             if (!selection.channels.entryConcurrency)
                 return false;
+            for (const std::string& symbol : program.settlingFunctions)
+            {
+                if (index.appearsInSeveralUnits(symbol))
+                    return true;
+            }
             for (const auto& [id, symbol] : program.functionSymbolsById)
             {
                 if (program.declaredFunctions.contains(symbol) || !index.isThreadEntry(symbol))
@@ -291,7 +298,7 @@ namespace ctrace::concurrency::internal::analysis::cross_tu
 
         ProgramSymbolIndex programIndex;
         for (const std::size_t index : compatible)
-            programIndex.addUnit(factsByUnit[index]);
+            programIndex.addUnit(index, factsByUnit[index]);
 
         // Pass B: only the units whose conclusions the program-wide view changes.
         {
