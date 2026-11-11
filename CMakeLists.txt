@@ -268,7 +268,23 @@ if(CMAKE_PROJECT_NAME STREQUAL PROJECT_NAME)
         coretrace_concurrency_analyzer_lib
     )
 
-    add_test(NAME coretrace_concurrency_analysis_tests COMMAND coretrace_concurrency_analysis_tests)
+    # The analysis suite is registered as shards, one CTest test each, so that `ctest --parallel`
+    # spreads its fixtures over the cores: as a single test it ran silent for 17 minutes on the
+    # macOS runner, two thirds of CTest's default timeout of 25. Twelve shards divide evenly over
+    # the 3 and 4 cores of the GitHub runners.
+    set(CORETRACE_ANALYSIS_TEST_SHARDS 12)
+    math(EXPR CORETRACE_ANALYSIS_TEST_LAST_SHARD "${CORETRACE_ANALYSIS_TEST_SHARDS} - 1")
+    foreach(shard RANGE ${CORETRACE_ANALYSIS_TEST_LAST_SHARD})
+      add_test(NAME coretrace_concurrency_analysis_tests_shard_${shard}
+               COMMAND coretrace_concurrency_analysis_tests ${shard} ${CORETRACE_ANALYSIS_TEST_SHARDS})
+    endforeach()
+
+    # A shard past the count would check nothing and pass; the suite must refuse it instead.
+    add_test(NAME coretrace_concurrency_analysis_tests_refuse_shard_past_count
+             COMMAND coretrace_concurrency_analysis_tests
+                     ${CORETRACE_ANALYSIS_TEST_SHARDS} ${CORETRACE_ANALYSIS_TEST_SHARDS})
+    set_tests_properties(coretrace_concurrency_analysis_tests_refuse_shard_past_count
+                         PROPERTIES WILL_FAIL TRUE)
 
     add_executable(coretrace_concurrency_cross_tu_tests
       tests/unit/test_cross_tu_analysis.cpp
