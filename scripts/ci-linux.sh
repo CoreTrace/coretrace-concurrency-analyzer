@@ -75,5 +75,5 @@ docker run --rm --user 1000:1000 $(expand_platform_args) -v "${REPO_ROOT}":/src 
         -DCLANG_EXECUTABLE="${CLANG_EXECUTABLE}" \
         -DCLANG_RESOURCE_DIR="$(${CLANG_EXECUTABLE} -print-resource-dir)" >/dev/null
     cmake --build "${BUILD_DIR}" --parallel
-    ctest --test-dir "${BUILD_DIR}" --output-on-failure
+    ctest --test-dir "${BUILD_DIR}" --output-on-failure --parallel "$(getconf _NPROCESSORS_ONLN)"
 '
