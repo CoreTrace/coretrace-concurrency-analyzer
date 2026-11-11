@@ -14,6 +14,7 @@
 #include <llvm/IR/Module.h>
 
 #include <algorithm>
+#include <charconv>
 #include <cstdint>
 #include <filesystem>
 #include <iostream>
@@ -22,6 +23,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <system_error>
 #include <variant>
 #include <vector>
 
@@ -6343,16 +6345,56 @@ namespace
         return ok;
     }
 
-    bool testFixtureExpectationTable()
+    /// The part of the suite one process runs, so that CTest can run the parts in parallel.
+    /// Shard `index` of `count` runs the tests, then the fixture rows, whose position is `index`
+    /// modulo `count`: the shards of one count run each of them exactly once between them.
+    struct Shard
     {
-        bool ok = true;
-        for (const FixtureExpectation& expectation : fixtureExpectations())
+        std::size_t index = 0;
+        std::size_t count = 1;
+
+        [[nodiscard]] bool runs(std::size_t position) const
         {
-            if (expectation.expectCompileFailure)
+            return position % count == index;
+        }
+    };
+
+    bool parseCount(std::string_view text, std::size_t& value)
+    {
+        const char* const end = text.data() + text.size();
+        const auto [stop, error] = std::from_chars(text.data(), end, value);
+        return error == std::errc{} && stop == end;
+    }
+
+    /// Reads `[<shard index> <shard count>]`; without them, the whole suite. Anything else, a
+    /// count of zero or an index past the count included, is refused rather than run as a shard
+    /// that would check nothing and pass.
+    std::optional<Shard> parseShard(int argc, char** argv)
+    {
+        if (argc == 1)
+            return Shard{};
+
+        Shard shard;
+        if (argc != 3 || !parseCount(argv[1], shard.index) || !parseCount(argv[2], shard.count) ||
+            shard.index >= shard.count)
+            return std::nullopt;
+        return shard;
+    }
+
+    /// Checks the rows of the table `shard` runs, and counts them in `checkedRows`.
+    bool testFixtureExpectationTable(const Shard& shard, std::size_t& checkedRows)
+    {
+        const std::vector<FixtureExpectation>& expectations = fixtureExpectations();
+        bool ok = true;
+        for (std::size_t row = 0; row < expectations.size(); ++row)
+        {
+            const FixtureExpectation& expectation = expectations[row];
+            if (!shard.runs(row) || expectation.expectCompileFailure)
                 continue;
 
             ok = checkFixtureExpectation(expectation) && ok;
             ok = checkEveryRuleAloneMatchesAllRules(expectation) && ok;
+            ++checkedRows;
         }
 
         return ok;
@@ -6495,67 +6537,89 @@ namespace
     }
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
-    bool ok = true;
+    const std::optional<Shard> shard = parseShard(argc, argv);
+    if (!shard.has_value())
+    {
+        std::cerr << "usage: coretrace_concurrency_analysis_tests [<shard index> <shard count>]\n";
+        return 2;
+    }
 
-    ok = testDataRaceBasicIsReported() && ok;
-    ok = testEveryRuleIsDescribedThroughThePublicApi() && ok;
-    ok = testDataRaceBasicReportsDirectAliasHighConfidence() && ok;
-    ok = testAtomicVsNonAtomicReportsSharedState() && ok;
-    ok = testMemberPointerCallsKeepTheirOwnContext() && ok;
-    ok = testEntriesOrderedElsewhereStillRaceFirstAgainstSecond() && ok;
-    ok = testEntryParameterThreadsKeepTheObjectOfTheirCall() && ok;
-    ok = testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds() && ok;
-    ok = testMemberPointerResolverRefusesAnAdjustment() && ok;
-    ok = testJoinSummariesKeepTheirOffsets() && ok;
-    ok = testArgumentEffectsTellWritesFromKeeping() && ok;
-    ok = testClassDataRaceReportsGlobalCounter() && ok;
-    ok = testSharedObjectByRefReportsGlobalCounter() && ok;
-    ok = testMutexProtectedFixtureHasNoDiagnostics() && ok;
-    ok = testTwoGlobalFixtureOnlyReportsRacySymbol() && ok;
-    ok = testThreadLocalClassHasNoDiagnostics() && ok;
-    ok = testMoveSemanticsRaceUsesUserLocations() && ok;
-    ok = testCallsiteLockProtectedHelperHasNoRace() && ok;
-    ok = testAliasGlobalPointerReportsLowConfidenceRace() && ok;
-    ok = testAliasAmbiguousPointerHasNoFalsePositive() && ok;
-    ok = testUnprotectedCallsiteHelperReportsRace() && ok;
-    ok = testPartialCallsiteLockReportsRace() && ok;
-    ok = testNestedCallsiteLockProtectedHelperHasNoRace() && ok;
-    ok = testPThreadJoinAllHasNoMissingJoin() && ok;
-    ok = testPThreadDetachAllHasNoMissingJoin() && ok;
-    ok = testPThreadHandlePointerJoinHasNoMissingJoin() && ok;
-    ok = testStdThreadJoinHasNoMissingJoin() && ok;
-    ok = testStdThreadMoveJoinHasNoMissingJoin() && ok;
-    ok = testMissingJoinBasicReportsOutstandingPThread() && ok;
-    ok = testMissingJoinDetachMixReportsOnlyOutstandingThread() && ok;
-    ok = testPThreadJoinMixReportsOnlyUnresolvedHandle() && ok;
-    ok = testStdThreadMissingJoinReportsJoinableHandle() && ok;
-    ok = testDetachedStdThreadFixtureHasNoMissingJoin() && ok;
-    ok = testDeadlockBasicReportsLockOrderCycle() && ok;
-    ok = testRecursiveDeadlockReportsReacquiredLock() && ok;
-    ok = testHelperOrderReportedWhereTaken() && ok;
-    ok = testKeptObjectLockIsNoGate() && ok;
-    ok = testEachRunOfABoundEntryTakesItsOwnOrders() && ok;
-    ok = testHandedEntryRunElsewhereIsBoundToNothing() && ok;
-    ok = testProgramIndexCountsEachUnitOnce() && ok;
-    ok = testConsistentLockOrderHasNoDeadlock() && ok;
-    ok = testOppositeLockOrderOutsideThreadsHasNoDeadlock() && ok;
-    ok = testIndependentLocksHaveNoDeadlock() && ok;
-    ok = testLockOrderSearchLimitIsANoticeNotAFinding() && ok;
-    ok = testCompleteLockOrderSearchGivesNoNotice() && ok;
-    ok = testOwnerAccessToLocalObjectNamesSharedObjectNotGlobal() && ok;
-    ok = testOwnerAccessToGlobalObjectStillNamesGlobal() && ok;
-    ok = testDefaultOptionsEnableEveryAvailableRule() && ok;
-    ok = testAccessCountsDistinguishNotComputedFromZero() && ok;
-    ok = testOptimizationRequestDoesNotChangeFindings() && ok;
-    ok = testFixtureExpectationTable() && ok;
-    ok = testTrackedMissingJoinsExcuseOnlyWhatTheyName() && ok;
-    ok = testEveryConcurrencyFixtureIsCovered() && ok;
+    using Test = bool (*)();
+    constexpr Test kTests[] = {
+        testDataRaceBasicIsReported,
+        testEveryRuleIsDescribedThroughThePublicApi,
+        testDataRaceBasicReportsDirectAliasHighConfidence,
+        testAtomicVsNonAtomicReportsSharedState,
+        testMemberPointerCallsKeepTheirOwnContext,
+        testEntriesOrderedElsewhereStillRaceFirstAgainstSecond,
+        testEntryParameterThreadsKeepTheObjectOfTheirCall,
+        testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds,
+        testMemberPointerResolverRefusesAnAdjustment,
+        testJoinSummariesKeepTheirOffsets,
+        testArgumentEffectsTellWritesFromKeeping,
+        testClassDataRaceReportsGlobalCounter,
+        testSharedObjectByRefReportsGlobalCounter,
+        testMutexProtectedFixtureHasNoDiagnostics,
+        testTwoGlobalFixtureOnlyReportsRacySymbol,
+        testThreadLocalClassHasNoDiagnostics,
+        testMoveSemanticsRaceUsesUserLocations,
+        testCallsiteLockProtectedHelperHasNoRace,
+        testAliasGlobalPointerReportsLowConfidenceRace,
+        testAliasAmbiguousPointerHasNoFalsePositive,
+        testUnprotectedCallsiteHelperReportsRace,
+        testPartialCallsiteLockReportsRace,
+        testNestedCallsiteLockProtectedHelperHasNoRace,
+        testPThreadJoinAllHasNoMissingJoin,
+        testPThreadDetachAllHasNoMissingJoin,
+        testPThreadHandlePointerJoinHasNoMissingJoin,
+        testStdThreadJoinHasNoMissingJoin,
+        testStdThreadMoveJoinHasNoMissingJoin,
+        testMissingJoinBasicReportsOutstandingPThread,
+        testMissingJoinDetachMixReportsOnlyOutstandingThread,
+        testPThreadJoinMixReportsOnlyUnresolvedHandle,
+        testStdThreadMissingJoinReportsJoinableHandle,
+        testDetachedStdThreadFixtureHasNoMissingJoin,
+        testDeadlockBasicReportsLockOrderCycle,
+        testRecursiveDeadlockReportsReacquiredLock,
+        testHelperOrderReportedWhereTaken,
+        testKeptObjectLockIsNoGate,
+        testEachRunOfABoundEntryTakesItsOwnOrders,
+        testHandedEntryRunElsewhereIsBoundToNothing,
+        testProgramIndexCountsEachUnitOnce,
+        testConsistentLockOrderHasNoDeadlock,
+        testOppositeLockOrderOutsideThreadsHasNoDeadlock,
+        testIndependentLocksHaveNoDeadlock,
+        testLockOrderSearchLimitIsANoticeNotAFinding,
+        testCompleteLockOrderSearchGivesNoNotice,
+        testOwnerAccessToLocalObjectNamesSharedObjectNotGlobal,
+        testOwnerAccessToGlobalObjectStillNamesGlobal,
+        testDefaultOptionsEnableEveryAvailableRule,
+        testAccessCountsDistinguishNotComputedFromZero,
+        testOptimizationRequestDoesNotChangeFindings,
+        testTrackedMissingJoinsExcuseOnlyWhatTheyName,
+        testEveryConcurrencyFixtureIsCovered,
+    };
+
+    bool ok = true;
+    std::size_t testsRun = 0;
+    for (std::size_t position = 0; position < std::size(kTests); ++position)
+    {
+        if (!shard->runs(position))
+            continue;
+
+        ok = kTests[position]() && ok;
+        ++testsRun;
+    }
+
+    std::size_t fixturesChecked = 0;
+    ok = testFixtureExpectationTable(*shard, fixturesChecked) && ok;
 
     if (!ok)
         return 1;
 
-    std::cout << "[PASS] concurrency analysis tests\n";
+    std::cout << "[PASS] concurrency analysis tests, shard " << shard->index << " of "
+              << shard->count << ": " << testsRun << " tests, " << fixturesChecked << " fixtures\n";
     return 0;
 }
