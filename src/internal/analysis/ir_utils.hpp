@@ -190,6 +190,13 @@ namespace ctrace::concurrency::internal::analysis
     resolveTrackedRoot(const llvm::Value& value, const llvm::DataLayout* layout,
                        std::uint64_t byteSize,
                        const ProgramDefinedGlobals* programDefined = nullptr);
+
+    /// Strips casts and aliases while leaving indexing steps in place.
+    ///
+    /// `stripPointerCastsAndAliases` also removes a GEP whose indices are all zero, because it
+    /// computes the same address. It does not describe the same thing: the first field of an
+    /// aggregate sits at offset zero, so that GEP is where its type and offset appear.
+    [[nodiscard]] const llvm::Value* stripCastsKeepingIndexing(const llvm::Value* value);
     /// An integer as the enclosing function receives or fixes it: a non-negative constant, or
     /// one of its integer parameters, including through the local variable unoptimized code keeps
     /// it in and a sign or zero extension. Anything the function computes from it is left unknown.

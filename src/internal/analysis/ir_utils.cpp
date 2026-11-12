@@ -388,31 +388,29 @@ namespace ctrace::concurrency::internal::analysis
             if (!walk.designatedSize.has_value())
                 noteDesignatedObject(walk, gep);
         }
+    } // namespace
 
-        /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
-        /// which keeps the region conservatively overlapping every sibling.
-        /// Strips casts and aliases while leaving indexing steps in place.
-        ///
-        /// `stripPointerCastsAndAliases` also removes a GEP whose indices are all zero, because
-        /// it computes the same address. It does not describe the same thing: the first field of
-        /// an aggregate sits at offset zero, so that GEP is where its type and offset appear.
-        const llvm::Value* stripCastsKeepingIndexing(const llvm::Value* value)
+    const llvm::Value* stripCastsKeepingIndexing(const llvm::Value* value)
+    {
+        while (value != nullptr)
         {
-            while (value != nullptr)
-            {
-                if (llvm::isa<llvm::GEPOperator>(value))
-                    return value;
+            if (llvm::isa<llvm::GEPOperator>(value))
+                return value;
 
-                const llvm::Value* stripped = value->stripPointerCastsAndAliases();
-                if (stripped == value)
-                    return value;
+            const llvm::Value* stripped = value->stripPointerCastsAndAliases();
+            if (stripped == value)
+                return value;
 
-                value = stripped;
-            }
-
-            return value;
+            value = stripped;
         }
 
+        return value;
+    }
+
+    namespace
+    {
+        /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
+        /// which keeps the region conservatively overlapping every sibling.
         void accumulateGepOffset(AccessPathWalk& walk, const llvm::GEPOperator& gep)
         {
             if (!walk.hasKnownOffset)
