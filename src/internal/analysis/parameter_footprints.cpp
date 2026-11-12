@@ -3,6 +3,7 @@
 
 #include "concurrency_symbol_classifier.hpp"
 #include "ir_utils.hpp"
+#include "synchronization_effects.hpp"
 
 #include <llvm/IR/DataLayout.h>
 #include <llvm/IR/Function.h>
@@ -53,6 +54,7 @@ namespace ctrace::concurrency::internal::analysis
                 touchWhole(*extent, AccessKind::Read);
                 touchWhole(*extent, AccessKind::Write);
             }
+            footprint.handedOn = true;
             return footprint;
         }
 
@@ -165,6 +167,42 @@ namespace ctrace::concurrency::internal::analysis
                     touchWhole(*extent, AccessKind::Read);
                     touchWhole(*extent, AccessKind::Write);
                 }
+                footprint_.handedOn = true;
+            }
+
+            /// The object goes to a synchronization or thread call other than as a handle it fills
+            /// or a lock it places: a thread started on it, or what the runtime does to a join's
+            /// result there or to a lock whose type, place or extent is unknown, which nothing here
+            /// follows.
+            void handOn()
+            {
+                footprint_.handedOn = true;
+            }
+
+            /// Records a lock the function takes, tries or releases through `pointer`: one whose
+            /// type names a primitive, at a known place, occupies the bytes that type gives; the
+            /// parameter itself handed as a lock is whatever object it points to. Any other lock
+            /// hands the object on, one the pointer reaches past its start among them, which may
+            /// reach past its end too.
+            void touchLock(const llvm::Value& pointer, Reach reach)
+            {
+                const std::optional<SynchronizationPlace> place = placeOfLock(pointer, reach);
+                if (place.has_value() && place->designatesPrimitive &&
+                    place->designated.hasKnownOffset && place->designated.byteSize != 0 &&
+                    place->region.byteOffset == place->designated.byteOffset)
+                    footprint_.locks.ranges.push_back(rangeOf(place->designated, false));
+                else if (place.has_value() && place->isParameterItself)
+                    footprint_.locks.wholeObject = true;
+                else
+                    handOn();
+            }
+
+            /// A function without a body, or one called through a pointer, may keep the address it
+            /// is handed for anything to write through, unless the call says it does not.
+            void handToUnknown(const llvm::CallBase& call, unsigned argumentNumber)
+            {
+                if (!call.doesNotCapture(argumentNumber))
+                    footprint_.handedOn = true;
             }
 
             /// Records an access the function makes itself through `pointer`, of `byteSize`
@@ -225,6 +263,7 @@ namespace ctrace::concurrency::internal::analysis
             void touchThroughCallee(const llvm::Value& pointer, Reach reach,
                                     const ParameterFootprint& callee)
             {
+                touchLocksThroughCallee(pointer, reach, callee.locks);
                 const std::optional<RootBinding> root =
                     reach == Reach::IntoObject ? rootInObject(pointer) : std::nullopt;
                 if (!root.has_value() || !root->region.hasKnownOffset)
@@ -239,10 +278,12 @@ namespace ctrace::concurrency::internal::analysis
                         if (!root.has_value())
                             touchWhole(footprint_.unshown, kind);
                     }
+                    footprint_.handedOn = footprint_.handedOn || callee.handedOn;
                     return;
                 }
 
                 const std::int64_t shift = root->region.byteOffset;
+                footprint_.handedOn = footprint_.handedOn || callee.handedOn;
                 for (const ParameterFootprint::Range& range : callee.all.reads)
                 {
                     addRange(footprint_.all, AccessKind::Read,
@@ -282,10 +323,50 @@ namespace ctrace::concurrency::internal::analysis
                     mergeRanges(extent->reads);
                     mergeRanges(extent->writes);
                 }
+                mergeRanges(footprint_.locks.ranges);
                 return std::move(footprint_);
             }
 
           private:
+            /// Carries the locks a callee takes through the pointer it is handed: its ranges move
+            /// to where the pointer points, and the parameter it takes as a lock is whatever lock
+            /// the pointer designates. A pointer the access path does not place hands the object
+            /// on.
+            void touchLocksThroughCallee(const llvm::Value& pointer, Reach reach,
+                                         const ParameterFootprint::Locks& callee)
+            {
+                if (callee.ranges.empty() && !callee.wholeObject)
+                    return;
+
+                const std::optional<SynchronizationPlace> place = placeOfLock(pointer, reach);
+                if (!place.has_value() || !place->region.hasKnownOffset)
+                {
+                    handOn();
+                    return;
+                }
+                const std::int64_t shift = place->region.byteOffset;
+                for (const ParameterFootprint::Range& range : callee.ranges)
+                    footprint_.locks.ranges.push_back(
+                        {range.begin + shift, range.end + shift, false});
+                if (callee.wholeObject)
+                    touchLock(pointer, reach);
+            }
+
+            /// Where `pointer`, handed to a lock, points into the parameter's object, when the
+            /// access path places it there.
+            std::optional<SynchronizationPlace> placeOfLock(const llvm::Value& pointer,
+                                                            Reach reach) const
+            {
+                if (reach != Reach::IntoObject)
+                    return std::nullopt;
+
+                std::optional<SynchronizationPlace> place =
+                    resolveSynchronizationPlace(pointer, layout_);
+                if (!place.has_value() || place->argumentIndex != parameter_.getArgNo())
+                    return std::nullopt;
+                return place;
+            }
+
             static ParameterFootprint::Range rangeOf(const MemoryRegion& region, bool isAtomic)
             {
                 return {region.byteOffset,
@@ -559,12 +640,17 @@ namespace ctrace::concurrency::internal::analysis
 
                 // Synchronization is understood where it happens, not as data. Starting, joining
                 // or detaching a thread still writes the handle it is given, which is part of the
-                // object when the object holds its thread; no access of the function's own shows
-                // that write.
+                // object when the object holds its thread, and taking, trying or releasing a lock
+                // writes the lock's bytes; no access of the function's own shows either write.
                 if (const CallKind kind = classifier_.classify(*call); kind != CallKind::Unknown)
                 {
                     if (writesThreadHandle(kind) && argumentNumber == 0)
                         builder.touchThreadHandle(value, reach);
+                    else if (plainLockEffect(kind).has_value() &&
+                             argumentNumber == kLockOperandIndex)
+                        builder.touchLock(value, reach);
+                    else
+                        builder.handOn();
                     continue;
                 }
 
@@ -574,12 +660,16 @@ namespace ctrace::concurrency::internal::analysis
                 {
                     builder.touchThroughCallee(value, reach, of(*callee, argumentNumber));
                 }
-                else if (!call->doesNotAccessMemory(argumentNumber))
+                else
                 {
-                    builder.touchThroughDeclaration(value, reach,
-                                                    call->onlyReadsMemory(argumentNumber)
-                                                        ? AccessKind::Read
-                                                        : AccessKind::Write);
+                    if (!call->doesNotAccessMemory(argumentNumber))
+                    {
+                        builder.touchThroughDeclaration(value, reach,
+                                                        call->onlyReadsMemory(argumentNumber)
+                                                            ? AccessKind::Read
+                                                            : AccessKind::Write);
+                    }
+                    builder.handToUnknown(*call, argumentNumber);
                 }
 
                 // A pointer returned by a call handed the object may lead anywhere it does.

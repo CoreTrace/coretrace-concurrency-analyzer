@@ -21,6 +21,7 @@ namespace llvm
     class Loop;
     class Module;
     class StoreInst;
+    class Use;
     class Value;
 } // namespace llvm
 
@@ -28,6 +29,7 @@ namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
     class LlvmFunctionAnalysisProvider;
+    class ParameterFootprints;
 
     /// Where a join has certainly waited for its thread: after a `std::thread::join`, which
     /// throws otherwise, and after a `pthread_join` whose result is unused; on the branch taken
@@ -120,6 +122,32 @@ namespace ctrace::concurrency::internal::analysis
     [[nodiscard]] JoiningHelpers
     collectJoiningHelpers(const llvm::Module& module, const ConcurrencySymbolClassifier& classifier,
                           JoiningHelpers known = {});
+
+    /// The entry `creation` names itself: none when it takes it from anywhere else, which only
+    /// the calls of the function making it may settle.
+    [[nodiscard]] const llvm::Function* entryNamedBy(const llvm::CallBase& creation);
+
+    /// Whether the thread `creation` starts on `entry` may write the bytes of `handle`, which the
+    /// argument `handed` gives it a pointer into the storage of: itself, through the functions it
+    /// calls, or through anything it hands that storage on to. Only a pthread_create handing the
+    /// storage as its thread's argument, to an entry the unit defines, with the handle and the
+    /// pointer at constant places from one object, local or a parameter's, can be found not to:
+    /// any other creation, an unknown entry, an unknown effect, an escape, or a thread it starts
+    /// on the storage may write it.
+    [[nodiscard]] bool threadMayReplaceHandle(const llvm::CallBase& creation, CallKind kind,
+                                              const llvm::Function* entry, const llvm::Use& handed,
+                                              const llvm::Value& handle,
+                                              ParameterFootprints& footprints);
+
+    /// Whether `creation` hands the thread it starts on `entry` a pointer that may point into the
+    /// storage of the handle it fills, where `threadMayReplaceHandle` says that thread may write
+    /// the handle. A handle whose place is unknown counts as such. A pointer may point into the
+    /// storage when it is formed from it, at a constant place or among the objects a pointer whose
+    /// place is unknown may come from, or, for a local whose address has escaped, when it is read
+    /// from memory.
+    [[nodiscard]] bool creationMayReplaceOwnHandle(const llvm::CallBase& creation, CallKind kind,
+                                                   const llvm::Function* entry,
+                                                   ParameterFootprints& footprints);
 
     /// The `std::thread` constructors this module defines whose body starts no thread but the
     /// one they build: every start they make, themselves or through the functions they call, is
