@@ -371,25 +371,11 @@ namespace
                           "the race is main against detachedReader alone, never joinedReader");
     }
 
-    /// In each fixture an instance of `first` runs beside one of `second`, which an order the two
-    /// entries have elsewhere must not hide: the race between them is checked, not only a race on
-    /// the symbol, which `first` racing with itself would also give (#224).
-    bool testEntriesOrderedElsewhereStillRaceFirstAgainstSecond()
+    /// Whether each data-race fixture named reports a race between `first` and `second`, in either
+    /// order: the pair is checked, not only a race on the symbol, which `first` racing with itself
+    /// would also give.
+    bool fixturesRaceFirstAgainstSecond(const std::vector<std::string_view>& fixtures)
     {
-        const std::vector<std::string_view> fixtures = {
-            "data_race_entry_started_again_beside_other_race.c",
-            "data_race_entry_started_by_other_entry_race.c",
-            "data_race_entries_ordered_by_helpers_then_overlapping_race.c",
-            "data_race_entry_started_again_by_helper_beside_other_race.c",
-            "data_race_entries_ordered_by_worker_started_twice_race.c",
-            "data_race_entries_ordered_at_each_level_of_recursion_race.c",
-            "data_race_entry_started_again_through_select_race.c",
-            "data_race_entry_started_again_through_entry_array_race.c",
-            "data_race_entry_started_by_recursive_thread_entry_race.c",
-            "data_race_entries_ordered_by_root_called_indirectly_race.c",
-            "data_race_entries_ordered_by_helper_also_called_indirectly_race.c",
-            "cpp_pthread_thread_left_by_exception_caught_in_helper_race.cpp",
-        };
         bool passed = true;
         for (const std::string_view fixture : fixtures)
         {
@@ -417,6 +403,47 @@ namespace
                      passed;
         }
         return passed;
+    }
+
+    /// In each fixture an instance of `first` runs beside one of `second`, which an order the two
+    /// entries have elsewhere must not hide (#224).
+    bool testEntriesOrderedElsewhereStillRaceFirstAgainstSecond()
+    {
+        return fixturesRaceFirstAgainstSecond({
+            "data_race_entry_started_again_beside_other_race.c",
+            "data_race_entry_started_by_other_entry_race.c",
+            "data_race_entries_ordered_by_helpers_then_overlapping_race.c",
+            "data_race_entry_started_again_by_helper_beside_other_race.c",
+            "data_race_entries_ordered_by_worker_started_twice_race.c",
+            "data_race_entries_ordered_at_each_level_of_recursion_race.c",
+            "data_race_entry_started_again_through_select_race.c",
+            "data_race_entry_started_again_through_entry_array_race.c",
+            "data_race_entry_started_by_recursive_thread_entry_race.c",
+            "data_race_entries_ordered_by_root_called_indirectly_race.c",
+            "data_race_entries_ordered_by_helper_also_called_indirectly_race.c",
+            "cpp_pthread_thread_left_by_exception_caught_in_helper_race.cpp",
+        });
+    }
+
+    /// In each fixture `first` is handed the object holding its own handle, and something may
+    /// replace that handle before finish joins it: the join may wait for another thread, so it
+    /// does not order `first` before `second` (#201).
+    bool testThreadHandedItsStorageStillRacesFirstAgainstSecond()
+    {
+        return fixturesRaceFirstAgainstSecond({
+            "data_race_thread_rewriting_handle_in_its_storage_race.c",
+            "data_race_child_rewriting_handle_in_parent_storage_race.c",
+            "data_race_grandchild_rewriting_handle_in_storage_race.c",
+            "data_race_child_started_through_callee_rewriting_handle_race.c",
+            "data_race_thread_rewriting_handle_through_callee_race.c",
+            "data_race_thread_handing_storage_to_unknown_function_race.c",
+            "data_race_thread_letting_its_storage_escape_race.c",
+            "data_race_thread_handed_pointer_onto_handle_race.c",
+            "data_race_thread_handed_pointer_chosen_at_run_time_race.c",
+            "data_race_child_of_handed_thread_on_unresolved_entry_race.c",
+            "data_race_join_result_written_into_handle_in_storage_race.c",
+            "data_race_thread_handing_storage_to_declared_reader_race.c",
+        });
     }
 
     /// The places a data-race fixture's races join, one `function:line ~ function:line` per pair,
@@ -602,6 +629,68 @@ namespace
                               {"reader:35 ~ reader:35", "start:41 ~ worker:28"}, {}) &&
                  passed;
         return passed;
+    }
+
+    bool hasPlace(const std::vector<std::string>& places, std::string_view place)
+    {
+        return std::find(places.begin(), places.end(), place) != places.end();
+    }
+
+    /// Whether a pair among `places` joins a place in function `one` to one in function `other`.
+    bool placesJoin(const std::vector<std::string>& places, std::string_view one,
+                    std::string_view other)
+    {
+        for (const std::string_view place : places)
+        {
+            const std::string_view first = place.substr(0, place.find(':'));
+            const std::string_view second = place.substr(place.find(" ~ ") + 3);
+            const std::string_view secondFunction = second.substr(0, second.find(':'));
+            if ((first == one && secondFunction == other) ||
+                (first == other && secondFunction == one))
+                return true;
+        }
+        return false;
+    }
+
+    /// A helper joining a thread before starting another on its handle does not end the one it
+    /// leaves running: main races with it, and never with the thread the helper joined, even
+    /// when the new one takes its entry from a parameter. A helper handed an entry that may
+    /// rewrite the handle keeps that thread running past its join, whatever entry another call
+    /// hands it, and so does one other units may call (#201, #235).
+    bool testRestartedThreadsRaceWithMainAndNotWithTheJoinedOne()
+    {
+        const std::optional<std::vector<std::string>> restarted =
+            racingPlacesIn("data_race_thread_restarted_by_helper_read_before_second_join_race.c");
+        const std::optional<std::vector<std::string>> rewriting =
+            racingPlacesIn("data_race_thread_restarted_on_entry_parameter_rewriting_handle_race.c");
+        const std::optional<std::vector<std::string>> other =
+            racingPlacesIn("data_race_thread_restarted_on_other_entry_parameter_race.c");
+        const std::optional<std::vector<std::string>> external = racingPlacesIn(
+            "data_race_thread_restarted_by_external_helper_on_rewriting_entry_race.c");
+        const std::optional<std::vector<std::string>> safeAndRewriting =
+            racingPlacesIn("data_race_helper_handed_safe_and_rewriting_entries_race.c");
+        if (!restarted.has_value() || !rewriting.has_value() || !other.has_value() ||
+            !external.has_value() || !safeAndRewriting.has_value())
+            return false;
+
+        return assertTrue(hasPlace(*restarted, "main:34 ~ run:19"),
+                          "main's read races with the thread restart leaves running") &&
+               assertTrue(hasPlace(*rewriting, "main:51 ~ rewriting:34") &&
+                              hasPlace(*rewriting, "main:52 ~ rewriting:35"),
+                          "main races with rewriting on the handle and on value") &&
+               assertTrue(!placesJoin(*rewriting, "main", "run"),
+                          "main never races with run, which restart joined before rewriting") &&
+               assertTrue(hasPlace(*other, "main:41 ~ other:26"),
+                          "main's read races with the entry restart was handed") &&
+               assertTrue(!placesJoin(*other, "main", "run"),
+                          "main never races with run, which restart joined before other") &&
+               assertTrue(hasPlace(*external, "main:53 ~ rewriting:34") &&
+                              hasPlace(*external, "main:54 ~ rewriting:35") &&
+                              !placesJoin(*external, "main", "run"),
+                          "a helper other units may call keeps rewriting running past its join") &&
+               assertTrue(
+                   hasPlace(*safeAndRewriting, "main:52 ~ rewriting:35"),
+                   "main's read races with rewriting despite the safe entry of another call");
     }
 
     /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
@@ -4721,6 +4810,147 @@ namespace
              .intent = "a call whose exception a helper catches does not end its thread",
              .dataRace = 1,
              .racingSymbol = "_ZL6shared"},
+            // --- a thread handed the storage holding its own handle (#201) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_its_storage_writing_value_joined_no_fp.c",
+             .intent = "a thread handed its handle's storage and writing elsewhere ends at its join"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_pointer_away_from_handle_joined_no_fp.c",
+             .intent = "so does one handed a pointer into that storage away from the handle"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_rewriting_handle_in_its_storage_race.c",
+             .intent = "a thread replacing its own handle is not ended by a join of that handle",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_child_rewriting_handle_in_parent_storage_race.c",
+             .intent = "nor is one whose child replaces it, though its own accesses show nothing",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_grandchild_rewriting_handle_in_storage_race.c",
+             .intent = "nor one whose grandchild replaces it",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_child_started_through_callee_rewriting_handle_race.c",
+             .intent = "nor one whose child, started by a function it calls, replaces it",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_rewriting_handle_through_callee_race.c",
+             .intent = "nor one replacing it through a function it calls; main's join of spare "
+                       "against the call's whole effect is not pinned",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared",
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handing_storage_to_unknown_function_race.c",
+             .intent = "nor one handing the storage to a function the unit does not define",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_letting_its_storage_escape_race.c",
+             .intent = "nor one letting the storage's address escape",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_pointer_onto_handle_race.c",
+             .intent = "nor one handed a pointer into the storage at the handle, writing there",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_pointer_chosen_at_run_time_race.c",
+             .intent = "nor one handed a pointer whose place in the storage a condition picks",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_child_of_handed_thread_on_unresolved_entry_race.c",
+             .intent = "nor one handing it on to a child on an entry read from a variable",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_result_written_into_handle_in_storage_race.c",
+             .intent = "nor one making a join write its result over the handle",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handing_storage_to_declared_reader_race.c",
+             .intent = "nor one handing the storage to a declared function that only reads it",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_handed_on_to_detached_child.c",
+             .intent = "a thread handing its handle's storage on may leave it in use past its join",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_by_helper_read_before_second_join_race.c",
+             .intent = "a helper's join before the thread it leaves running does not end it; the "
+                       "self-race #201 reports is not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_on_entry_parameter_rewriting_handle_race.c",
+             .intent = "a restarted thread on a handed entry rewriting its handle races with main; "
+                       "its race with run #233 tracks is not pinned",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_on_other_entry_parameter_race.c",
+             .intent = "a restarted thread on a handed entry races with main, not the joined one; "
+                       "its race with run #233 tracks is not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_handed_safe_and_rewriting_entries_race.c",
+             .intent = "a helper handed an entry rewriting its handle leaves it running past its "
+                       "join, whatever another call hands it",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_restarted_thread_handed_pointer_chosen_at_run_time_race.c",
+             .intent = "a thread handed a pointer a condition may point at its handle's storage is "
+                       "not ended by a join of that handle",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_its_storage_read_back_from_memory_race.c",
+             .intent = "nor one handed the storage's address read back from memory",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_writing_its_storage_at_unknown_place_race.c",
+             .intent = "nor one writing the storage at a place a variable picks",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_by_external_helper_on_rewriting_entry_race.c",
+             .intent = "a helper other units may call, handed an entry rewriting its handle, "
+                       "leaves it running; its race with run #233 tracks is not pinned",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_external_helper_joined_no_fp.c",
+             .intent = "a helper other units may call ends its thread at a join when it hands the "
+                       "thread nothing of its handle's storage"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_pointer_read_from_memory_joined_no_fp.c",
+             .intent = "a pointer read from memory leads nowhere near a local the address of which "
+                       "goes nowhere, so the join ends the thread"},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
@@ -6556,6 +6786,8 @@ int main(int argc, char** argv)
         testEntriesOrderedElsewhereStillRaceFirstAgainstSecond,
         testEntryParameterThreadsKeepTheObjectOfTheirCall,
         testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds,
+        testRestartedThreadsRaceWithMainAndNotWithTheJoinedOne,
+        testThreadHandedItsStorageStillRacesFirstAgainstSecond,
         testMemberPointerResolverRefusesAnAdjustment,
         testJoinSummariesKeepTheirOffsets,
         testArgumentEffectsTellWritesFromKeeping,
