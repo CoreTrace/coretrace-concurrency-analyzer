@@ -14,42 +14,38 @@ namespace ctrace::concurrency::internal::analysis
 {
     namespace
     {
-        /// Position of the lock operand for a plain (non-RAII) lock operation. POSIX primitives and
-        /// C++ member functions both carry it first, as the object pointer or the `this` pointer.
-        constexpr unsigned kLockOperandIndex = 0;
-
         /// Guard constructors take `this` first and the guarded mutexes afterwards.
         constexpr unsigned kFirstGuardedLockIndex = 1;
-
-        std::optional<LockEffectKind> plainLockEffect(CallKind kind)
-        {
-            switch (kind)
-            {
-            case CallKind::PThreadMutexLock:
-            case CallKind::PThreadRwLockAcquire:
-            case CallKind::PThreadSpinLock:
-            case CallKind::StdMutexLock:
-                return LockEffectKind::Acquire;
-            case CallKind::PThreadMutexTryLock:
-            case CallKind::PThreadRwLockTryAcquire:
-            case CallKind::PThreadSpinTryLock:
-            case CallKind::StdMutexTryLock:
-            // The initializing caller holds the guard until the release, but a static's
-            // initialization is not a lock the program orders against others, and the language
-            // makes a recursive entry undefined rather than a deadlock to report.
-            case CallKind::StaticInitGuardAcquire:
-                return LockEffectKind::TryAcquire;
-            case CallKind::PThreadMutexUnlock:
-            case CallKind::PThreadRwLockUnlock:
-            case CallKind::PThreadSpinUnlock:
-            case CallKind::StdMutexUnlock:
-            case CallKind::StaticInitGuardRelease:
-                return LockEffectKind::Release;
-            default:
-                return std::nullopt;
-            }
-        }
     } // namespace
+
+    std::optional<LockEffectKind> plainLockEffect(CallKind kind)
+    {
+        switch (kind)
+        {
+        case CallKind::PThreadMutexLock:
+        case CallKind::PThreadRwLockAcquire:
+        case CallKind::PThreadSpinLock:
+        case CallKind::StdMutexLock:
+            return LockEffectKind::Acquire;
+        case CallKind::PThreadMutexTryLock:
+        case CallKind::PThreadRwLockTryAcquire:
+        case CallKind::PThreadSpinTryLock:
+        case CallKind::StdMutexTryLock:
+        // The initializing caller holds the guard until the release, but a static's
+        // initialization is not a lock the program orders against others, and the language
+        // makes a recursive entry undefined rather than a deadlock to report.
+        case CallKind::StaticInitGuardAcquire:
+            return LockEffectKind::TryAcquire;
+        case CallKind::PThreadMutexUnlock:
+        case CallKind::PThreadRwLockUnlock:
+        case CallKind::PThreadSpinUnlock:
+        case CallKind::StdMutexUnlock:
+        case CallKind::StaticInitGuardRelease:
+            return LockEffectKind::Release;
+        default:
+            return std::nullopt;
+        }
+    }
 
     SynchronizationEffectResolver::SynchronizationEffectResolver(
         const ConcurrencySymbolClassifier& classifier, const llvm::DataLayout& layout,
