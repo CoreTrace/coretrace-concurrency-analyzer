@@ -5054,6 +5054,16 @@ namespace
                      "data_race_thread_handed_pointer_read_from_memory_joined_no_fp.c",
              .intent = "a pointer read from memory leads nowhere near a local the address of which "
                        "goes nowhere, so the join ends the thread"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_storage_holding_handle_first_joined_no_fp.c",
+             .intent = "a handle declared first has the first field's bytes, which a write of the "
+                       "value leaves alone"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_replacing_handle_declared_first_in_its_storage_race.c",
+             .intent = "a thread replacing its handle declared first is not ended by its join",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
             // --- ... and taking a lock in that storage (#201) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_locking_first_field_of_its_storage_no_fp.c",
