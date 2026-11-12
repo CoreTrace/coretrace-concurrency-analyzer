@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
+#include "internal/analysis/concurrency_symbol_classifier.hpp"
 #include "internal/analysis/cross_tu/program_symbol_index.hpp"
 #include "internal/analysis/facts.hpp"
 #include "internal/analysis/held_member_analysis.hpp"
+#include "internal/analysis/parameter_footprints.hpp"
 #include "internal/analysis/thread_completion_analysis.hpp"
 #include "internal/diagnostics/diagnostic_catalog.hpp"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
@@ -792,6 +796,105 @@ namespace
              ok;
         ok = effectIs("llvm.memcpy.p0.p0.i64", 1, false, false,
                       "a copy neither writes nor keeps its source") &&
+             ok;
+        return ok;
+    }
+
+    /// Whether a thread started on an object holding its own handle may replace that handle when
+    /// it takes a lock there (#201). The proof reads the lock's bytes from the lock's type, keeps
+    /// them out of the accesses that report races, and refuses where the lock's type, place or
+    /// extent is unknown, where the lock overlaps the handle, and where a call the classifier
+    /// does not recognize is handed the lock. Several of these programs are invalid, so no race
+    /// could show the refusal: the proof is asked directly.
+    bool testLocksInHandleStorageLeaveTheHandleOnlyWhenTyped()
+    {
+        namespace analysis = ctrace::concurrency::internal::analysis;
+        llvm::LLVMContext context;
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/lock_footprints.c").string();
+        request.format = IRFormat::BC;
+        CompileResult compiled = InMemoryIRCompiler().compile(request, context);
+        if (!assertTrue(compiled.module != nullptr, "the lock footprints fixture compiles"))
+            return false;
+
+        const llvm::Module& module = *compiled.module;
+        const analysis::ConcurrencySymbolClassifier classifier;
+        analysis::ParameterFootprints footprints(classifier, module.getDataLayout());
+        const auto mayReplace = [&](llvm::StringRef start) -> std::optional<bool>
+        {
+            const llvm::Function* function = module.getFunction(start);
+            if (function == nullptr)
+                return std::nullopt;
+            for (const llvm::Instruction& instruction : llvm::instructions(*function))
+            {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                if (call != nullptr &&
+                    classifier.classify(*call) == analysis::CallKind::PThreadCreate)
+                    return analysis::creationMayReplaceOwnHandle(
+                        *call, analysis::CallKind::PThreadCreate, analysis::entryNamedBy(*call),
+                        footprints);
+            }
+            return std::nullopt;
+        };
+
+        struct Case
+        {
+            llvm::StringRef start;
+            bool refused;
+            std::string_view message;
+        };
+        constexpr Case kCases[] = {
+            {"first_start", false, "a typed lock declared first leaves the handle"},
+            {"valued_start", false, "a typed lock past the handle, beside data, leaves it"},
+            {"handed_start", false, "a helper locking the typed lock it is handed leaves it"},
+            {"overlapping_start", true, "a lock sharing the handle's bytes is refused"},
+            {"overlapping_helper_start", true, "so is one a helper handed it takes"},
+            {"overlapping_object_helper_start", true, "so is one a helper handed the object takes"},
+            {"beyond_start", true, "a lock a helper reaches past the one it is handed is refused"},
+            {"inside_start", true, "a lock reached inside a typed one, past its start, is refused"},
+            {"untyped_start", true, "a lock in bytes whose type names no lock is refused"},
+            {"whole_start", true, "the object locked as a whole, untyped, is refused"},
+            {"loaded_start", true, "a lock read out of the object is refused"},
+            {"indexed_start", true, "a lock at a place read at run time is refused"},
+            {"indexed_helper_start", true, "so is one handed to a helper"},
+            {"guards_start", true, "so is a guard handed to a helper locking inside it"},
+            {"spinning_start", true, "a spinlock, whose type names no lock, is refused"},
+            {"unrecognized_start", true, "an unrecognized call handed the lock is refused"},
+        };
+        bool ok = true;
+        for (const Case& expected : kCases)
+            ok = assertTrue(mayReplace(expected.start) == std::optional<bool>(expected.refused),
+                            std::string(expected.message)) &&
+                 ok;
+
+        // The lock's bytes are synchronization: no access the data-race rule reads shows them,
+        // and a write of data beside them keeps its own place.
+        const llvm::Function* first = module.getFunction("first_entry");
+        const llvm::Function* valued = module.getFunction("valued_entry");
+        if (!assertTrue(first != nullptr && valued != nullptr, "the lock entries are found"))
+            return false;
+        const analysis::ParameterFootprint locked = footprints.of(*first, 0);
+        ok = assertTrue(!locked.all.readsAnything() && !locked.all.writesAnything() &&
+                            !locked.unshown.readsAnything() && !locked.unshown.writesAnything() &&
+                            !locked.handedOn,
+                        "taking a typed lock adds no access and hands nothing on") &&
+             ok;
+
+        llvm::StructType* valuedType = llvm::StructType::getTypeByName(context, "struct.Valued");
+        if (!assertTrue(valuedType != nullptr, "the object holding a value is typed"))
+            return false;
+        const llvm::DataLayout& layout = module.getDataLayout();
+        const auto valueBegin =
+            static_cast<std::int64_t>(layout.getStructLayout(valuedType)->getElementOffset(2));
+        const auto valueSize = static_cast<std::int64_t>(
+            layout.getTypeStoreSize(valuedType->getElementType(2)).getFixedValue());
+        const analysis::ParameterFootprint written = footprints.of(*valued, 0);
+        ok = assertTrue(written.all.writes.size() == 1 && !written.all.writesWholeObject &&
+                            written.all.writes.front().begin == valueBegin &&
+                            written.all.writes.front().end == valueBegin + valueSize &&
+                            !written.all.readsAnything() && !written.unshown.writesAnything() &&
+                            !written.handedOn,
+                        "a value written under the lock is the only write, at its own place") &&
              ok;
         return ok;
     }
@@ -4951,6 +5054,66 @@ namespace
                      "data_race_thread_handed_pointer_read_from_memory_joined_no_fp.c",
              .intent = "a pointer read from memory leads nowhere near a local the address of which "
                        "goes nowhere, so the join ends the thread"},
+            // --- ... and taking a lock in that storage (#201) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_first_field_of_its_storage_no_fp.c",
+             .intent = "a typed lock declared first in its handle's storage leaves the handle"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_field_after_its_handle_no_fp.c",
+             .intent = "so does one past the handle, at a nonzero offset"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_trylocking_its_storage_no_fp.c",
+             .intent = "so does a trylock"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_rwlocking_its_storage_no_fp.c",
+             .intent = "so does a read-write lock, taken for writing and for reading"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_its_storage_through_helper_no_fp.c",
+             .intent = "so does a lock helpers take in the whole object they are handed"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_its_storage_through_lock_helper_no_fp.c",
+             .intent = "so does the typed lock handed to helpers locking what they are given"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_nested_guard_through_helper_no_fp.c",
+             .intent = "a helper's lock in a guard nested past the handle lies where the guard does"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_threads_locking_their_storage_through_helper_no_fp.c",
+             .intent = "two threads taking the lock of the storage of both handles through a helper "
+                       "race on neither the lock nor what it guards"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_local_storage_joined_by_helper_no_fp.c",
+             .intent = "a typed lock in a local storage joined through a helper leaves the handle"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_its_storage_racing_on_value_race.c",
+             .intent = "data written under the lock still races with an unlocked read",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_in_its_storage_and_replacing_handle_race.c",
+             .intent = "a thread taking a lock in its storage and replacing its handle there is not "
+                       "ended by a join of that handle",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handing_its_lock_to_unknown_function_race.c",
+             .intent = "nor is one handing its lock's address to code the unit does not define",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_thread_waiting_with_predicate_replacing_handle_race.cpp",
+             .intent = "nor one whose wait runs a predicate, no lock operation, replacing the handle",
+             .dataRace = 3,
+             .racingSymbol = "_ZL6shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_thread_locking_std_mutex_in_its_storage_no_fp.cpp",
+             .intent = "a std::mutex beside a pthread handle leaves the handle"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_thread_trying_shared_mutex_in_its_storage_no_fp.cpp",
+             .intent = "so does a std::shared_mutex, tried and taken shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_locking_std_mutex_beside_its_std_thread_no_fp.cpp",
+             .intent = "a std::mutex beside the std::thread joined through it leaves the thread"},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
@@ -6791,6 +6954,7 @@ int main(int argc, char** argv)
         testMemberPointerResolverRefusesAnAdjustment,
         testJoinSummariesKeepTheirOffsets,
         testArgumentEffectsTellWritesFromKeeping,
+        testLocksInHandleStorageLeaveTheHandleOnlyWhenTyped,
         testClassDataRaceReportsGlobalCounter,
         testSharedObjectByRefReportsGlobalCounter,
         testMutexProtectedFixtureHasNoDiagnostics,
