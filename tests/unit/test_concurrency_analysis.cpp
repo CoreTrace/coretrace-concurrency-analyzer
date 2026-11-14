@@ -5096,6 +5096,13 @@ namespace
              .dataRace = 2,
              .threadArgumentEscape = 1,
              .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joining_child_held_in_its_storage_no_fp.c",
+             .intent = "a handle read out of the storage and joined by value names a thread, not "
+                       "the storage"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_detaching_child_held_in_its_storage_no_fp.c",
+             .intent = "nor does one detached by value"},
             // --- ... and taking a lock in that storage (#201) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_locking_first_field_of_its_storage_no_fp.c",
