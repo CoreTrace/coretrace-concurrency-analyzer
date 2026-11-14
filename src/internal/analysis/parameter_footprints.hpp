@@ -63,7 +63,8 @@ namespace ctrace::concurrency::internal::analysis
         /// Whether the function hands the object on to something that may write it beyond its own
         /// accesses, which `all` leaves out since synchronization is understood where it happens:
         /// a thread it starts on it, a synchronization or thread call other than as a thread handle
-        /// it fills or a lock `locks` places, a function that may keep its address, or an escape.
+        /// it fills, a lock `locks` places or the attributes it starts a thread with, a function
+        /// that may keep its address, or an escape.
         bool handedOn = false;
     };
 
