@@ -447,6 +447,8 @@ namespace
             "data_race_child_of_handed_thread_on_unresolved_entry_race.c",
             "data_race_join_result_written_into_handle_in_storage_race.c",
             "data_race_thread_handing_storage_to_declared_reader_race.c",
+            "data_race_thread_handed_storage_holding_its_attributes_replacing_handle_race.c",
+            "data_race_child_started_with_attributes_in_parent_storage_rewriting_handle_race.c",
         });
     }
 
@@ -5061,6 +5063,36 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_replacing_handle_declared_first_in_its_storage_race.c",
              .intent = "a thread replacing its handle declared first is not ended by its join",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_with_attributes_in_its_storage_no_fp.c",
+             .intent = "the attributes a thread is started with, stored beside its handle, hand "
+                       "it nothing: its join ends it"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_with_attributes_in_its_local_storage_no_fp.c",
+             .intent = "nor do they in a local object"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_storage_holding_its_attributes_writing_value_no_fp.c",
+             .intent = "a thread also handed that storage, writing only its value, is still ended "
+                       "by its join"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_storage_holding_its_attributes_replacing_handle_race.c",
+             .intent = "one replacing its handle there is not, whatever attributes it is started "
+                       "with",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_starting_child_with_attributes_in_its_storage_no_fp.c",
+             .intent = "a child started with the attributes of its parent's storage is handed "
+                       "nothing of it"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_child_started_with_attributes_in_parent_storage_rewriting_handle_"
+                     "race.c",
+             .intent = "a child also handed that storage, replacing its parent's handle, keeps "
+                       "the parent running past its join",
              .dataRace = 2,
              .threadArgumentEscape = 1,
              .racingSymbol = "shared"},
