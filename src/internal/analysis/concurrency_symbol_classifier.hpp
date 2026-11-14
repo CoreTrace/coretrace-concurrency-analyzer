@@ -73,6 +73,15 @@ namespace ctrace::concurrency::internal::analysis
         PThreadOnce,
     };
 
+    /// Whether operand `index` of a `kind` call holds the attributes a `pthread_create` starts its
+    /// thread with. The call only reads them: it neither writes them nor keeps their address, and
+    /// it hands the thread nothing of them.
+    [[nodiscard]] constexpr bool isThreadAttributes(CallKind kind, unsigned index)
+    {
+        constexpr unsigned kThreadAttributesOperandIndex = 1;
+        return kind == CallKind::PThreadCreate && index == kThreadAttributesOperandIndex;
+    }
+
     class ConcurrencySymbolClassifier
     {
       public:

@@ -129,11 +129,12 @@ namespace ctrace::concurrency::internal::analysis
 
     /// Whether the thread `creation` starts on `entry` may write the bytes of `handle`, which the
     /// argument `handed` gives it a pointer into the storage of: itself, through the functions it
-    /// calls, or through anything it hands that storage on to. Only a pthread_create handing the
-    /// storage as its thread's argument, to an entry the unit defines, with the handle and the
-    /// pointer at constant places from one object, local or a parameter's, can be found not to:
-    /// any other creation, an unknown entry, an unknown effect, an escape, or a thread it starts
-    /// on the storage may write it.
+    /// calls, or through anything it hands that storage on to. The attributes a pthread_create is
+    /// handed give its thread nothing, as the call only reads them. Otherwise, only a
+    /// pthread_create handing the storage as its thread's argument, to an entry the unit defines,
+    /// with the handle and the pointer at constant places from one object, local or a
+    /// parameter's, can be found not to: any other creation, an unknown entry, an unknown effect,
+    /// an escape, or a thread it starts on the storage may write it.
     [[nodiscard]] bool threadMayReplaceHandle(const llvm::CallBase& creation, CallKind kind,
                                               const llvm::Function* entry, const llvm::Use& handed,
                                               const llvm::Value& handle,

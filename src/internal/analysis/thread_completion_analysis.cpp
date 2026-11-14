@@ -701,9 +701,9 @@ namespace ctrace::concurrency::internal::analysis
                             kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor;
                         const bool stores = call == &writer || starts || buildsEmptyThread(*call) ||
                                             (fills != nullptr && fills->contains(call));
-                        // A creation handed the local as anything but the handle it fills gives
-                        // the thread it starts the local's address, through which it may replace
-                        // the handle before the join reads it.
+                        // A creation handed the local as anything but the handle it fills or the
+                        // attributes it reads gives the thread it starts the local's address,
+                        // through which it may replace the handle before the join reads it.
                         if (starts &&
                             (!call->isArgOperand(&use) || call->getArgOperandNo(&use) != 0) &&
                             threadMayReplaceHandle(*call, kind, entryNamedBy(*call), use,
@@ -3865,8 +3865,12 @@ namespace ctrace::concurrency::internal::analysis
                                 const llvm::Function* entry, const llvm::Use& handed,
                                 const llvm::Value& handle, ParameterFootprints& footprints)
     {
-        if (kind != CallKind::PThreadCreate || !creation.isArgOperand(&handed) ||
-            creation.getArgOperandNo(&handed) != 3)
+        if (!creation.isArgOperand(&handed))
+            return true;
+        const unsigned operand = creation.getArgOperandNo(&handed);
+        if (isThreadAttributes(kind, operand))
+            return false;
+        if (kind != CallKind::PThreadCreate || operand != 3)
             return true;
         if (entry == nullptr || entry->isDeclaration())
             return true;
