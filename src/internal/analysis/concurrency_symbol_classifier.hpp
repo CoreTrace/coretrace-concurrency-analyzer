@@ -82,6 +82,17 @@ namespace ctrace::concurrency::internal::analysis
         return kind == CallKind::PThreadCreate && index == kThreadAttributesOperandIndex;
     }
 
+    /// Whether operand `index` of a `kind` call is a thread handle passed by value: the thread a
+    /// `pthread_join` waits for or a `pthread_detach` releases. The value names a thread to the
+    /// runtime and designates no memory of the program's, even where the C library makes the
+    /// handle a pointer.
+    [[nodiscard]] constexpr bool isThreadHandleValue(CallKind kind, unsigned index)
+    {
+        constexpr unsigned kThreadHandleOperandIndex = 0;
+        return (kind == CallKind::PThreadJoin || kind == CallKind::PThreadDetach) &&
+               index == kThreadHandleOperandIndex;
+    }
+
     class ConcurrencySymbolClassifier
     {
       public:

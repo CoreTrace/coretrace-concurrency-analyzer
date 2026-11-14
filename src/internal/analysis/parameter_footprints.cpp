@@ -170,10 +170,10 @@ namespace ctrace::concurrency::internal::analysis
                 footprint_.handedOn = true;
             }
 
-            /// The object goes to a synchronization or thread call other than as a handle it fills,
-            /// a lock it places or the attributes it starts a thread with: a thread started on it,
-            /// or what the runtime does to a join's result there or to a lock whose type, place or
-            /// extent is unknown, which nothing here follows.
+            /// The object goes to a synchronization or thread call other than as a handle it fills
+            /// or passes by value, a lock it places or the attributes it starts a thread with: a
+            /// thread started on it, or what the runtime does to a join's result there or to a
+            /// lock whose type, place or extent is unknown, which nothing here follows.
             void handOn()
             {
                 footprint_.handedOn = true;
@@ -642,7 +642,8 @@ namespace ctrace::concurrency::internal::analysis
                 // or detaching a thread still writes the handle it is given, which is part of the
                 // object when the object holds its thread, and taking, trying or releasing a lock
                 // writes the lock's bytes; no access of the function's own shows either write. The
-                // attributes a thread is started with are only read, and reach no thread.
+                // attributes a thread is started with are only read, and reach no thread; a handle
+                // joined or detached by value names a thread, and nothing of the object.
                 if (const CallKind kind = classifier_.classify(*call); kind != CallKind::Unknown)
                 {
                     if (writesThreadHandle(kind) && argumentNumber == 0)
@@ -650,7 +651,8 @@ namespace ctrace::concurrency::internal::analysis
                     else if (plainLockEffect(kind).has_value() &&
                              argumentNumber == kLockOperandIndex)
                         builder.touchLock(value, reach);
-                    else if (!isThreadAttributes(kind, argumentNumber))
+                    else if (!isThreadAttributes(kind, argumentNumber) &&
+                             !isThreadHandleValue(kind, argumentNumber))
                         builder.handOn();
                     continue;
                 }
