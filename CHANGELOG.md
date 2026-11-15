@@ -16,6 +16,8 @@ still change between minor releases.
   report and the SARIF fingerprints are unchanged.
 - **API:** `describeRule(RuleId)` gives a rule's title, description and default severity, from
   the catalog the reports read (#214).
+- **Licensing:** `NOTICE` credits the CoreTrace contributors alongside Hugo Payet and
+  links the repository.
 
 ## v0.8.0
 
