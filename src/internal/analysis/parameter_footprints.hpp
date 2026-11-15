@@ -42,12 +42,30 @@ namespace ctrace::concurrency::internal::analysis
             [[nodiscard]] bool writesAnything() const noexcept;
         };
 
+        /// The locks the function takes, tries or releases through the parameter, which `all`
+        /// leaves out: the runtime changes them under its own synchronization, so no data access
+        /// shows them, but their bytes change. Each range is a lock whose type names a primitive,
+        /// placed and sized by that type; `wholeObject` is the parameter itself handed as a lock,
+        /// whatever object it points to.
+        struct Locks
+        {
+            std::vector<Range> ranges;
+            bool wholeObject = false;
+        };
+
         /// Everything the function does through the parameter.
         Extent all;
         /// The part of `all` none of the function's own accesses shows at a call: what it
         /// reaches without the access path placing it, and the thread handles it starts, joins
         /// or detaches. Its own accesses reach every call, with the locks held around them.
         Extent unshown;
+        Locks locks;
+        /// Whether the function hands the object on to something that may write it beyond its own
+        /// accesses, which `all` leaves out since synchronization is understood where it happens:
+        /// a thread it starts on it, a synchronization or thread call other than as a thread handle
+        /// it fills or passes by value, a lock `locks` places or the attributes it starts a thread
+        /// with, a function that may keep its address, or an escape.
+        bool handedOn = false;
     };
 
     /// Footprints of the functions a module defines, computed on demand and kept for the module.

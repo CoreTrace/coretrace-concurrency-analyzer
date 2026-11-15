@@ -190,6 +190,36 @@ namespace ctrace::concurrency::internal::analysis
     resolveTrackedRoot(const llvm::Value& value, const llvm::DataLayout* layout,
                        std::uint64_t byteSize,
                        const ProgramDefinedGlobals* programDefined = nullptr);
+
+    /// Strips casts and aliases while leaving indexing steps in place.
+    ///
+    /// `stripPointerCastsAndAliases` also removes a GEP whose indices are all zero, because it
+    /// computes the same address. It does not describe the same thing: the first field of an
+    /// aggregate sits at offset zero, so that GEP is where its type and offset appear.
+    [[nodiscard]] const llvm::Value* stripCastsKeepingIndexing(const llvm::Value* value);
+
+    /// Where a pointer handed to a synchronization call points into the object a parameter of its
+    /// function designates.
+    struct SynchronizationPlace
+    {
+        unsigned argumentIndex = 0;
+        /// Where the pointer points, with an unknown extent.
+        MemoryRegion region;
+        /// The object the pointer designates there.
+        MemoryRegion designated;
+        /// Whether the designated object's type names a synchronization primitive, which makes
+        /// its size in the data layout the size of the primitive a call changes there.
+        bool designatesPrimitive = false;
+        /// Whether the pointer is the parameter's own value: no indexing step names an object,
+        /// and it points where the parameter does.
+        bool isParameterItself = false;
+    };
+
+    /// Resolves a pointer as `resolveTrackedRoot` does, through synchronization primitives as
+    /// well, which that refuses: an access there is the runtime's, not data, yet a synchronization
+    /// call is handed exactly such a pointer. Nothing unless the access path ends at a parameter.
+    [[nodiscard]] std::optional<SynchronizationPlace>
+    resolveSynchronizationPlace(const llvm::Value& pointer, const llvm::DataLayout& layout);
     /// An integer as the enclosing function receives or fixes it: a non-negative constant, or
     /// one of its integer parameters, including through the local variable unoptimized code keeps
     /// it in and a sign or zero extension. Anything the function computes from it is left unknown.

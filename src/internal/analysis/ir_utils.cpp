@@ -172,6 +172,9 @@ namespace ctrace::concurrency::internal::analysis
             /// with every sibling field. Unset while only pointer arithmetic has been seen; zero
             /// once settled means unknown.
             std::optional<std::uint64_t> designatedSize;
+            /// Type of the object the pointer designates, settled with its size; null while that
+            /// is unknown.
+            llvm::Type* designatedType = nullptr;
             /// How far into the designated object the pointer sits. Non-zero for a pointer to an
             /// array element, which whoever receives it may move to any other element, on either
             /// side.
@@ -311,14 +314,17 @@ namespace ctrace::concurrency::internal::analysis
             return walk.layout->getTypeStoreSize(type).getFixedValue();
         }
 
-        /// Settles the designated object at `size` bytes. A pointer moved outside it by pointer
+        /// Settles the designated object as one of `type`. A pointer moved outside it by pointer
         /// arithmetic no longer points into it, so what it designates becomes unknown.
-        void settleDesignatedSize(AccessPathWalk& walk, std::uint64_t size)
+        void settleDesignatedObject(AccessPathWalk& walk, llvm::Type* type)
         {
+            const std::uint64_t size = storeSizeOf(walk, type);
             const std::int64_t displacement = walk.designatedDisplacement;
             const bool staysInside =
                 displacement >= 0 && static_cast<std::uint64_t>(displacement) < size;
-            walk.designatedSize = displacement == 0 || staysInside ? size : 0;
+            const bool pointsInside = displacement == 0 || staysInside;
+            walk.designatedSize = pointsInside ? size : 0;
+            walk.designatedType = pointsInside ? type : nullptr;
         }
 
         /// Settles what the pointer designates, from one indexing step of the walk.
@@ -369,13 +375,13 @@ namespace ctrace::concurrency::internal::analysis
 
             if (!endsInArrayRun)
             {
-                settleDesignatedSize(walk, storeSizeOf(walk, gep.getResultElementType()));
+                settleDesignatedObject(walk, gep.getResultElementType());
                 return;
             }
 
             walk.designatedDisplacement += runDisplacement;
             if (!runIsPointerArithmetic)
-                settleDesignatedSize(walk, storeSizeOf(walk, runArray));
+                settleDesignatedObject(walk, runArray);
         }
 
         template <typename GEPType> void noteGepTypes(AccessPathWalk& walk, const GEPType& gep)
@@ -388,31 +394,29 @@ namespace ctrace::concurrency::internal::analysis
             if (!walk.designatedSize.has_value())
                 noteDesignatedObject(walk, gep);
         }
+    } // namespace
 
-        /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
-        /// which keeps the region conservatively overlapping every sibling.
-        /// Strips casts and aliases while leaving indexing steps in place.
-        ///
-        /// `stripPointerCastsAndAliases` also removes a GEP whose indices are all zero, because
-        /// it computes the same address. It does not describe the same thing: the first field of
-        /// an aggregate sits at offset zero, so that GEP is where its type and offset appear.
-        const llvm::Value* stripCastsKeepingIndexing(const llvm::Value* value)
+    const llvm::Value* stripCastsKeepingIndexing(const llvm::Value* value)
+    {
+        while (value != nullptr)
         {
-            while (value != nullptr)
-            {
-                if (llvm::isa<llvm::GEPOperator>(value))
-                    return value;
+            if (llvm::isa<llvm::GEPOperator>(value))
+                return value;
 
-                const llvm::Value* stripped = value->stripPointerCastsAndAliases();
-                if (stripped == value)
-                    return value;
+            const llvm::Value* stripped = value->stripPointerCastsAndAliases();
+            if (stripped == value)
+                return value;
 
-                value = stripped;
-            }
-
-            return value;
+            value = stripped;
         }
 
+        return value;
+    }
+
+    namespace
+    {
+        /// Folds the GEP into the running byte offset. A variable index makes the offset unknown,
+        /// which keeps the region conservatively overlapping every sibling.
         void accumulateGepOffset(AccessPathWalk& walk, const llvm::GEPOperator& gep)
         {
             if (!walk.hasKnownOffset)
@@ -524,7 +528,7 @@ namespace ctrace::concurrency::internal::analysis
                     {
                         noteTraversedType(*walk, global->getValueType());
                         if (!walk->designatedSize.has_value())
-                            settleDesignatedSize(*walk, storeSizeOf(*walk, global->getValueType()));
+                            settleDesignatedObject(*walk, global->getValueType());
                     }
                     return current;
                 }
@@ -539,10 +543,7 @@ namespace ctrace::concurrency::internal::analysis
 
                     noteTraversedType(*walk, storage->getAllocatedType());
                     if (!walk->designatedSize.has_value())
-                    {
-                        settleDesignatedSize(*walk,
-                                             storeSizeOf(*walk, storage->getAllocatedType()));
-                    }
+                        settleDesignatedObject(*walk, storage->getAllocatedType());
                     return current;
                 }
 
@@ -1194,6 +1195,28 @@ namespace ctrace::concurrency::internal::analysis
                 binding->index = walk.index;
         }
         return binding;
+    }
+
+    std::optional<SynchronizationPlace> resolveSynchronizationPlace(const llvm::Value& pointer,
+                                                                    const llvm::DataLayout& layout)
+    {
+        llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+        AccessPathWalk walk;
+        walk.layout = &layout;
+        const auto* parameter =
+            llvm::dyn_cast_or_null<llvm::Argument>(resolveCopiedValue(pointer, seen, &walk));
+        if (parameter == nullptr)
+            return std::nullopt;
+
+        return SynchronizationPlace{
+            .argumentIndex = parameter->getArgNo(),
+            .region = walk.region(),
+            .designated = walk.designatedRegion(),
+            .designatesPrimitive = walk.designatedType != nullptr &&
+                                   isSynchronizationPrimitiveType(walk.designatedType),
+            .isParameterItself =
+                !walk.designatedSize.has_value() && walk.hasKnownOffset && walk.byteOffset == 0,
+        };
     }
 
     std::optional<LinearIndex> resolveLinearIndex(const llvm::Value& value)

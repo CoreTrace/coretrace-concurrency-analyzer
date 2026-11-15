@@ -5,12 +5,14 @@
 #include "held_member_analysis.hpp"
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
+#include "parameter_footprints.hpp"
 
 #include <llvm/ADT/ArrayRef.h>
 #include <llvm/ADT/MapVector.h>
 #include <llvm/ADT/STLExtras.h>
 #include <llvm/ADT/STLFunctionalExtras.h>
 #include <llvm/ADT/SmallPtrSet.h>
+#include <llvm/Analysis/AliasAnalysis.h>
 #include <llvm/Analysis/CFG.h>
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/Analysis/ValueTracking.h>
@@ -452,8 +454,151 @@ namespace ctrace::concurrency::internal::analysis
             /// a caller can rely on: the analyses that follow a call do not follow one through a
             /// pointer-to-member, so a thread it starts would go unseen once its join is known.
             const std::unordered_set<const llvm::Function*>& possibleStarters;
+            /// What the unit's functions do to the objects they are handed, for a thread started
+            /// on a storage that holds its own handle.
+            ParameterFootprints& footprints;
             std::unordered_map<const llvm::Function*, std::vector<MemberJoin>> byFunction;
         };
+
+        bool overlapsAt(const ParameterFootprint::Range& range, std::int64_t offset,
+                        const ParameterFootprint::Range& handle)
+        {
+            return range.begin + offset < handle.end && handle.begin < range.end + offset;
+        }
+
+        /// Whether a thread started on `entry`, handed a pointer `offset` bytes into an object,
+        /// may write some of `handle`'s bytes there, itself or through the functions it calls.
+        /// Whatever its footprint does not place counts as a write anywhere: an escape, the object
+        /// handed on to a function that may keep its address, to a synchronization call, or to a
+        /// thread it starts, which may outlive it and write the handle later. The locks it takes
+        /// are written where their type places them, and anywhere when it takes the pointer it is
+        /// handed as a lock.
+        bool threadMayWrite(const llvm::Function& entry, std::int64_t offset,
+                            const ParameterFootprint::Range& handle,
+                            ParameterFootprints& footprints)
+        {
+            if (entry.arg_empty())
+                return true;
+            const ParameterFootprint footprint = footprints.of(entry, 0);
+            if (footprint.all.writesWholeObject || footprint.handedOn ||
+                footprint.locks.wholeObject)
+                return true;
+            for (const auto* written : {&footprint.all.writes, &footprint.locks.ranges})
+            {
+                for (const ParameterFootprint::Range& range : *written)
+                {
+                    if (overlapsAt(range, offset, handle))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        /// Whether the address of the local `storage` may be read back from somewhere: stored as a
+        /// value, or handed to a call other than as the handle `creation` fills.
+        bool localAddressEscapes(const llvm::AllocaInst& storage, const llvm::CallBase& creation)
+        {
+            llvm::SmallPtrSet<const llvm::Value*, 16> seen;
+            std::vector<const llvm::Value*> pending{&storage};
+            while (!pending.empty())
+            {
+                const llvm::Value* pointer = pending.back();
+                pending.pop_back();
+                if (!seen.insert(pointer).second)
+                    continue;
+                for (const llvm::Use& use : pointer->uses())
+                {
+                    const llvm::User* user = use.getUser();
+                    if (llvm::isa<llvm::GEPOperator>(user) ||
+                        llvm::isa<llvm::BitCastOperator>(user) || llvm::isa<llvm::PHINode>(user) ||
+                        llvm::isa<llvm::SelectInst>(user))
+                        pending.push_back(user);
+                    else if (const auto* store = llvm::dyn_cast<llvm::StoreInst>(user))
+                    {
+                        if (store->getValueOperand() == pointer)
+                            return true;
+                    }
+                    else if (const auto* call = llvm::dyn_cast<llvm::CallBase>(user))
+                    {
+                        if (call != &creation || !call->isArgOperand(&use) ||
+                            call->getArgOperandNo(&use) != 0)
+                            return true;
+                    }
+                    else if (!llvm::isa<llvm::LoadInst>(user) && !llvm::isa<llvm::ICmpInst>(user))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        /// Whether `object` may be, or lie in, the object `base` designates. A local overlaps no
+        /// other object a definition allocates, and nothing a function is handed designates one of
+        /// its locals; a pointer read from memory may, once the local's address has gone where it
+        /// can be read back. A parameter's object or a global is taken to be designated only
+        /// through itself: like the completion proof, which follows a parameter's object through
+        /// its own uses, this does not weigh another parameter or a pointer read from memory that
+        /// the caller made designate the same object.
+        bool mayAlias(const llvm::Value& object, const llvm::Value& base,
+                      const llvm::CallBase& creation)
+        {
+            if (&object == &base)
+                return true;
+            const auto* local = llvm::dyn_cast<llvm::AllocaInst>(&base);
+            if (local == nullptr || llvm::isa<llvm::Argument>(object) ||
+                llvm::isIdentifiedObject(&object) || llvm::isa<llvm::ConstantPointerNull>(object) ||
+                llvm::isa<llvm::UndefValue>(object))
+                return false;
+            return localAddressEscapes(*local, creation);
+        }
+
+        /// Whether `pointer`, which `creation` hands over, may point into the object `base`
+        /// designates: through any object it may come from, through selections and the pointers
+        /// local slots hold.
+        bool mayPointInto(const llvm::Value& pointer, const llvm::Value& base,
+                          const llvm::CallBase& creation, const llvm::DataLayout& layout)
+        {
+            llvm::SmallPtrSet<const llvm::Value*, 8> seen;
+            std::vector<const llvm::Value*> pending{&pointer};
+            while (!pending.empty())
+            {
+                const llvm::Value* value = pending.back();
+                pending.pop_back();
+                if (!seen.insert(value).second)
+                    continue;
+                llvm::SmallVector<const llvm::Value*, 4> objects;
+                llvm::getUnderlyingObjects(value, objects);
+                for (const llvm::Value* object : objects)
+                {
+                    // A pointer read back from a local slot is the one the slot holds.
+                    const auto place = constantOffsetFrom(*object, 0, layout);
+                    if (place.has_value() && place->first != object)
+                        pending.push_back(place->first);
+                    else if (mayAlias(*object, base, creation))
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        /// The bytes the handle at `address` occupies, from the type the address is formed with:
+        /// a field's type, the first field's included, or the whole local when the address is the
+        /// local itself.
+        std::optional<std::uint64_t> handleSize(const llvm::Value& address,
+                                                const llvm::DataLayout& layout)
+        {
+            const llvm::Value* place = invariantValue(&address);
+            if (place == nullptr)
+                return std::nullopt;
+            place = stripCastsKeepingIndexing(place);
+            if (const auto* field = llvm::dyn_cast<llvm::GEPOperator>(place))
+                return layout.getTypeStoreSize(field->getResultElementType()).getFixedValue();
+            if (const auto* local = llvm::dyn_cast<llvm::AllocaInst>(place))
+            {
+                if (const std::optional<llvm::TypeSize> size = local->getAllocationSize(layout))
+                    return size->getFixedValue();
+            }
+            return std::nullopt;
+        }
 
         /// What a join is proven to do to the storage of the thread it waits for: nothing it does
         /// before its joins may change the storage, or the proof is refused. Past its last join it
@@ -498,7 +643,9 @@ namespace ctrace::concurrency::internal::analysis
         ///
         /// Two cases keep the refusal any such call met before effects were read: the local
         /// handed to a thread a creation starts, which may change the handle unseen, and a join
-        /// made by a function not proven to wait for the thread it is handed unchanged.
+        /// made by a function not proven to wait for the thread it is handed unchanged. Neither
+        /// applies to a direct join of a local no call but its creations is handed: that thread may
+        /// replace its handle unseen, and what follows the join is then missed (#210).
         bool arrayStorageUnchanged(const llvm::CallBase& writer, const JoinSite& join,
                                    const SpawnFills* fills, const llvm::DominatorTree& dominators,
                                    const ConcurrencySymbolClassifier& classifier,
@@ -554,10 +701,13 @@ namespace ctrace::concurrency::internal::analysis
                             kind == CallKind::PThreadCreate || kind == CallKind::StdThreadCtor;
                         const bool stores = call == &writer || starts || buildsEmptyThread(*call) ||
                                             (fills != nullptr && fills->contains(call));
-                        // A creation handed the local as anything but the handle it fills gives
-                        // the thread it starts the local's address.
+                        // A creation handed the local as anything but the handle it fills or the
+                        // attributes it reads gives the thread it starts the local's address,
+                        // through which it may replace the handle before the join reads it.
                         if (starts &&
-                            (!call->isArgOperand(&use) || call->getArgOperandNo(&use) != 0))
+                            (!call->isArgOperand(&use) || call->getArgOperandNo(&use) != 0) &&
+                            threadMayReplaceHandle(*call, kind, entryNamedBy(*call), use,
+                                                   *writer.getArgOperand(0), members.footprints))
                             handedToThread = true;
                         // The join may be handed the local through more operands than its handle.
                         if (call == join.call && call->isArgOperand(&use))
@@ -586,6 +736,8 @@ namespace ctrace::concurrency::internal::analysis
             // anything else is handed the storage: neither the call, nor a thread handed the
             // storage. One handed the handle's value cannot change it. A change the join makes past
             // its own joins follows every one of them, the join of the handle proven among them.
+            // A direct join with no other call judged skips this check, `handedToThread` included:
+            // a thread handed the local that replaces its handle is not refused there (#210).
             const CallKind joinKind = classifier.classify(*join.call);
             const bool callHandedStorage = joinKind != CallKind::PThreadJoin &&
                                            joinKind != CallKind::StdThreadJoin &&
@@ -3702,6 +3854,62 @@ namespace ctrace::concurrency::internal::analysis
         }
         return helpers;
     }
+    const llvm::Function* entryNamedBy(const llvm::CallBase& creation)
+    {
+        return creation.arg_size() > 2
+                   ? llvm::dyn_cast<llvm::Function>(creation.getArgOperand(2)->stripPointerCasts())
+                   : nullptr;
+    }
+
+    bool threadMayReplaceHandle(const llvm::CallBase& creation, CallKind kind,
+                                const llvm::Function* entry, const llvm::Use& handed,
+                                const llvm::Value& handle, ParameterFootprints& footprints)
+    {
+        if (!creation.isArgOperand(&handed))
+            return true;
+        const unsigned operand = creation.getArgOperandNo(&handed);
+        if (isThreadAttributes(kind, operand))
+            return false;
+        if (kind != CallKind::PThreadCreate || operand != 3)
+            return true;
+        if (entry == nullptr || entry->isDeclaration())
+            return true;
+        const llvm::DataLayout& layout = creation.getModule()->getDataLayout();
+        const auto handedPlace = constantOffsetFrom(*handed.get(), 0, layout);
+        const auto handlePlace = constantOffsetFrom(handle, 0, layout);
+        const std::optional<std::uint64_t> size = handleSize(handle, layout);
+        if (!handedPlace.has_value() || !handlePlace.has_value() || !size.has_value() ||
+            handedPlace->first != handlePlace->first)
+            return true;
+        const ParameterFootprint::Range bytes{.begin = handlePlace->second,
+                                              .end = handlePlace->second +
+                                                     static_cast<std::int64_t>(*size),
+                                              .isAtomic = false};
+        return threadMayWrite(*entry, handedPlace->second, bytes, footprints);
+    }
+
+    bool creationMayReplaceOwnHandle(const llvm::CallBase& creation, CallKind kind,
+                                     const llvm::Function* entry, ParameterFootprints& footprints)
+    {
+        if (creation.arg_empty())
+            return false;
+        const llvm::Value& handle = *creation.getArgOperand(0);
+        const llvm::DataLayout& layout = creation.getModule()->getDataLayout();
+        const auto handlePlace = constantOffsetFrom(handle, 0, layout);
+        if (!handlePlace.has_value())
+            return true;
+        for (const llvm::Use& argument : creation.args())
+        {
+            if (creation.getArgOperandNo(&argument) == 0 ||
+                !argument.get()->getType()->isPointerTy())
+                continue;
+            if (mayPointInto(*argument.get(), *handlePlace->first, creation, layout) &&
+                threadMayReplaceHandle(creation, kind, entry, argument, handle, footprints))
+                return true;
+        }
+        return false;
+    }
+
     ThreadCompletionMap collectThreadCompletions(const llvm::Module& module,
                                                  const ConcurrencySymbolClassifier& classifier,
                                                  LlvmFunctionAnalysisProvider& analyses,
@@ -3711,9 +3919,11 @@ namespace ctrace::concurrency::internal::analysis
         const HeldMemberAnalysis held(module);
         const std::unordered_set<const llvm::Function*> possibleStarters =
             possibleThreadStarters(module, classifier);
+        ParameterFootprints footprints(classifier, module.getDataLayout());
         MemberJoins members{.held = held,
                             .helpers = helpers,
                             .possibleStarters = possibleStarters,
+                            .footprints = footprints,
                             .byFunction = {}};
         collectMemberJoins(module, members);
         const VectorHelpers joining =

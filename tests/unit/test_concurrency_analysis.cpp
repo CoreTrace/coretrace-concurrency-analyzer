@@ -1,13 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 #include "coretrace_concurrency_analysis.hpp"
 #include "coretrace_concurrency_analyzer.hpp"
+#include "internal/analysis/concurrency_symbol_classifier.hpp"
 #include "internal/analysis/cross_tu/program_symbol_index.hpp"
 #include "internal/analysis/facts.hpp"
 #include "internal/analysis/held_member_analysis.hpp"
+#include "internal/analysis/parameter_footprints.hpp"
 #include "internal/analysis/thread_completion_analysis.hpp"
 #include "internal/diagnostics/diagnostic_catalog.hpp"
 
 #include <llvm/IR/Constants.h>
+#include <llvm/IR/DataLayout.h>
+#include <llvm/IR/DerivedTypes.h>
 #include <llvm/IR/InstIterator.h>
 #include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
@@ -371,25 +375,11 @@ namespace
                           "the race is main against detachedReader alone, never joinedReader");
     }
 
-    /// In each fixture an instance of `first` runs beside one of `second`, which an order the two
-    /// entries have elsewhere must not hide: the race between them is checked, not only a race on
-    /// the symbol, which `first` racing with itself would also give (#224).
-    bool testEntriesOrderedElsewhereStillRaceFirstAgainstSecond()
+    /// Whether each data-race fixture named reports a race between `first` and `second`, in either
+    /// order: the pair is checked, not only a race on the symbol, which `first` racing with itself
+    /// would also give.
+    bool fixturesRaceFirstAgainstSecond(const std::vector<std::string_view>& fixtures)
     {
-        const std::vector<std::string_view> fixtures = {
-            "data_race_entry_started_again_beside_other_race.c",
-            "data_race_entry_started_by_other_entry_race.c",
-            "data_race_entries_ordered_by_helpers_then_overlapping_race.c",
-            "data_race_entry_started_again_by_helper_beside_other_race.c",
-            "data_race_entries_ordered_by_worker_started_twice_race.c",
-            "data_race_entries_ordered_at_each_level_of_recursion_race.c",
-            "data_race_entry_started_again_through_select_race.c",
-            "data_race_entry_started_again_through_entry_array_race.c",
-            "data_race_entry_started_by_recursive_thread_entry_race.c",
-            "data_race_entries_ordered_by_root_called_indirectly_race.c",
-            "data_race_entries_ordered_by_helper_also_called_indirectly_race.c",
-            "cpp_pthread_thread_left_by_exception_caught_in_helper_race.cpp",
-        };
         bool passed = true;
         for (const std::string_view fixture : fixtures)
         {
@@ -417,6 +407,49 @@ namespace
                      passed;
         }
         return passed;
+    }
+
+    /// In each fixture an instance of `first` runs beside one of `second`, which an order the two
+    /// entries have elsewhere must not hide (#224).
+    bool testEntriesOrderedElsewhereStillRaceFirstAgainstSecond()
+    {
+        return fixturesRaceFirstAgainstSecond({
+            "data_race_entry_started_again_beside_other_race.c",
+            "data_race_entry_started_by_other_entry_race.c",
+            "data_race_entries_ordered_by_helpers_then_overlapping_race.c",
+            "data_race_entry_started_again_by_helper_beside_other_race.c",
+            "data_race_entries_ordered_by_worker_started_twice_race.c",
+            "data_race_entries_ordered_at_each_level_of_recursion_race.c",
+            "data_race_entry_started_again_through_select_race.c",
+            "data_race_entry_started_again_through_entry_array_race.c",
+            "data_race_entry_started_by_recursive_thread_entry_race.c",
+            "data_race_entries_ordered_by_root_called_indirectly_race.c",
+            "data_race_entries_ordered_by_helper_also_called_indirectly_race.c",
+            "cpp_pthread_thread_left_by_exception_caught_in_helper_race.cpp",
+        });
+    }
+
+    /// In each fixture `first` is handed the object holding its own handle, and something may
+    /// replace that handle before finish joins it: the join may wait for another thread, so it
+    /// does not order `first` before `second` (#201).
+    bool testThreadHandedItsStorageStillRacesFirstAgainstSecond()
+    {
+        return fixturesRaceFirstAgainstSecond({
+            "data_race_thread_rewriting_handle_in_its_storage_race.c",
+            "data_race_child_rewriting_handle_in_parent_storage_race.c",
+            "data_race_grandchild_rewriting_handle_in_storage_race.c",
+            "data_race_child_started_through_callee_rewriting_handle_race.c",
+            "data_race_thread_rewriting_handle_through_callee_race.c",
+            "data_race_thread_handing_storage_to_unknown_function_race.c",
+            "data_race_thread_letting_its_storage_escape_race.c",
+            "data_race_thread_handed_pointer_onto_handle_race.c",
+            "data_race_thread_handed_pointer_chosen_at_run_time_race.c",
+            "data_race_child_of_handed_thread_on_unresolved_entry_race.c",
+            "data_race_join_result_written_into_handle_in_storage_race.c",
+            "data_race_thread_handing_storage_to_declared_reader_race.c",
+            "data_race_thread_handed_storage_holding_its_attributes_replacing_handle_race.c",
+            "data_race_child_started_with_attributes_in_parent_storage_rewriting_handle_race.c",
+        });
     }
 
     /// The places a data-race fixture's races join, one `function:line ~ function:line` per pair,
@@ -604,6 +637,68 @@ namespace
         return passed;
     }
 
+    bool hasPlace(const std::vector<std::string>& places, std::string_view place)
+    {
+        return std::find(places.begin(), places.end(), place) != places.end();
+    }
+
+    /// Whether a pair among `places` joins a place in function `one` to one in function `other`.
+    bool placesJoin(const std::vector<std::string>& places, std::string_view one,
+                    std::string_view other)
+    {
+        for (const std::string_view place : places)
+        {
+            const std::string_view first = place.substr(0, place.find(':'));
+            const std::string_view second = place.substr(place.find(" ~ ") + 3);
+            const std::string_view secondFunction = second.substr(0, second.find(':'));
+            if ((first == one && secondFunction == other) ||
+                (first == other && secondFunction == one))
+                return true;
+        }
+        return false;
+    }
+
+    /// A helper joining a thread before starting another on its handle does not end the one it
+    /// leaves running: main races with it, and never with the thread the helper joined, even
+    /// when the new one takes its entry from a parameter. A helper handed an entry that may
+    /// rewrite the handle keeps that thread running past its join, whatever entry another call
+    /// hands it, and so does one other units may call (#201, #235).
+    bool testRestartedThreadsRaceWithMainAndNotWithTheJoinedOne()
+    {
+        const std::optional<std::vector<std::string>> restarted =
+            racingPlacesIn("data_race_thread_restarted_by_helper_read_before_second_join_race.c");
+        const std::optional<std::vector<std::string>> rewriting =
+            racingPlacesIn("data_race_thread_restarted_on_entry_parameter_rewriting_handle_race.c");
+        const std::optional<std::vector<std::string>> other =
+            racingPlacesIn("data_race_thread_restarted_on_other_entry_parameter_race.c");
+        const std::optional<std::vector<std::string>> external = racingPlacesIn(
+            "data_race_thread_restarted_by_external_helper_on_rewriting_entry_race.c");
+        const std::optional<std::vector<std::string>> safeAndRewriting =
+            racingPlacesIn("data_race_helper_handed_safe_and_rewriting_entries_race.c");
+        if (!restarted.has_value() || !rewriting.has_value() || !other.has_value() ||
+            !external.has_value() || !safeAndRewriting.has_value())
+            return false;
+
+        return assertTrue(hasPlace(*restarted, "main:34 ~ run:19"),
+                          "main's read races with the thread restart leaves running") &&
+               assertTrue(hasPlace(*rewriting, "main:51 ~ rewriting:34") &&
+                              hasPlace(*rewriting, "main:52 ~ rewriting:35"),
+                          "main races with rewriting on the handle and on value") &&
+               assertTrue(!placesJoin(*rewriting, "main", "run"),
+                          "main never races with run, which restart joined before rewriting") &&
+               assertTrue(hasPlace(*other, "main:41 ~ other:26"),
+                          "main's read races with the entry restart was handed") &&
+               assertTrue(!placesJoin(*other, "main", "run"),
+                          "main never races with run, which restart joined before other") &&
+               assertTrue(hasPlace(*external, "main:53 ~ rewriting:34") &&
+                              hasPlace(*external, "main:54 ~ rewriting:35") &&
+                              !placesJoin(*external, "main", "run"),
+                          "a helper other units may call keeps rewriting running past its join") &&
+               assertTrue(
+                   hasPlace(*safeAndRewriting, "main:52 ~ rewriting:35"),
+                   "main's read races with rewriting despite the safe entry of another call");
+    }
+
     /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
     /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
     /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
@@ -703,6 +798,105 @@ namespace
              ok;
         ok = effectIs("llvm.memcpy.p0.p0.i64", 1, false, false,
                       "a copy neither writes nor keeps its source") &&
+             ok;
+        return ok;
+    }
+
+    /// Whether a thread started on an object holding its own handle may replace that handle when
+    /// it takes a lock there (#201). The proof reads the lock's bytes from the lock's type, keeps
+    /// them out of the accesses that report races, and refuses where the lock's type, place or
+    /// extent is unknown, where the lock overlaps the handle, and where a call the classifier
+    /// does not recognize is handed the lock. Several of these programs are invalid, so no race
+    /// could show the refusal: the proof is asked directly.
+    bool testLocksInHandleStorageLeaveTheHandleOnlyWhenTyped()
+    {
+        namespace analysis = ctrace::concurrency::internal::analysis;
+        llvm::LLVMContext context;
+        CompileRequest request;
+        request.inputFile = fixturePath("tests/fixtures/lock_footprints.c").string();
+        request.format = IRFormat::BC;
+        CompileResult compiled = InMemoryIRCompiler().compile(request, context);
+        if (!assertTrue(compiled.module != nullptr, "the lock footprints fixture compiles"))
+            return false;
+
+        const llvm::Module& module = *compiled.module;
+        const analysis::ConcurrencySymbolClassifier classifier;
+        analysis::ParameterFootprints footprints(classifier, module.getDataLayout());
+        const auto mayReplace = [&](llvm::StringRef start) -> std::optional<bool>
+        {
+            const llvm::Function* function = module.getFunction(start);
+            if (function == nullptr)
+                return std::nullopt;
+            for (const llvm::Instruction& instruction : llvm::instructions(*function))
+            {
+                const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction);
+                if (call != nullptr &&
+                    classifier.classify(*call) == analysis::CallKind::PThreadCreate)
+                    return analysis::creationMayReplaceOwnHandle(
+                        *call, analysis::CallKind::PThreadCreate, analysis::entryNamedBy(*call),
+                        footprints);
+            }
+            return std::nullopt;
+        };
+
+        struct Case
+        {
+            llvm::StringRef start;
+            bool refused;
+            std::string_view message;
+        };
+        constexpr Case kCases[] = {
+            {"first_start", false, "a typed lock declared first leaves the handle"},
+            {"valued_start", false, "a typed lock past the handle, beside data, leaves it"},
+            {"handed_start", false, "a helper locking the typed lock it is handed leaves it"},
+            {"overlapping_start", true, "a lock sharing the handle's bytes is refused"},
+            {"overlapping_helper_start", true, "so is one a helper handed it takes"},
+            {"overlapping_object_helper_start", true, "so is one a helper handed the object takes"},
+            {"beyond_start", true, "a lock a helper reaches past the one it is handed is refused"},
+            {"inside_start", true, "a lock reached inside a typed one, past its start, is refused"},
+            {"untyped_start", true, "a lock in bytes whose type names no lock is refused"},
+            {"whole_start", true, "the object locked as a whole, untyped, is refused"},
+            {"loaded_start", true, "a lock read out of the object is refused"},
+            {"indexed_start", true, "a lock at a place read at run time is refused"},
+            {"indexed_helper_start", true, "so is one handed to a helper"},
+            {"guards_start", true, "so is a guard handed to a helper locking inside it"},
+            {"spinning_start", true, "a spinlock, whose type names no lock, is refused"},
+            {"unrecognized_start", true, "an unrecognized call handed the lock is refused"},
+        };
+        bool ok = true;
+        for (const Case& expected : kCases)
+            ok = assertTrue(mayReplace(expected.start) == std::optional<bool>(expected.refused),
+                            std::string(expected.message)) &&
+                 ok;
+
+        // The lock's bytes are synchronization: no access the data-race rule reads shows them,
+        // and a write of data beside them keeps its own place.
+        const llvm::Function* first = module.getFunction("first_entry");
+        const llvm::Function* valued = module.getFunction("valued_entry");
+        if (!assertTrue(first != nullptr && valued != nullptr, "the lock entries are found"))
+            return false;
+        const analysis::ParameterFootprint locked = footprints.of(*first, 0);
+        ok = assertTrue(!locked.all.readsAnything() && !locked.all.writesAnything() &&
+                            !locked.unshown.readsAnything() && !locked.unshown.writesAnything() &&
+                            !locked.handedOn,
+                        "taking a typed lock adds no access and hands nothing on") &&
+             ok;
+
+        llvm::StructType* valuedType = llvm::StructType::getTypeByName(context, "struct.Valued");
+        if (!assertTrue(valuedType != nullptr, "the object holding a value is typed"))
+            return false;
+        const llvm::DataLayout& layout = module.getDataLayout();
+        const auto valueBegin =
+            static_cast<std::int64_t>(layout.getStructLayout(valuedType)->getElementOffset(2));
+        const auto valueSize = static_cast<std::int64_t>(
+            layout.getTypeStoreSize(valuedType->getElementType(2)).getFixedValue());
+        const analysis::ParameterFootprint written = footprints.of(*valued, 0);
+        ok = assertTrue(written.all.writes.size() == 1 && !written.all.writesWholeObject &&
+                            written.all.writes.front().begin == valueBegin &&
+                            written.all.writes.front().end == valueBegin + valueSize &&
+                            !written.all.readsAnything() && !written.unshown.writesAnything() &&
+                            !written.handedOn,
+                        "a value written under the lock is the only write, at its own place") &&
              ok;
         return ok;
     }
@@ -4721,6 +4915,254 @@ namespace
              .intent = "a call whose exception a helper catches does not end its thread",
              .dataRace = 1,
              .racingSymbol = "_ZL6shared"},
+            // --- a thread handed the storage holding its own handle (#201) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_its_storage_writing_value_joined_no_fp.c",
+             .intent = "a thread handed its handle's storage and writing elsewhere ends at its join"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_pointer_away_from_handle_joined_no_fp.c",
+             .intent = "so does one handed a pointer into that storage away from the handle"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_rewriting_handle_in_its_storage_race.c",
+             .intent = "a thread replacing its own handle is not ended by a join of that handle",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_child_rewriting_handle_in_parent_storage_race.c",
+             .intent = "nor is one whose child replaces it, though its own accesses show nothing",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_grandchild_rewriting_handle_in_storage_race.c",
+             .intent = "nor one whose grandchild replaces it",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_child_started_through_callee_rewriting_handle_race.c",
+             .intent = "nor one whose child, started by a function it calls, replaces it",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_rewriting_handle_through_callee_race.c",
+             .intent = "nor one replacing it through a function it calls; main's join of spare "
+                       "against the call's whole effect is not pinned",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared",
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handing_storage_to_unknown_function_race.c",
+             .intent = "nor one handing the storage to a function the unit does not define",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_letting_its_storage_escape_race.c",
+             .intent = "nor one letting the storage's address escape",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_pointer_onto_handle_race.c",
+             .intent = "nor one handed a pointer into the storage at the handle, writing there",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_pointer_chosen_at_run_time_race.c",
+             .intent = "nor one handed a pointer whose place in the storage a condition picks",
+             .dataRace = 2,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_child_of_handed_thread_on_unresolved_entry_race.c",
+             .intent = "nor one handing it on to a child on an entry read from a variable",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_join_result_written_into_handle_in_storage_race.c",
+             .intent = "nor one making a join write its result over the handle",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handing_storage_to_declared_reader_race.c",
+             .intent = "nor one handing the storage to a declared function that only reads it",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/thread-escape/"
+                     "thread_argument_handed_on_to_detached_child.c",
+             .intent = "a thread handing its handle's storage on may leave it in use past its join",
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_by_helper_read_before_second_join_race.c",
+             .intent = "a helper's join before the thread it leaves running does not end it; the "
+                       "self-race #201 reports is not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_on_entry_parameter_rewriting_handle_race.c",
+             .intent = "a restarted thread on a handed entry rewriting its handle races with main; "
+                       "its race with run #233 tracks is not pinned",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_on_other_entry_parameter_race.c",
+             .intent = "a restarted thread on a handed entry races with main, not the joined one; "
+                       "its race with run #233 tracks is not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_helper_handed_safe_and_rewriting_entries_race.c",
+             .intent = "a helper handed an entry rewriting its handle leaves it running past its "
+                       "join, whatever another call hands it",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_restarted_thread_handed_pointer_chosen_at_run_time_race.c",
+             .intent = "a thread handed a pointer a condition may point at its handle's storage is "
+                       "not ended by a join of that handle",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_its_storage_read_back_from_memory_race.c",
+             .intent = "nor one handed the storage's address read back from memory",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_writing_its_storage_at_unknown_place_race.c",
+             .intent = "nor one writing the storage at a place a variable picks",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_restarted_by_external_helper_on_rewriting_entry_race.c",
+             .intent = "a helper other units may call, handed an entry rewriting its handle, "
+                       "leaves it running; its race with run #233 tracks is not pinned",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_entry_parameter_external_helper_joined_no_fp.c",
+             .intent = "a helper other units may call ends its thread at a join when it hands the "
+                       "thread nothing of its handle's storage"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_pointer_read_from_memory_joined_no_fp.c",
+             .intent = "a pointer read from memory leads nowhere near a local the address of which "
+                       "goes nowhere, so the join ends the thread"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_storage_holding_handle_first_joined_no_fp.c",
+             .intent = "a handle declared first has the first field's bytes, which a write of the "
+                       "value leaves alone"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_replacing_handle_declared_first_in_its_storage_race.c",
+             .intent = "a thread replacing its handle declared first is not ended by its join",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_with_attributes_in_its_storage_no_fp.c",
+             .intent = "the attributes a thread is started with, stored beside its handle, hand "
+                       "it nothing: its join ends it"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_started_with_attributes_in_its_local_storage_no_fp.c",
+             .intent = "nor do they in a local object"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_storage_holding_its_attributes_writing_value_no_fp.c",
+             .intent = "a thread also handed that storage, writing only its value, is still ended "
+                       "by its join"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handed_storage_holding_its_attributes_replacing_handle_race.c",
+             .intent = "one replacing its handle there is not, whatever attributes it is started "
+                       "with",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_starting_child_with_attributes_in_its_storage_no_fp.c",
+             .intent = "a child started with the attributes of its parent's storage is handed "
+                       "nothing of it"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_child_started_with_attributes_in_parent_storage_rewriting_handle_"
+                     "race.c",
+             .intent = "a child also handed that storage, replacing its parent's handle, keeps "
+                       "the parent running past its join",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joining_child_held_in_its_storage_no_fp.c",
+             .intent = "a handle read out of the storage and joined by value names a thread, not "
+                       "the storage"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_detaching_child_held_in_its_storage_no_fp.c",
+             .intent = "nor does one detached by value"},
+            // --- ... and taking a lock in that storage (#201) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_first_field_of_its_storage_no_fp.c",
+             .intent = "a typed lock declared first in its handle's storage leaves the handle"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_field_after_its_handle_no_fp.c",
+             .intent = "so does one past the handle, at a nonzero offset"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_trylocking_its_storage_no_fp.c",
+             .intent = "so does a trylock"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_rwlocking_its_storage_no_fp.c",
+             .intent = "so does a read-write lock, taken for writing and for reading"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_its_storage_through_helper_no_fp.c",
+             .intent = "so does a lock helpers take in the whole object they are handed"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_its_storage_through_lock_helper_no_fp.c",
+             .intent = "so does the typed lock handed to helpers locking what they are given"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_nested_guard_through_helper_no_fp.c",
+             .intent = "a helper's lock in a guard nested past the handle lies where the guard does"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_threads_locking_their_storage_through_helper_no_fp.c",
+             .intent = "two threads taking the lock of the storage of both handles through a helper "
+                       "race on neither the lock nor what it guards"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_local_storage_joined_by_helper_no_fp.c",
+             .intent = "a typed lock in a local storage joined through a helper leaves the handle"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_its_storage_racing_on_value_race.c",
+             .intent = "data written under the lock still races with an unlocked read",
+             .dataRace = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_locking_in_its_storage_and_replacing_handle_race.c",
+             .intent = "a thread taking a lock in its storage and replacing its handle there is not "
+                       "ended by a join of that handle",
+             .dataRace = 3,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_handing_its_lock_to_unknown_function_race.c",
+             .intent = "nor is one handing its lock's address to code the unit does not define",
+             .dataRace = 2,
+             .threadArgumentEscape = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_thread_waiting_with_predicate_replacing_handle_race.cpp",
+             .intent = "nor one whose wait runs a predicate, no lock operation, replacing the handle",
+             .dataRace = 3,
+             .racingSymbol = "_ZL6shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_thread_locking_std_mutex_in_its_storage_no_fp.cpp",
+             .intent = "a std::mutex beside a pthread handle leaves the handle"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_pthread_thread_trying_shared_mutex_in_its_storage_no_fp.cpp",
+             .intent = "so does a std::shared_mutex, tried and taken shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "cpp_thread_locking_std_mutex_beside_its_std_thread_no_fp.cpp",
+             .intent = "a std::mutex beside the std::thread joined through it leaves the thread"},
             // --- a thread whose entry reaches its spawn as a parameter (#123) ---
             {.path = "tests/fixtures/concurrency/data-race/data_race_entry_parameter.c",
              .intent = "a thread started on an entry handed as a parameter races with main",
@@ -6556,9 +6998,12 @@ int main(int argc, char** argv)
         testEntriesOrderedElsewhereStillRaceFirstAgainstSecond,
         testEntryParameterThreadsKeepTheObjectOfTheirCall,
         testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds,
+        testRestartedThreadsRaceWithMainAndNotWithTheJoinedOne,
+        testThreadHandedItsStorageStillRacesFirstAgainstSecond,
         testMemberPointerResolverRefusesAnAdjustment,
         testJoinSummariesKeepTheirOffsets,
         testArgumentEffectsTellWritesFromKeeping,
+        testLocksInHandleStorageLeaveTheHandleOnlyWhenTyped,
         testClassDataRaceReportsGlobalCounter,
         testSharedObjectByRefReportsGlobalCounter,
         testMutexProtectedFixtureHasNoDiagnostics,

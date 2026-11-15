@@ -7,6 +7,7 @@
 #include "interprocedural_bindings.hpp"
 #include "ir_utils.hpp"
 #include "llvm_function_analysis_provider.hpp"
+#include "parameter_footprints.hpp"
 
 #include <llvm/Analysis/LoopInfo.h>
 #include <llvm/ADT/SmallPtrSet.h>
@@ -662,7 +663,8 @@ namespace ctrace::concurrency::internal::analysis
                 : directCallSites_(directCallSites), completions_(completions),
                   classifier_(classifier), analyses_(analyses),
                   includeExternalEntries_(includeExternalEntries),
-                  selfContainedConstructors_(selfContainedThreadConstructors(module, classifier))
+                  selfContainedConstructors_(selfContainedThreadConstructors(module, classifier)),
+                  footprints_(classifier, module.getDataLayout())
             {
                 for (const llvm::Function& function : module)
                 {
@@ -1076,9 +1078,11 @@ namespace ctrace::concurrency::internal::analysis
                 }
             }
 
-            /// Joins of `handle` in `function`, in place or through a call.
-            [[nodiscard]] Kills joinsOf(const llvm::Function& function,
-                                        const std::string& handle) const
+            /// Joins of `handle` in `function`, in place or through a call. For a thread
+            /// `introducedBy` leaves running at its return, that call's own joins are left out:
+            /// the callee joined the handle, if at all, before starting what it leaves running.
+            [[nodiscard]] Kills joinsOf(const llvm::Function& function, const std::string& handle,
+                                        const llvm::Instruction* introducedBy = nullptr) const
             {
                 Kills kills;
                 for (const JoinSite& join : sitesOf(function).joins)
@@ -1087,7 +1091,10 @@ namespace ctrace::concurrency::internal::analysis
                         kills.add(*join.success);
                 }
                 for (const auto& [call, success] : joiningCalls(function, handle))
-                    kills.add(success);
+                {
+                    if (call != introducedBy)
+                        kills.add(success);
+                }
                 return kills;
             }
 
@@ -1102,7 +1109,7 @@ namespace ctrace::concurrency::internal::analysis
                 const std::optional<std::string> handle = spawnHandle(function, spawn);
                 if (handle.has_value())
                     kills.byHandle = joinsOf(function, *handle);
-                else
+                else if (!mayRewriteOwnHandle(spawn))
                 {
                     // In place, a join ends the thread as long as its storage holds no other.
                     for (const JoinSite& join : sitesOf(function).joins)
@@ -1138,7 +1145,7 @@ namespace ctrace::concurrency::internal::analysis
                 FloodKills kills;
                 if (handle.has_value())
                 {
-                    kills.byHandle = joinsOf(function, *handle);
+                    kills.byHandle = joinsOf(function, *handle, start);
                     for (const llvm::Instruction* restart : startSites(function, *handle))
                         kills.restarts.insert(restart);
                 }
@@ -1187,11 +1194,98 @@ namespace ctrace::concurrency::internal::analysis
                                                                  const SpawnSite& spawn) const
             {
                 if (!isNameableHandle(spawn.handleGroupId) ||
-                    ambiguousIn(function, spawn.handleGroupId))
+                    ambiguousIn(function, spawn.handleGroupId) || mayRewriteOwnHandle(spawn))
                 {
                     return std::nullopt;
                 }
                 return spawn.handleGroupId;
+            }
+
+            /// Whether the thread `spawn` starts is handed the storage of its own handle and may
+            /// write that handle: a join of the handle may then wait for another thread, so none
+            /// ends it, in place or through a call, and no frame names it by the handle. The
+            /// completion analysis refuses such a thread's completion on the same grounds, except
+            /// for a local storage the creating function joins directly and hands nothing else:
+            /// that join ends the thread whatever the thread writes, so a thread replacing its
+            /// handle there is missed (#210). An entry the spawn takes from a parameter is each
+            /// one the calls settle there: the thread may write its handle when one of them may,
+            /// or when one cannot be named. The answer holds for the spawn whichever call runs it,
+            /// so a call handing an entry that cannot write the handle loses its join too when
+            /// another call hands one that may (#240).
+            [[nodiscard]] bool mayRewriteOwnHandle(const SpawnSite& spawn) const
+            {
+                const auto* creation = llvm::dyn_cast<llvm::CallBase>(spawn.instruction);
+                if (creation == nullptr)
+                    return false;
+                const auto [known, inserted] = rewritesOwnHandle_.try_emplace(creation, false);
+                if (!inserted)
+                    return known->second;
+
+                const CallKind kind = classifier_.classify(*creation);
+                if (!isParameterEntry(spawn.entryFunctionId))
+                {
+                    known->second = creationMayReplaceOwnHandle(
+                        *creation, kind, entryNamedBy(*creation), footprints_);
+                    return known->second;
+                }
+                // Whatever entry the calls settle, the thread reaches its handle only through a
+                // pointer the creation hands it that may point into the handle's storage.
+                if (!creationMayReplaceOwnHandle(*creation, kind, nullptr, footprints_))
+                    return false;
+                const std::optional<std::vector<const llvm::Function*>> entries =
+                    settledEntries(spawn.entryFunctionId, functionId(*creation->getFunction()));
+                known->second = !entries.has_value();
+                if (entries.has_value())
+                {
+                    for (const llvm::Function* entry : *entries)
+                    {
+                        if (creationMayReplaceOwnHandle(*creation, kind, entry, footprints_))
+                            known->second = true;
+                    }
+                }
+                return known->second;
+            }
+
+            /// The entries a spawn taking parameter entry `entry` of `function` may run: each one
+            /// the calls pass there, an entry a call takes from its own parameter settled a frame
+            /// up. Nothing when a call passes something no entry is known for, or when a function
+            /// along the way may be called where no call site shows: from another unit, or
+            /// through its address.
+            [[nodiscard]] std::optional<std::vector<const llvm::Function*>>
+            settledEntries(const std::string& entry, const std::string& function) const
+            {
+                std::vector<const llvm::Function*> settled;
+                std::vector<std::pair<std::string, std::string>> pending{{entry, function}};
+                std::unordered_set<std::string> seen;
+                while (!pending.empty())
+                {
+                    const auto [current, owner] = std::move(pending.back());
+                    pending.pop_back();
+                    if (!seen.insert(current).second)
+                        continue;
+                    if (!isParameterEntry(current))
+                    {
+                        settled.push_back(functionOf(current));
+                        continue;
+                    }
+                    const llvm::Function* ownerFunction = functionOf(owner);
+                    if (ownerFunction == nullptr || !ownerFunction->hasLocalLinkage() ||
+                        ownerFunction->hasAddressTaken())
+                        return std::nullopt;
+                    for (const DirectCallSite& site : directCallSites_)
+                    {
+                        if (site.calleeFunctionId != owner)
+                            continue;
+                        if (site.call == nullptr)
+                            return std::nullopt;
+                        const std::optional<std::string> passed =
+                            entryAtCaller(ThreadInstance{current, std::nullopt}, site);
+                        if (!passed.has_value())
+                            return std::nullopt;
+                        pending.emplace_back(*passed, site.callerFunctionId);
+                    }
+                }
+                return settled;
             }
 
             /// Where `function` starts or moves a thread into `handle`, in place or through calls.
@@ -1523,6 +1617,10 @@ namespace ctrace::concurrency::internal::analysis
             LlvmFunctionAnalysisProvider& analyses_;
             bool includeExternalEntries_ = false;
             std::unordered_set<const llvm::Function*> selfContainedConstructors_;
+            /// What the unit's functions do to the objects they are handed, for a thread started
+            /// on the storage holding its own handle.
+            mutable ParameterFootprints footprints_;
+            mutable std::unordered_map<const llvm::Instruction*, bool> rewritesOwnHandle_;
             std::unordered_map<std::string, const llvm::Function*> functionsById_;
             std::unordered_map<const llvm::Function*, FunctionThreads> functions_;
             std::unordered_map<const llvm::Function*, ThreadInstances> leaked_;

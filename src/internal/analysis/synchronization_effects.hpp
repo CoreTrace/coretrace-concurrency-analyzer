@@ -18,6 +18,7 @@ namespace llvm
 namespace ctrace::concurrency::internal::analysis
 {
     class ConcurrencySymbolClassifier;
+    enum class CallKind;
 
     enum class LockEffectKind
     {
@@ -46,6 +47,14 @@ namespace ctrace::concurrency::internal::analysis
         /// holds them from here on, but waits for none of them.
         bool adoptsHeldLocks = false;
     };
+
+    /// Position of the lock operand for a plain (non-RAII) lock operation. POSIX primitives and
+    /// C++ member functions both carry it first, as the object pointer or the `this` pointer.
+    inline constexpr unsigned kLockOperandIndex = 0;
+
+    /// What a plain lock operation does to the lock at `kLockOperandIndex`, the only object it
+    /// changes. Nothing for any other call.
+    [[nodiscard]] std::optional<LockEffectKind> plainLockEffect(CallKind kind);
 
     /// Maps a call to the synchronization effects it has on its arguments. Effects are expressed
     /// over argument positions rather than over hardcoded symbol lists, so a new lock-like API is
