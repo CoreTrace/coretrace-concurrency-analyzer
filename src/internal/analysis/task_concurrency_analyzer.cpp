@@ -854,6 +854,9 @@ namespace ctrace::concurrency::internal::analysis
             }
 
             /// The threads running where `function` was called that are still running at `point`.
+            /// One arrives named by the handle its caller holds it in. Past a start into that
+            /// handle the storage holds another thread: the handle names this one no longer, here
+            /// or in a function handed it, whose join of it would wait for the other.
             [[nodiscard]] ThreadInstances inheritedAt(const llvm::Function& function,
                                                       const llvm::Instruction& point) const
             {
@@ -861,12 +864,15 @@ namespace ctrace::concurrency::internal::analysis
                 if (const auto inherited = inherited_.find(&function);
                     inherited != inherited_.end())
                 {
-                    // A handle that arrives named is not filled again here: every caller counts
-                    // this function's starts into it, and a handle filled twice is not named.
                     for (const ThreadInstance& instance : inherited->second)
                     {
-                        if (handleReach(function, nullptr, instance.handle).contains(point))
-                            live.insert(instance);
+                        const Reach& reach = handleReach(function, nullptr, instance.handle);
+                        if (!reach.contains(point))
+                            continue;
+                        ThreadInstance held = instance;
+                        if (!reach.namedAt(point))
+                            held.handle.reset();
+                        live.insert(std::move(held));
                     }
                 }
                 return live;
@@ -1409,8 +1415,10 @@ namespace ctrace::concurrency::internal::analysis
                     if (callee == nullptr || !functions_.contains(callee) ||
                         !reach.contains(*site->call))
                         continue;
+                    // Past a start into the handle, a join the callee makes of it waits for
+                    // another thread: the callee holds this one under no handle.
                     std::optional<std::string> calleeHandle;
-                    if (handle.has_value())
+                    if (handle.has_value() && reach.namedAt(*site->call))
                         calleeHandle = handleAtCallee(*handle, *site->call, site->calleeFunctionId);
                     started.merge(
                         atCaller(function, *site, startedWhileHeld(*callee, calleeHandle)));
