@@ -5133,6 +5133,22 @@ namespace
              .dataRace = 1,
              .missingJoin = 1,
              .countsAreMinimums = true},
+            // --- a thread a callee joins before starting another on its handle (#201) ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joined_then_restarted_by_callee_no_fp.c",
+             .intent = "a callee joining the thread its caller started before starting another on "
+                       "the handle ends the first at that join (#201)"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joined_then_restarted_through_outer_helper_no_fp.c",
+             .intent = "so does a function the callee hands the object on to"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_writing_between_its_join_and_its_restart_no_fp.c",
+             .intent = "what the callee writes between its join and its start runs beside neither "
+                       "thread"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_joined_by_nested_helper_before_callee_restart_no_fp.c",
+             .intent = "nor does what a function handed the object writes past its join, made before "
+                       "the callee fills the handle again"},
             // --- ... and taking a lock in that storage (#201) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_locking_first_field_of_its_storage_no_fp.c",
