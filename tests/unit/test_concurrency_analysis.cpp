@@ -681,6 +681,9 @@ namespace
 
         return assertTrue(hasPlace(*restarted, "main:34 ~ run:19"),
                           "main's read races with the thread restart leaves running") &&
+               assertTrue(
+                   !placesJoin(*restarted, "run", "run"),
+                   "run never races with itself: restart joined the first before the second") &&
                assertTrue(hasPlace(*rewriting, "main:51 ~ rewriting:34") &&
                               hasPlace(*rewriting, "main:52 ~ rewriting:35"),
                           "main races with rewriting on the handle and on value") &&
@@ -5016,10 +5019,9 @@ namespace
              .threadArgumentEscape = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_restarted_by_helper_read_before_second_join_race.c",
-             .intent = "a helper's join before the thread it leaves running does not end it; the "
-                       "self-race #201 reports is not pinned",
-             .dataRace = 1,
-             .countsAreMinimums = true},
+             .intent = "a helper's join before the thread it leaves running does not end it, and "
+                       "ends the one main started (#201)",
+             .dataRace = 1},
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_restarted_on_entry_parameter_rewriting_handle_race.c",
              .intent = "a restarted thread on a handed entry rewriting its handle races with main; "
