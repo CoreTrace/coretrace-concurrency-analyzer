@@ -827,8 +827,8 @@ namespace ctrace::concurrency::internal::analysis
                 for (const SpawnSite& spawn : sitesOf(function).spawns)
                 {
                     if (spawnIsLiveAt(function, spawn, point))
-                        started.insert(
-                            ThreadInstance{spawn.entryFunctionId, spawnHandle(function, spawn)});
+                        started.insert(ThreadInstance{spawn.entryFunctionId,
+                                                      spawnHandleAt(function, spawn, point)});
                 }
 
                 if (const auto calls = introducedByCalls_.find(&function);
@@ -1204,6 +1204,32 @@ namespace ctrace::concurrency::internal::analysis
                 {
                     return std::nullopt;
                 }
+                return spawn.handleGroupId;
+            }
+
+            /// The handle the thread `spawn` starts is matched on at `point`: the one every point
+            /// names it by or, for storage that receives other threads too, that storage at the
+            /// one call its completion is proven to rest on. The proof says the storage still
+            /// holds this thread when that call is made, and that the function called changes it
+            /// before none of its joins: a join of the handle it is handed waits for this thread.
+            /// No other point is told so. The join must have ended the thread on every path to a
+            /// return, no start this analysis counts into the storage may lie between the spawn
+            /// and the call, and the thread must not be one that may write its own handle.
+            [[nodiscard]] std::optional<std::string>
+            spawnHandleAt(const llvm::Function& function, const SpawnSite& spawn,
+                          const llvm::Instruction& point) const
+            {
+                if (std::optional<std::string> handle = spawnHandle(function, spawn))
+                    return handle;
+                if (!isNameableHandle(spawn.handleGroupId) || mayRewriteOwnHandle(spawn))
+                    return std::nullopt;
+                const auto* creation = llvm::dyn_cast<llvm::CallBase>(spawn.instruction);
+                const auto completion =
+                    creation != nullptr ? completions_.find(creation) : completions_.end();
+                if (completion == completions_.end() || !completion->second.ended.has_value() ||
+                    completion->second.joinedBy != &point ||
+                    !spawnReach(function, spawn).namedAt(point))
+                    return std::nullopt;
                 return spawn.handleGroupId;
             }
 
