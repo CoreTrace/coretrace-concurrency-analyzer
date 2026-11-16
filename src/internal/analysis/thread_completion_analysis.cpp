@@ -3000,6 +3000,44 @@ namespace ctrace::concurrency::internal::analysis
             return sites;
         }
 
+        /// The parameter of its function whose thread a join waits for, and where the handle lies
+        /// in what that parameter points to.
+        struct JoinedPlace
+        {
+            const llvm::Argument* parameter = nullptr;
+            std::int64_t offset = 0;
+            /// The handle is the parameter itself.
+            bool byValue = false;
+        };
+
+        /// Where the handle `site` joins lies. A handle travelling by value is the parameter
+        /// itself, or is read from a place a parameter points to: that place is then the handle
+        /// joined, as for one handed by address. One handed by address may lie at a constant
+        /// offset into the object a parameter points to, the offset of the helper the site calls
+        /// added. Nothing when the handle is not found from a parameter that way.
+        std::optional<JoinedPlace> joinedPlace(const JoinSite& site, const llvm::DataLayout& layout)
+        {
+            const llvm::Argument* parameter = nullptr;
+            const llvm::Value* address = &site.handle();
+            if (site.byValue)
+            {
+                const llvm::Value* read = invariantValue(&site.handle());
+                parameter = llvm::dyn_cast_or_null<llvm::Argument>(read);
+                address = parameter == nullptr && read != nullptr
+                              ? handleAddress(*read, /*byValue=*/true)
+                              : nullptr;
+            }
+            if (parameter != nullptr)
+                return JoinedPlace{.parameter = parameter, .byValue = true};
+            if (address == nullptr)
+                return std::nullopt;
+            const auto place = constantOffsetFrom(*address, site.offset, layout);
+            if (!place.has_value() || !llvm::isa<llvm::Argument>(place->first))
+                return std::nullopt;
+            return JoinedPlace{.parameter = llvm::cast<llvm::Argument>(place->first),
+                               .offset = place->second};
+        }
+
         /// Past this many calls deep, a chain of functions handing a thread on to the one joining
         /// it is not followed: the join it ends in is not trusted.
         constexpr std::size_t kMaxJoinDepth = 4;
@@ -3794,31 +3832,8 @@ namespace ctrace::concurrency::internal::analysis
                 for (const JoinSite& site :
                      joinSites(function, classifier, helpers, nullptr, /*atOffsets=*/true))
                 {
-                    // A handle travelling by value is the parameter itself, or is read from a place
-                    // a parameter points to: that place is then the handle joined, as for one
-                    // handed by address. One handed by address may lie at a constant offset into
-                    // the object a parameter points to, the offset of the helper the site calls
-                    // added.
-                    const llvm::Argument* parameter = nullptr;
-                    std::int64_t offset = 0;
-                    bool byValue = site.byValue;
-                    const llvm::Value* address = &site.handle();
-                    if (site.byValue)
-                    {
-                        const llvm::Value* read = invariantValue(&site.handle());
-                        parameter = llvm::dyn_cast_or_null<llvm::Argument>(read);
-                        byValue = parameter != nullptr;
-                        address = parameter == nullptr && read != nullptr
-                                      ? handleAddress(*read, /*byValue=*/true)
-                                      : nullptr;
-                    }
-                    if (parameter == nullptr && address != nullptr)
-                        if (const auto place = constantOffsetFrom(*address, site.offset, layout))
-                        {
-                            parameter = llvm::dyn_cast<llvm::Argument>(place->first);
-                            offset = place->second;
-                        }
-                    if (parameter == nullptr || !completionCoversReturns(entry, *site.call))
+                    const std::optional<JoinedPlace> place = joinedPlace(site, layout);
+                    if (!place.has_value() || !completionCoversReturns(entry, *site.call))
                         continue;
                     const bool ended =
                         site.success.has_value() && completionCoversReturns(entry, *site.success);
@@ -3827,7 +3842,8 @@ namespace ctrace::concurrency::internal::analysis
                     JoinedParameter* summary = nullptr;
                     for (JoinedParameter& existing : joined)
                     {
-                        if (existing.index == parameter->getArgNo() && existing.offset == offset)
+                        if (existing.index == place->parameter->getArgNo() &&
+                            existing.offset == place->offset)
                             summary = &existing;
                     }
                     if (summary == nullptr)
@@ -3836,9 +3852,9 @@ namespace ctrace::concurrency::internal::analysis
                         // end: past the bound, a join is not summarised.
                         if (joined.size() >= kMaxJoinedParameters)
                             continue;
-                        joined.push_back({.index = parameter->getArgNo(),
-                                          .byValue = byValue,
-                                          .offset = offset,
+                        joined.push_back({.index = place->parameter->getArgNo(),
+                                          .byValue = place->byValue,
+                                          .offset = place->offset,
                                           .ended = ended,
                                           .reported = reported});
                         changed = true;
