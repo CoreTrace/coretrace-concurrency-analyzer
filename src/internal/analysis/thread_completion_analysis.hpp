@@ -88,6 +88,13 @@ namespace ctrace::concurrency::internal::analysis
         std::optional<JoinSuccess> ended;
         /// Set along with `ended` when the join loop proving it joins each round's thread.
         std::optional<RoundJoin> roundJoin;
+        /// The call a proof pairing the spawn with one join rests on: that join, written in place,
+        /// or the call to the function making it. From the spawn to that call nothing the spawning
+        /// function does changes the storage of the handle, and a function making the join changes
+        /// it before none of its own joins. Where the call is handed the storage, no thread handed
+        /// it can have replaced the handle either, which a join written in place does not prove
+        /// (#210). Null for every other proof: a join loop, threads moved into a vector, a hand-off.
+        const llvm::CallBase* joinedBy = nullptr;
     };
 
     /// Keyed by the spawn, or by a call to a function filling a vector with every thread it leaves

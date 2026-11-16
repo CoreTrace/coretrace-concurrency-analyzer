@@ -4102,6 +4102,7 @@ namespace ctrace::concurrency::internal::analysis
                         completionCoversReturns(*create, *join.call))
                     {
                         ThreadCompletion completion;
+                        completion.joinedBy = join.call;
                         if (join.success.has_value() &&
                             completionCoversReturns(*create, *join.success))
                             completion.ended = join.success;
