@@ -699,6 +699,21 @@ namespace
                    "main's read races with rewriting despite the safe entry of another call");
     }
 
+    /// A callee fills again the handle of a thread still running, then hands it to a function that
+    /// joins it: that join waits for the new thread. The first runs on beside what the function
+    /// writes past its join, and beside a thread the function starts there on the entry it is
+    /// handed.
+    bool testThreadWhoseHandleACalleeFillsAgainOutlivesLaterJoinsOfIt()
+    {
+        const bool besideTheWrite =
+            racesInclude("data_race_thread_refilled_in_callee_then_joined_by_nested_helper_race.c",
+                         {"finish:30 ~ run:18", "run:18 ~ run:18"}, {});
+        const bool besideTheStart = racesInclude(
+            "data_race_thread_refilled_in_callee_then_nested_helper_starts_handed_entry_race.c",
+            {"run:19 ~ run:19"}, {});
+        return besideTheWrite && besideTheStart;
+    }
+
     /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
     /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
     /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
@@ -5103,6 +5118,21 @@ namespace
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_detaching_child_held_in_its_storage_no_fp.c",
              .intent = "nor does one detached by value"},
+            // --- a thread whose handle a callee fills again, then has joined ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_refilled_in_callee_then_joined_by_nested_helper_race.c",
+             .intent = "a join made once a callee has filled the handle again waits for the new "
+                       "thread: the first runs on beside what follows that join; main outliving it, "
+                       "unreported, is not pinned",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_refilled_in_callee_then_nested_helper_starts_handed_entry_race.c",
+             .intent = "nor does that join order the first thread before one started past it",
+             .dataRace = 1,
+             .missingJoin = 1,
+             .countsAreMinimums = true},
             // --- ... and taking a lock in that storage (#201) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_locking_first_field_of_its_storage_no_fp.c",
@@ -6999,6 +7029,7 @@ int main(int argc, char** argv)
         testEntryParameterThreadsKeepTheObjectOfTheirCall,
         testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds,
         testRestartedThreadsRaceWithMainAndNotWithTheJoinedOne,
+        testThreadWhoseHandleACalleeFillsAgainOutlivesLaterJoinsOfIt,
         testThreadHandedItsStorageStillRacesFirstAgainstSecond,
         testMemberPointerResolverRefusesAnAdjustment,
         testJoinSummariesKeepTheirOffsets,
