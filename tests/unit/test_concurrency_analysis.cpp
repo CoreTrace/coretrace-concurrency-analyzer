@@ -717,6 +717,65 @@ namespace
         return besideTheWrite && besideTheStart;
     }
 
+    /// A callee joins the thread its caller started, then starts another on the same handle. The
+    /// first ends at that join alone: what the callee writes before it runs beside the thread.
+    /// Where the join does not wait for the caller's thread, or not on every path, that thread
+    /// runs on: a handle overwritten, swapped, rewritten through another pointer or filled again
+    /// before the join, a thread started beside it, a join on one path, a join that failed, a
+    /// thread replacing its own handle, and a function overwriting the handle before joining it
+    /// on a path that exits (#201).
+    bool testThreadJoinedByACalleeBeforeItsRestartEndsAtThatJoinAlone()
+    {
+        struct ExpectedRaces
+        {
+            std::string_view fixture;
+            std::vector<std::string> wanted;
+            std::vector<std::string> unwanted;
+        };
+        const std::vector<ExpectedRaces> expectations = {
+            {"data_race_callee_writing_before_its_join_and_its_restart_race.c",
+             {"restart:23 ~ run:17"},
+             {}},
+            {"data_race_callee_overwriting_handle_before_its_join_and_restart_race.c",
+             {"main:43 ~ run:18", "run:18 ~ run:18"},
+             {}},
+            {"data_race_callee_swapping_handle_before_its_join_and_restart_race.c",
+             {"main:45 ~ run:18", "run:18 ~ run:18"},
+             {}},
+            {"data_race_callee_rewriting_handle_through_alias_before_its_join_race.c",
+             {"main:43 ~ run:18", "run:18 ~ run:18"},
+             {}},
+            {"data_race_callee_starting_into_handle_before_its_join_race.c",
+             {"main:33 ~ run:18", "run:18 ~ run:18"},
+             {}},
+            {"data_race_callee_refilling_handle_then_joining_by_nested_helper_race.c",
+             {"finish:26 ~ run:19", "run:19 ~ run:19"},
+             {}},
+            {"data_race_callee_starting_another_thread_before_its_join_race.c",
+             {"run:19 ~ run:19"},
+             {}},
+            {"data_race_callee_joining_on_one_path_before_its_restart_race.c",
+             {"main:36 ~ run:18", "run:18 ~ run:18"},
+             {}},
+            {"data_race_callee_restarting_without_joining_race.c",
+             {"main:32 ~ run:17", "run:17 ~ run:17"},
+             {}},
+            {"data_race_thread_rewriting_handle_joined_then_restarted_by_callee_race.c",
+             {"main:50 ~ rewriting:33", "rewriting:33 ~ run:25"},
+             {}},
+            {"data_race_restart_reporting_join_status_read_on_failure_race.c",
+             {"main:36 ~ run:19"},
+             {}},
+            {"data_race_handle_swapped_and_joined_on_path_that_never_returns_race.c",
+             {"run:20 ~ swap_and_join:36"},
+             {"run:20 ~ run:20"}},
+        };
+        bool passed = true;
+        for (const ExpectedRaces& expected : expectations)
+            passed = racesInclude(expected.fixture, expected.wanted, expected.unwanted) && passed;
+        return passed;
+    }
+
     /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
     /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
     /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
@@ -5151,6 +5210,80 @@ namespace
                      "data_race_thread_joined_by_nested_helper_before_callee_restart_no_fp.c",
              .intent = "nor does what a function handed the object writes past its join, made before "
                        "the callee fills the handle again"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_writing_before_its_join_and_its_restart_race.c",
+             .intent = "what the callee writes before its join runs beside the thread it then "
+                       "joins; the race of run with itself, false (#252), is not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_overwriting_handle_before_its_join_and_restart_race.c",
+             .intent = "a callee overwriting the handle before its join waits for another thread, "
+                       "and the first runs on; main outliving it, unreported, is not pinned",
+             .dataRace = 2,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_swapping_handle_before_its_join_and_restart_race.c",
+             .intent = "so does one swapping it with another thread's",
+             .dataRace = 2,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_rewriting_handle_through_alias_before_its_join_race.c",
+             .intent = "so does one overwriting it through a second pointer to the object",
+             .dataRace = 2,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_starting_into_handle_before_its_join_race.c",
+             .intent = "a callee starting a thread into the handle before its join waits for that "
+                       "thread, and the first runs on",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_refilling_handle_then_joining_by_nested_helper_race.c",
+             .intent = "so does one handing the handle it filled again to a function that joins it",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .threadArgumentEscape = 1},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_starting_another_thread_before_its_join_race.c",
+             .intent = "a thread the callee starts before its join runs beside the one it then joins",
+             .dataRace = 1,
+             .racingSymbol = "shared"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_joining_on_one_path_before_its_restart_race.c",
+             .intent = "a callee joining on one path only leaves the first thread running on the "
+                       "other; that thread, never joined there and outliving main, unreported, is "
+                       "not pinned",
+             .dataRace = 2,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_restarting_without_joining_race.c",
+             .intent = "a callee starting into the handle without joining it leaves the first thread "
+                       "running; main outliving it, unreported, is not pinned",
+             .dataRace = 2,
+             .missingJoin = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_thread_rewriting_handle_joined_then_restarted_by_callee_race.c",
+             .intent = "a thread replacing its own handle is not ended by the callee's join of it; "
+                       "that thread never joined, unreported, is not pinned",
+             .dataRace = 3,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_restart_reporting_join_status_read_on_failure_race.c",
+             .intent = "a callee's join that failed ended nothing: main's read on that branch races "
+                       "with the thread; the race of run with itself, false (#253), is not pinned",
+             .dataRace = 1,
+             .threadArgumentEscape = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_handle_swapped_and_joined_on_path_that_never_returns_race.c",
+             .intent = "the thread is taken to end at the callee's join alone: a function "
+                       "overwriting the handle and joining it on a path that exits waits for "
+                       "another; the missing join of the spare thread, false (#255), is not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
             // --- ... and taking a lock in that storage (#201) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_locking_first_field_of_its_storage_no_fp.c",
@@ -7048,6 +7181,7 @@ int main(int argc, char** argv)
         testThreadsOnAPointerReadOutOfAHandedObjectRunOnWhatItHolds,
         testRestartedThreadsRaceWithMainAndNotWithTheJoinedOne,
         testThreadWhoseHandleACalleeFillsAgainOutlivesLaterJoinsOfIt,
+        testThreadJoinedByACalleeBeforeItsRestartEndsAtThatJoinAlone,
         testThreadHandedItsStorageStillRacesFirstAgainstSecond,
         testMemberPointerResolverRefusesAnAdjustment,
         testJoinSummariesKeepTheirOffsets,
