@@ -776,6 +776,66 @@ namespace
         return passed;
     }
 
+    /// The thread a caller started is followed into the callee restarting its handle only where
+    /// that callee changes the handle once a join of it has certainly waited. On a path that
+    /// never returns a change may come first, and a helper joining on some of its paths only
+    /// then joins another thread: what it writes or reads past that join runs beside the caller's
+    /// thread. The handle is overwritten by that helper, by the callee itself, past the callee's
+    /// own join that failed, or by a thread the callee starts once it has published the object;
+    /// the callee may be reached through another function, and its own write may be the only
+    /// change. A join of another handle the object holds, made by the callee or by a function
+    /// overwriting this one, has waited for another thread and covers no change, whether the
+    /// helper is then called by the callee or by that function itself; nor does a join of
+    /// another object's thread, made through another parameter with the handle at the same place
+    /// in it. The access is named with its place: a count alone would not tell it from the races
+    /// these fixtures also report. On the other path the callee's join still ends the thread for
+    /// main, whose read past its own join races with nothing (#201).
+    bool testThreadOutlivesAJoinPastAChangeOfItsHandleOnAPathThatNeverReturns()
+    {
+        struct ExpectedRaces
+        {
+            std::string_view fixture;
+            std::vector<std::string> wanted;
+            std::vector<std::string> unwanted;
+        };
+        const std::vector<ExpectedRaces> expectations = {
+            {"data_race_callee_exit_path_helper_overwriting_then_joining_handle_race.c",
+             {"maybe:38 ~ run:20"},
+             {"main:59 ~ run:20"}},
+            {"data_race_callee_exit_path_overwriting_handle_joined_by_helper_race.c",
+             {"maybe_join:35 ~ run:20"},
+             {"main:59 ~ run:20"}},
+            {"data_race_callee_failed_join_path_helper_overwriting_then_joining_handle_race.c",
+             {"maybe:38 ~ run:20"},
+             {"main:57 ~ run:20"}},
+            {"data_race_callee_exit_path_publishing_handle_overwritten_by_thread_race.c",
+             {"maybe_join:49 ~ run:24"},
+             {}},
+            {"data_race_callee_exit_path_helper_overwriting_handle_through_outer_helper_race.c",
+             {"maybe:38 ~ run:20"},
+             {"main:64 ~ run:20"}},
+            {"data_race_callee_exit_path_overwriting_handle_read_past_helper_join_race.c",
+             {"maybe_join:38 ~ run:23"},
+             {"main:62 ~ run:23"}},
+            {"data_race_callee_exit_path_overwriting_handle_past_join_of_other_handle_race.c",
+             {"maybe_join:37 ~ run:22"},
+             {"main:63 ~ run:22"}},
+            {"data_race_callee_exit_path_helper_joining_other_handle_overwriting_handle_race.c",
+             {"maybe_join:45 ~ run:22"},
+             {"main:69 ~ run:22"}},
+            {"data_race_callee_exit_path_helper_joining_other_handle_then_joining_this_one_race.c",
+             {"maybe_join:38 ~ run:23"},
+             {"main:70 ~ run:23"}},
+            {"data_race_callee_exit_path_overwriting_handle_past_join_of_other_object_race.c",
+             {"maybe_join:43 ~ run:28"},
+             {"main:69 ~ run:28"}},
+        };
+        bool passed = true;
+        for (const ExpectedRaces& expected : expectations)
+            passed = racesInclude(expected.fixture, expected.wanted, expected.unwanted) && passed;
+        return passed;
+    }
+
     /// The resolver itself refuses a pointer-to-member adjusting `this`: the pair main reads in
     /// the base-adjustment control names std::thread::join with a non-zero adjustment, which it
     /// refuses, while the same pair with no adjustment names join. This tells a wrongly accepted
@@ -5284,6 +5344,79 @@ namespace
                        "another; the missing join of the spare thread, false (#255), is not pinned",
              .dataRace = 1,
              .countsAreMinimums = true},
+            // --- ... unless the callee may change the handle before a join of it has waited ---
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_helper_overwriting_then_joining_handle_race.c",
+             .intent = "a helper overwriting the handle on a path of the callee that exits joins "
+                       "another thread: what it writes runs beside the first; the race of run with "
+                       "itself (#256) and the spare's missing join (#255), false, are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_overwriting_handle_joined_by_helper_race.c",
+             .intent = "so does a helper joining the handle the callee overwrote there; the same "
+                       "two false diagnostics are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_failed_join_path_helper_overwriting_then_joining_handle_race.c",
+             .intent = "so does one overwriting it past the callee's own join that failed; the "
+                       "same two false diagnostics are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_publishing_handle_overwritten_by_thread_race.c",
+             .intent = "so does one joining a handle a thread overwrote through the address the "
+                       "callee published there; the race of run with itself (#256) and the spare's "
+                       "missing join, false, are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_helper_overwriting_handle_through_outer_helper_race.c",
+             .intent = "nor is the thread followed through a function calling such a callee; the "
+                       "same two false diagnostics are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_overwriting_handle_read_past_helper_join_race.c",
+             .intent = "the callee's own write of the handle is enough, the helper changing nothing; "
+                       "the same two false diagnostics are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_overwriting_handle_past_join_of_other_handle_race.c",
+             .intent = "a join of another handle the object holds waited for another thread: a "
+                       "change past it still comes while the first runs; the same two false "
+                       "diagnostics are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_helper_joining_other_handle_overwriting_handle_race.c",
+             .intent = "nor does a function joining that other handle before it overwrites this "
+                       "one cover its change; the same two false diagnostics are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_helper_joining_other_handle_then_joining_this_one_race.c",
+             .intent = "nor when that function itself calls the helper joining this handle, so "
+                       "that nothing the callee does past it is left to weigh; the same two false "
+                       "diagnostics are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exit_path_overwriting_handle_past_join_of_other_object_race.c",
+             .intent = "nor does a join of another object's thread, made through another parameter "
+                       "with the handle at the same place in it; the same two false diagnostics "
+                       "are not pinned",
+             .dataRace = 1,
+             .countsAreMinimums = true},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_exiting_on_path_changing_nothing_no_fp.c",
+             .intent = "a callee exiting on a path where it changes nothing of the object still "
+                       "ends the first thread at its join"},
+            {.path = "tests/fixtures/concurrency/data-race/"
+                     "data_race_callee_changing_then_exiting_past_its_join_no_fp.c",
+             .intent = "so does one writing the object and exiting once its join has waited"},
             // --- ... and taking a lock in that storage (#201) ---
             {.path = "tests/fixtures/concurrency/data-race/"
                      "data_race_thread_locking_first_field_of_its_storage_no_fp.c",
@@ -7182,6 +7315,7 @@ int main(int argc, char** argv)
         testRestartedThreadsRaceWithMainAndNotWithTheJoinedOne,
         testThreadWhoseHandleACalleeFillsAgainOutlivesLaterJoinsOfIt,
         testThreadJoinedByACalleeBeforeItsRestartEndsAtThatJoinAlone,
+        testThreadOutlivesAJoinPastAChangeOfItsHandleOnAPathThatNeverReturns,
         testThreadHandedItsStorageStillRacesFirstAgainstSecond,
         testMemberPointerResolverRefusesAnAdjustment,
         testJoinSummariesKeepTheirOffsets,
