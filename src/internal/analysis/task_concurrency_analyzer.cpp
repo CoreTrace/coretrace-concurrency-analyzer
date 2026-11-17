@@ -827,8 +827,8 @@ namespace ctrace::concurrency::internal::analysis
                 for (const SpawnSite& spawn : sitesOf(function).spawns)
                 {
                     if (spawnIsLiveAt(function, spawn, point))
-                        started.insert(
-                            ThreadInstance{spawn.entryFunctionId, spawnHandle(function, spawn)});
+                        started.insert(ThreadInstance{spawn.entryFunctionId,
+                                                      spawnHandleAt(function, spawn, point)});
                 }
 
                 if (const auto calls = introducedByCalls_.find(&function);
@@ -854,6 +854,9 @@ namespace ctrace::concurrency::internal::analysis
             }
 
             /// The threads running where `function` was called that are still running at `point`.
+            /// One arrives named by the handle its caller holds it in. Past a start into that
+            /// handle the storage holds another thread: the handle names this one no longer, here
+            /// or in a function handed it, whose join of it would wait for the other.
             [[nodiscard]] ThreadInstances inheritedAt(const llvm::Function& function,
                                                       const llvm::Instruction& point) const
             {
@@ -861,12 +864,15 @@ namespace ctrace::concurrency::internal::analysis
                 if (const auto inherited = inherited_.find(&function);
                     inherited != inherited_.end())
                 {
-                    // A handle that arrives named is not filled again here: every caller counts
-                    // this function's starts into it, and a handle filled twice is not named.
                     for (const ThreadInstance& instance : inherited->second)
                     {
-                        if (handleReach(function, nullptr, instance.handle).contains(point))
-                            live.insert(instance);
+                        const Reach& reach = handleReach(function, nullptr, instance.handle);
+                        if (!reach.contains(point))
+                            continue;
+                        ThreadInstance held = instance;
+                        if (!reach.namedAt(point))
+                            held.handle.reset();
+                        live.insert(std::move(held));
                     }
                 }
                 return live;
@@ -1201,6 +1207,32 @@ namespace ctrace::concurrency::internal::analysis
                 return spawn.handleGroupId;
             }
 
+            /// The handle the thread `spawn` starts is matched on at `point`: the one every point
+            /// names it by or, for storage that receives other threads too, that storage at the
+            /// one call its completion is proven to rest on. The proof says the storage still
+            /// holds this thread when that call is made, and that the function called changes it
+            /// before none of its joins: a join of the handle it is handed waits for this thread.
+            /// No other point is told so. The join must have ended the thread on every path to a
+            /// return, no start this analysis counts into the storage may lie between the spawn
+            /// and the call, and the thread must not be one that may write its own handle.
+            [[nodiscard]] std::optional<std::string>
+            spawnHandleAt(const llvm::Function& function, const SpawnSite& spawn,
+                          const llvm::Instruction& point) const
+            {
+                if (std::optional<std::string> handle = spawnHandle(function, spawn))
+                    return handle;
+                if (!isNameableHandle(spawn.handleGroupId) || mayRewriteOwnHandle(spawn))
+                    return std::nullopt;
+                const auto* creation = llvm::dyn_cast<llvm::CallBase>(spawn.instruction);
+                const auto completion =
+                    creation != nullptr ? completions_.find(creation) : completions_.end();
+                if (completion == completions_.end() || !completion->second.ended.has_value() ||
+                    completion->second.joinedBy != &point ||
+                    !spawnReach(function, spawn).namedAt(point))
+                    return std::nullopt;
+                return spawn.handleGroupId;
+            }
+
             /// Whether the thread `spawn` starts is handed the storage of its own handle and may
             /// write that handle: a join of the handle may then wait for another thread, so none
             /// ends it, in place or through a call, and no frame names it by the handle. The
@@ -1409,8 +1441,10 @@ namespace ctrace::concurrency::internal::analysis
                     if (callee == nullptr || !functions_.contains(callee) ||
                         !reach.contains(*site->call))
                         continue;
+                    // Past a start into the handle, a join the callee makes of it waits for
+                    // another thread: the callee holds this one under no handle.
                     std::optional<std::string> calleeHandle;
-                    if (handle.has_value())
+                    if (handle.has_value() && reach.namedAt(*site->call))
                         calleeHandle = handleAtCallee(*handle, *site->call, site->calleeFunctionId);
                     started.merge(
                         atCaller(function, *site, startedWhileHeld(*callee, calleeHandle)));

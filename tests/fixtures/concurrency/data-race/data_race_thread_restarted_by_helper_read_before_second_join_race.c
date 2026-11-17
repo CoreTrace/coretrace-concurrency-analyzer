@@ -2,8 +2,8 @@
 // A helper joins the thread main started, then starts another on the same handle: main reads while
 // the second runs, before joining it. The helper's own join comes before the thread it leaves
 // running, so it does not end it (#201).
-// Expected: at least one data race, main against run; the race of run with itself is the one #201
-// reports, and is not pinned.
+// Expected: one data race, main against run. The thread main started ended at the helper's join:
+// run does not race with itself.
 #include <pthread.h>
 #include <stddef.h>
 
